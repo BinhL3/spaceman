@@ -47,6 +47,7 @@ pub enum SnapshotError {
     MainThreadRequired,
     MainScreenUnavailable,
     WindowListUnavailable,
+    TargetWindowUnavailable,
 }
 
 impl std::fmt::Display for SnapshotError {
@@ -59,6 +60,9 @@ impl std::fmt::Display for SnapshotError {
             Self::MainScreenUnavailable => formatter.write_str("the main display is unavailable"),
             Self::WindowListUnavailable => {
                 formatter.write_str("the on-screen window list is unavailable")
+            }
+            Self::TargetWindowUnavailable => {
+                formatter.write_str("the target window is unavailable on attached displays")
             }
         }
     }
@@ -73,14 +77,54 @@ pub fn snapshot(cycle: u64) -> Result<(NativeObservation, Settings), SnapshotErr
 
     let marker = MainThreadMarker::new().ok_or(SnapshotError::MainThreadRequired)?;
     let screen = NSScreen::mainScreen(marker).ok_or(SnapshotError::MainScreenUnavailable)?;
-    let visible = screen.visibleFrame();
-    let full = screen.frame();
-    let output = Rect {
-        x: visible.origin.x.round() as i32,
-        y: (full.size.height - visible.origin.y - visible.size.height).round() as i32,
-        width: visible.size.width.round() as i32,
-        height: visible.size.height.round() as i32,
-    };
+    let primary_height = primary_screen_height(marker)?;
+    snapshot_in_output(cycle, screen_output(&screen, primary_height))
+}
+
+pub fn snapshot_for_window(
+    cycle: u64,
+    window_id: u32,
+) -> Result<(NativeObservation, Settings), SnapshotError> {
+    if !unsafe { AXIsProcessTrusted() } {
+        return Err(SnapshotError::AccessibilityPermissionRequired);
+    }
+    let marker = MainThreadMarker::new().ok_or(SnapshotError::MainThreadRequired)?;
+    let primary_height = primary_screen_height(marker)?;
+    let screens = NSScreen::screens(marker);
+    let outputs: Vec<_> = (0..screens.count())
+        .map(|index| screen_output(&screens.objectAtIndex(index), primary_height))
+        .collect();
+    let union = outputs
+        .iter()
+        .copied()
+        .reduce(union_rect)
+        .ok_or(SnapshotError::MainScreenUnavailable)?;
+    let (observation, _) = snapshot_in_output(cycle, union)?;
+    let frame = observation
+        .applications
+        .iter()
+        .find_map(|app| match app {
+            AppObservation::Complete { windows, .. } => windows
+                .iter()
+                .find(|window| window.id.window_id == window_id)
+                .map(|window| window.frame),
+            _ => None,
+        })
+        .ok_or(SnapshotError::TargetWindowUnavailable)?;
+    let output = outputs
+        .into_iter()
+        .find(|output| contains_center(*output, frame))
+        .ok_or(SnapshotError::TargetWindowUnavailable)?;
+    snapshot_in_output(cycle, output)
+}
+
+pub fn snapshot_in_output(
+    cycle: u64,
+    output: Rect,
+) -> Result<(NativeObservation, Settings), SnapshotError> {
+    if !unsafe { AXIsProcessTrusted() } {
+        return Err(SnapshotError::AccessibilityPermissionRequired);
+    }
     let onscreen = onscreen_windows().ok_or(SnapshotError::WindowListUnavailable)?;
 
     let running = NSWorkspace::sharedWorkspace().runningApplications();
@@ -103,6 +147,45 @@ pub fn snapshot(cycle: u64) -> Result<(NativeObservation, Settings), SnapshotErr
             frame_tolerance: DEFAULT_FRAME_TOLERANCE,
         },
     ))
+}
+
+fn primary_screen_height(marker: MainThreadMarker) -> Result<f64, SnapshotError> {
+    let screens = NSScreen::screens(marker);
+    (0..screens.count())
+        .map(|index| screens.objectAtIndex(index).frame())
+        .find(|frame| frame.origin.x == 0.0 && frame.origin.y == 0.0)
+        .map(|frame| frame.size.height)
+        .ok_or(SnapshotError::MainScreenUnavailable)
+}
+
+fn screen_output(screen: &NSScreen, primary_height: f64) -> Rect {
+    let visible = screen.visibleFrame();
+    Rect {
+        x: visible.origin.x.round() as i32,
+        y: (primary_height - visible.origin.y - visible.size.height).round() as i32,
+        width: visible.size.width.round() as i32,
+        height: visible.size.height.round() as i32,
+    }
+}
+
+fn union_rect(left: Rect, right: Rect) -> Rect {
+    let x = left.x.min(right.x);
+    let y = left.y.min(right.y);
+    Rect {
+        x,
+        y,
+        width: (left.x + left.width).max(right.x + right.width) - x,
+        height: (left.y + left.height).max(right.y + right.height) - y,
+    }
+}
+
+fn contains_center(output: Rect, frame: Rect) -> bool {
+    let center_x = frame.x + frame.width / 2;
+    let center_y = frame.y + frame.height / 2;
+    center_x >= output.x
+        && center_x < output.x + output.width
+        && center_y >= output.y
+        && center_y < output.y + output.height
 }
 
 pub fn apply(placements: &[Placement], settings: &Settings) -> Vec<ApplyResult> {

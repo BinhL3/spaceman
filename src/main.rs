@@ -71,11 +71,28 @@ fn main() -> ExitCode {
         #[cfg(target_os = "macos")]
         "watch" => match (args.next(), args.next(), args.next()) {
             (Some(cycles), None, None) => parse_cycles(&cycles)
-                .and_then(|cycles| run_watch(cycles, false))
+                .and_then(|cycles| run_watch(cycles, false, None))
                 .and_then(to_json),
             (Some(cycles), Some(flag), None) if flag == "--apply" => parse_cycles(&cycles)
-                .and_then(|cycles| run_watch(cycles, true))
+                .and_then(|cycles| run_watch(cycles, true, None))
                 .and_then(to_json),
+            _ => {
+                print_usage(&executable);
+                return ExitCode::from(2);
+            }
+        },
+        #[cfg(target_os = "macos")]
+        "watch-window" => match (args.next(), args.next(), args.next(), args.next()) {
+            (Some(window_id), Some(cycles), None, None) => parse_window_id(&window_id)
+                .and_then(|window_id| parse_cycles(&cycles).map(|cycles| (window_id, cycles)))
+                .and_then(|(window_id, cycles)| run_watch(cycles, false, Some(window_id)))
+                .and_then(to_json),
+            (Some(window_id), Some(cycles), Some(flag), None) if flag == "--apply" => {
+                parse_window_id(&window_id)
+                    .and_then(|window_id| parse_cycles(&cycles).map(|cycles| (window_id, cycles)))
+                    .and_then(|(window_id, cycles)| run_watch(cycles, true, Some(window_id)))
+                    .and_then(to_json)
+            }
             _ => {
                 print_usage(&executable);
                 return ExitCode::from(2);
@@ -108,6 +125,16 @@ fn print_usage(executable: &str) {
     eprintln!("       {executable} retile [--apply]");
     #[cfg(target_os = "macos")]
     eprintln!("       {executable} watch <cycles> [--apply]");
+    #[cfg(target_os = "macos")]
+    eprintln!("       {executable} watch-window <window-id> <cycles> [--apply]");
+}
+
+fn parse_window_id(value: &str) -> Result<u32, String> {
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|window_id| *window_id > 0)
+        .ok_or_else(|| "window ID must be a positive integer".into())
 }
 
 fn parse_cycles(value: &str) -> Result<u64, String> {
@@ -156,16 +183,38 @@ fn run_retile(should_apply: bool) -> Result<SnapshotOutput, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn run_watch(cycles: u64, should_apply: bool) -> Result<WatchOutput, String> {
+fn run_watch(
+    cycles: u64,
+    should_apply: bool,
+    initial_window_id: Option<u32>,
+) -> Result<WatchOutput, String> {
     let mut model = Model::default();
     let mut evidence = ReconciliationEvidence::default();
     let mut known_apps = HashMap::new();
+    let mut scope: Option<WindowScope> = None;
     let mut steps = Vec::new();
 
     for cycle in 1..=cycles {
-        let (mut observation, settings) =
-            spaceman::macos::snapshot(cycle).map_err(|error| error.to_string())?;
-        add_absent_applications(&mut observation, &mut known_apps);
+        let (mut observation, mut settings) = match (initial_window_id, scope.as_ref()) {
+            (Some(window_id), None) => spaceman::macos::snapshot_for_window(cycle, window_id),
+            (Some(_), Some(scope)) => spaceman::macos::snapshot_in_output(cycle, scope.output),
+            (None, _) => spaceman::macos::snapshot(cycle),
+        }
+        .map_err(|error| error.to_string())?;
+        if let Some(initial_window_id) = initial_window_id {
+            let active_scope = match &mut scope {
+                Some(scope) => scope,
+                None => scope.insert(WindowScope::discover(
+                    &observation,
+                    initial_window_id,
+                    settings.output,
+                )?),
+            };
+            active_scope.filter(&mut observation);
+            settings.output = active_scope.frame;
+        } else {
+            add_absent_applications(&mut observation, &mut known_apps);
+        }
         let reconciliation = reconcile(&model, &observation, &evidence, &settings);
         let incomplete = observation
             .applications
@@ -191,6 +240,117 @@ fn run_watch(cycles: u64, should_apply: bool) -> Result<WatchOutput, String> {
         }
     }
     Ok(WatchOutput { steps })
+}
+
+#[cfg(target_os = "macos")]
+struct WindowScope {
+    app: spaceman::AppInstanceId,
+    bundle_id: String,
+    frame: spaceman::Rect,
+    output: spaceman::Rect,
+    excluded_window_ids: HashSet<u32>,
+    authorized_window_ids: HashSet<u32>,
+    missing_cycles: u8,
+}
+
+#[cfg(target_os = "macos")]
+impl WindowScope {
+    fn discover(
+        observation: &NativeObservation,
+        window_id: u32,
+        output: spaceman::Rect,
+    ) -> Result<Self, String> {
+        observation
+            .applications
+            .iter()
+            .find_map(|app| match app {
+                spaceman::AppObservation::Complete { app, windows, .. } => windows
+                    .iter()
+                    .find(|window| window.id.window_id == window_id)
+                    .map(|window| Self {
+                        app: app.id.clone(),
+                        bundle_id: app.bundle_id.clone(),
+                        frame: window.frame,
+                        output,
+                        excluded_window_ids: windows
+                            .iter()
+                            .filter(|existing| existing.id.window_id != window_id)
+                            .map(|existing| existing.id.window_id)
+                            .collect(),
+                        authorized_window_ids: HashSet::from([window_id]),
+                        missing_cycles: 0,
+                    }),
+                _ => None,
+            })
+            .ok_or_else(|| format!("window {window_id} is not currently eligible"))
+    }
+
+    fn filter(&mut self, observation: &mut NativeObservation) {
+        let mut scoped = observation.applications.drain(..).find(|app| match app {
+            spaceman::AppObservation::Complete { app, .. } => app.id == self.app,
+            spaceman::AppObservation::Unavailable { app, .. }
+            | spaceman::AppObservation::Terminated { app } => app == &self.app,
+        });
+        if let Some(spaceman::AppObservation::Complete {
+            focused, windows, ..
+        }) = &mut scoped
+        {
+            windows.retain(|window| {
+                !self.excluded_window_ids.contains(&window.id.window_id)
+                    && window.frame.approximately_equals(self.frame, 100)
+            });
+            let selected = focused
+                .as_ref()
+                .and_then(|focused| windows.iter().find(|window| window.id == *focused))
+                .or_else(|| {
+                    windows
+                        .iter()
+                        .find(|window| self.authorized_window_ids.contains(&window.id.window_id))
+                })
+                .or_else(|| (windows.len() == 1).then(|| &windows[0]))
+                .map(|window| window.id.clone());
+            windows.retain(|window| selected.as_ref() == Some(&window.id));
+            if let Some(selected) = selected {
+                self.authorized_window_ids.insert(selected.window_id);
+            }
+            if focused
+                .as_ref()
+                .is_some_and(|focused| !windows.iter().any(|window| window.id == *focused))
+            {
+                *focused = None;
+            }
+            if windows.is_empty() {
+                self.missing_cycles = self.missing_cycles.saturating_add(1);
+            } else {
+                self.missing_cycles = 0;
+            }
+        }
+        if scoped.is_none() {
+            self.missing_cycles = self.missing_cycles.saturating_add(1);
+        }
+        if self.missing_cycles <= 8
+            && !matches!(
+                scoped,
+                Some(spaceman::AppObservation::Complete { ref windows, .. }) if !windows.is_empty()
+            )
+        {
+            scoped = Some(spaceman::AppObservation::Unavailable {
+                app: self.app.clone(),
+                error: "scoped window is settling or absent".into(),
+            });
+        }
+        observation.applications =
+            vec![
+                scoped.unwrap_or_else(|| spaceman::AppObservation::Complete {
+                    app: spaceman::ObservedApplication {
+                        id: self.app.clone(),
+                        bundle_id: self.bundle_id.clone(),
+                    },
+                    focused: None,
+                    windows: Vec::new(),
+                }),
+            ];
+    }
 }
 
 #[cfg(target_os = "macos")]

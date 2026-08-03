@@ -41,6 +41,24 @@ cargo run -- watch 20 --apply
 The bounded watch is intended for hands-on Ghostty tests: create, select, and close tabs while it is
 running, then inspect the per-cycle decisions in the JSON output.
 
+For isolated integration tests, scope the watcher and writes to one initial physical window ID. New
+physical IDs at the same logical frame are treated as candidates for that window's slot:
+
+```sh
+cargo run -- watch-window 12345 40 --apply
+```
+
+Run the complete autonomous Ghostty acceptance flow:
+
+```sh
+./scripts/live-ghostty-tabs.sh
+```
+
+The harness launches a disposable Ghostty process on an isolated AeroSpace workspace on the
+non-focused display, snapshots all existing window/workspace assignments, pauses AeroSpace while Spaceman owns layout, creates and
+switches native tabs through PID-targeted menu actions, closes the disposable group, restores every
+baseline workspace, and verifies that no test windows or workspace changes leaked.
+
 The repository also contains the implementation plan and supporting research:
 
 - [PLAN.md](PLAN.md) defines the MVP, architecture, milestones, and acceptance tests.
