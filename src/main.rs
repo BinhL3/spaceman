@@ -1,4 +1,10 @@
-use std::{env, fs, process::ExitCode};
+use std::{
+    collections::{HashMap, HashSet},
+    env, fs,
+    process::ExitCode,
+    thread,
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 use spaceman::{
@@ -29,6 +35,12 @@ struct SnapshotOutput {
     apply_results: Option<Vec<spaceman::macos::ApplyResult>>,
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Serialize)]
+struct WatchOutput {
+    steps: Vec<SnapshotOutput>,
+}
+
 fn main() -> ExitCode {
     let mut args = env::args();
     let executable = args.next().unwrap_or_else(|| "spaceman".into());
@@ -51,6 +63,19 @@ fn main() -> ExitCode {
         "retile" => match (args.next(), args.next()) {
             (None, None) => run_retile(false).and_then(to_json),
             (Some(flag), None) if flag == "--apply" => run_retile(true).and_then(to_json),
+            _ => {
+                print_usage(&executable);
+                return ExitCode::from(2);
+            }
+        },
+        #[cfg(target_os = "macos")]
+        "watch" => match (args.next(), args.next(), args.next()) {
+            (Some(cycles), None, None) => parse_cycles(&cycles)
+                .and_then(|cycles| run_watch(cycles, false))
+                .and_then(to_json),
+            (Some(cycles), Some(flag), None) if flag == "--apply" => parse_cycles(&cycles)
+                .and_then(|cycles| run_watch(cycles, true))
+                .and_then(to_json),
             _ => {
                 print_usage(&executable);
                 return ExitCode::from(2);
@@ -81,6 +106,16 @@ fn print_usage(executable: &str) {
     eprintln!("       {executable} snapshot");
     #[cfg(target_os = "macos")]
     eprintln!("       {executable} retile [--apply]");
+    #[cfg(target_os = "macos")]
+    eprintln!("       {executable} watch <cycles> [--apply]");
+}
+
+fn parse_cycles(value: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|cycles| *cycles > 0)
+        .ok_or_else(|| "cycles must be a positive integer".into())
 }
 
 fn to_json(value: impl Serialize) -> Result<String, String> {
@@ -118,6 +153,78 @@ fn run_retile(should_apply: bool) -> Result<SnapshotOutput, String> {
         reconciliation,
         apply_results,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn run_watch(cycles: u64, should_apply: bool) -> Result<WatchOutput, String> {
+    let mut model = Model::default();
+    let mut evidence = ReconciliationEvidence::default();
+    let mut known_apps = HashMap::new();
+    let mut steps = Vec::new();
+
+    for cycle in 1..=cycles {
+        let (mut observation, settings) =
+            spaceman::macos::snapshot(cycle).map_err(|error| error.to_string())?;
+        add_absent_applications(&mut observation, &mut known_apps);
+        let reconciliation = reconcile(&model, &observation, &evidence, &settings);
+        let incomplete = observation
+            .applications
+            .iter()
+            .any(|app| matches!(app, spaceman::AppObservation::Unavailable { .. }));
+        let apply_results = (should_apply && !incomplete)
+            .then(|| spaceman::macos::apply(&reconciliation.placements, &settings));
+
+        evidence.previous_placements = reconciliation
+            .placements
+            .iter()
+            .map(|placement| (placement.slot, placement.frame))
+            .collect();
+        model = reconciliation.model.clone();
+        steps.push(SnapshotOutput {
+            observation,
+            reconciliation,
+            apply_results,
+        });
+
+        if cycle < cycles {
+            thread::sleep(Duration::from_millis(250));
+        }
+    }
+    Ok(WatchOutput { steps })
+}
+
+#[cfg(target_os = "macos")]
+fn add_absent_applications(
+    observation: &mut NativeObservation,
+    known_apps: &mut HashMap<spaceman::AppInstanceId, String>,
+) {
+    let present: HashSet<_> = observation
+        .applications
+        .iter()
+        .map(|app| match app {
+            spaceman::AppObservation::Complete { app, .. } => app.id.clone(),
+            spaceman::AppObservation::Unavailable { app, .. }
+            | spaceman::AppObservation::Terminated { app } => app.clone(),
+        })
+        .collect();
+    for app in &observation.applications {
+        if let spaceman::AppObservation::Complete { app, .. } = app {
+            known_apps.insert(app.id.clone(), app.bundle_id.clone());
+        }
+    }
+    observation.applications.extend(
+        known_apps
+            .iter()
+            .filter(|(app, _)| !present.contains(*app))
+            .map(|(id, bundle_id)| spaceman::AppObservation::Complete {
+                app: spaceman::ObservedApplication {
+                    id: id.clone(),
+                    bundle_id: bundle_id.clone(),
+                },
+                focused: None,
+                windows: Vec::new(),
+            }),
+    );
 }
 
 fn run_replay(path: &str) -> Result<ReplayOutput, String> {

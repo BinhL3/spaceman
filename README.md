@@ -31,6 +31,16 @@ Apply the proposed layout only when the dry run contains the expected windows:
 cargo run -- retile --apply
 ```
 
+Exercise reconciliation across repeated live observations, optionally applying each accepted layout:
+
+```sh
+cargo run -- watch 20
+cargo run -- watch 20 --apply
+```
+
+The bounded watch is intended for hands-on Ghostty tests: create, select, and close tabs while it is
+running, then inspect the per-cycle decisions in the JSON output.
+
 The repository also contains the implementation plan and supporting research:
 
 - [PLAN.md](PLAN.md) defines the MVP, architecture, milestones, and acceptance tests.
@@ -38,9 +48,9 @@ The repository also contains the implementation plan and supporting research:
 
 ## Status
 
-Active development. Fixture replay, live main-display/current-Space observation, dry-run layout, and
-explicit frame application are executable and tested. The next vertical slice is a continuous runtime
-that preserves its model across observations; menu-bar packaging follows after that engine is stable.
+Active development. Fixture replay, live main-display/current-Space observation, bounded continuous
+reconciliation, dry-run layout, and explicit frame application are executable and tested. A persistent
+event-driven runtime and menu-bar packaging follow after the polling engine is stable.
 
 ## License
 
