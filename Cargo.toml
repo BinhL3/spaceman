@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "A macOS tiling window manager with stable logical windows"
+default-run = "spaceman"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -15,8 +16,21 @@ libc = "0.2"
 objc2 = { version = "0.6", default-features = false, features = ["std"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "libc",
+  "objc2-core-foundation",
+  "NSApplication",
+  "NSButton",
+  "NSCell",
+  "NSControl",
+  "NSImage",
+  "NSMenu",
+  "NSMenuItem",
+  "NSResponder",
   "NSRunningApplication",
   "NSScreen",
+  "NSStatusBar",
+  "NSStatusBarButton",
+  "NSStatusItem",
+  "NSView",
   "NSWorkspace",
 ] }
 objc2-application-services = { version = "0.3.2", default-features = false, features = [
@@ -43,8 +57,10 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "NSArray",
   "NSDate",
   "NSGeometry",
+  "NSObject",
   "NSString",
 ] }
+gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
 
 [lints.rust]
 unsafe_code = "deny"

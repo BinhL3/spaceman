@@ -50,6 +50,34 @@ cargo run -- run
 cargo run -- run --apply
 ```
 
+## Menu Bar App
+
+Build, sign, install, and open the zero-window menu-bar app at the stable path
+`~/Applications/Spaceman.app`:
+
+```sh
+./scripts/install-app.sh
+```
+
+The app starts paused. Its menu shows runtime status and provides **Automatic Tiling**, **Retile
+Now**, an Accessibility Settings shortcut, and **Quit Spaceman**. Grant Spaceman access under
+**System Settings → Privacy & Security → Accessibility** when prompted by the status message.
+
+To try Spaceman as the active window manager, pause AeroSpace first so the two managers do not fight:
+
+```sh
+aerospace enable off
+open "$HOME/Applications/Spaceman.app"
+```
+
+Then enable **Automatic Tiling** from the Spaceman menu.
+
+Restore AeroSpace after quitting Spaceman:
+
+```sh
+aerospace enable on
+```
+
 For isolated integration tests, scope the watcher and writes to one initial physical window ID. New
 physical IDs at the same logical frame are treated as candidates for that window's slot:
 

@@ -166,67 +166,6 @@ fn to_json(value: impl Serialize) -> Result<String, String> {
         .map_err(|error| format!("failed to encode output: {error}"))
 }
 
-#[cfg(all(test, target_os = "macos"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_mismatched_observed_frames_need_application() {
-        let app = spaceman::AppInstanceId {
-            pid: 10,
-            launched_at: 1,
-        };
-        let window = spaceman::PhysicalWindowId {
-            app: app.clone(),
-            window_id: 20,
-        };
-        let settings = Settings {
-            output: spaceman::Rect {
-                width: 200,
-                height: 100,
-                ..spaceman::Rect::default()
-            },
-            frame_tolerance: 2,
-        };
-        let mut observation = NativeObservation {
-            cycle: 1,
-            mouse_down: false,
-            applications: vec![spaceman::AppObservation::Complete {
-                app: spaceman::ObservedApplication {
-                    id: app,
-                    bundle_id: "com.example.Editor".into(),
-                },
-                focused: Some(window.clone()),
-                windows: vec![spaceman::ObservedWindow {
-                    id: window,
-                    frame: spaceman::Rect {
-                        width: 100,
-                        height: 100,
-                        ..spaceman::Rect::default()
-                    },
-                }],
-            }],
-        };
-        let reconciliation = reconcile(
-            &Model::default(),
-            &observation,
-            &ReconciliationEvidence::default(),
-            &settings,
-        );
-
-        assert_eq!(
-            applicable_placements(&observation, &reconciliation, &settings).len(),
-            1
-        );
-        let spaceman::AppObservation::Complete { windows, .. } = &mut observation.applications[0]
-        else {
-            unreachable!()
-        };
-        windows[0].frame = reconciliation.placements[0].frame;
-        assert!(applicable_placements(&observation, &reconciliation, &settings).is_empty());
-    }
-}
-
 #[cfg(target_os = "macos")]
 fn run_snapshot() -> Result<SnapshotOutput, String> {
     run_retile(false)
@@ -295,12 +234,13 @@ fn run_watch(
             active_scope.filter(&mut observation);
             settings.output = active_scope.frame;
         } else {
-            add_absent_applications(&mut observation, &mut known_apps);
+            spaceman::live::add_absent_applications(&mut observation, &mut known_apps);
         }
         let reconciliation = engine
             .accept(ticket, &observation, &settings)
             .map_err(|error| format!("stale synchronous cycle: {error:?}"))?;
-        let placements = applicable_placements(&observation, &reconciliation, &settings);
+        let placements =
+            spaceman::live::applicable_placements(&observation, &reconciliation, &settings);
         let apply_results = should_apply.then(|| spaceman::macos::apply(&placements, &settings));
 
         steps.push(SnapshotOutput {
@@ -355,11 +295,12 @@ fn run_persistent(should_apply: bool) -> Result<String, String> {
             engine.invalidate();
             break;
         }
-        add_absent_applications(&mut observation, &mut known_apps);
+        spaceman::live::add_absent_applications(&mut observation, &mut known_apps);
         let reconciliation = engine
             .accept(ticket, &observation, &settings)
             .map_err(|error| format!("stale synchronous cycle: {error:?}"))?;
-        let placements = applicable_placements(&observation, &reconciliation, &settings);
+        let placements =
+            spaceman::live::applicable_placements(&observation, &reconciliation, &settings);
         let apply_results = (should_apply && running.load(Ordering::Acquire)).then(|| {
             spaceman::macos::apply_while(&placements, &settings, || running.load(Ordering::Acquire))
         });
@@ -504,80 +445,6 @@ impl WindowScope {
                 }),
             ];
     }
-}
-
-#[cfg(target_os = "macos")]
-fn add_absent_applications(
-    observation: &mut NativeObservation,
-    known_apps: &mut HashMap<spaceman::AppInstanceId, String>,
-) {
-    let present: HashSet<_> = observation
-        .applications
-        .iter()
-        .map(|app| match app {
-            spaceman::AppObservation::Complete { app, .. } => app.id.clone(),
-            spaceman::AppObservation::Unavailable { app, .. }
-            | spaceman::AppObservation::Terminated { app } => app.clone(),
-        })
-        .collect();
-    for app in &observation.applications {
-        if let spaceman::AppObservation::Complete { app, .. } = app {
-            known_apps.insert(app.id.clone(), app.bundle_id.clone());
-        }
-    }
-    let missing: Vec<_> = known_apps
-        .iter()
-        .filter(|(app, _)| !present.contains(*app))
-        .map(|(app, bundle_id)| (app.clone(), bundle_id.clone()))
-        .collect();
-    for (app, bundle_id) in missing {
-        if spaceman::macos::is_process_incarnation_running(&app) {
-            observation
-                .applications
-                .push(spaceman::AppObservation::Complete {
-                    app: spaceman::ObservedApplication { id: app, bundle_id },
-                    focused: None,
-                    windows: Vec::new(),
-                });
-        } else {
-            known_apps.remove(&app);
-            observation
-                .applications
-                .push(spaceman::AppObservation::Terminated { app });
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn applicable_placements(
-    observation: &NativeObservation,
-    reconciliation: &Reconciliation,
-    settings: &Settings,
-) -> Vec<spaceman::Placement> {
-    let observed_frames: HashMap<_, _> = observation
-        .applications
-        .iter()
-        .flat_map(|app| match app {
-            spaceman::AppObservation::Complete { windows, .. } => windows.as_slice(),
-            spaceman::AppObservation::Unavailable { .. }
-            | spaceman::AppObservation::Terminated { .. } => &[],
-        })
-        .map(|window| (&window.id, window.frame))
-        .collect();
-    reconciliation
-        .placements
-        .iter()
-        .filter(|placement| {
-            placement
-                .window
-                .as_ref()
-                .and_then(|window| observed_frames.get(window))
-                .is_some_and(|frame| {
-                    !frame.approximately_equals(placement.frame, settings.frame_tolerance)
-                })
-        })
-        .cloned()
-        .collect()
 }
 
 fn run_replay(path: &str) -> Result<ReplayOutput, String> {

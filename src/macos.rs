@@ -71,21 +71,28 @@ impl std::fmt::Display for SnapshotError {
 type WindowIdFunction = unsafe extern "C" fn(&AXUIElement, *mut CGWindowID) -> AXError;
 
 pub fn snapshot(cycle: u64) -> Result<(NativeObservation, Settings), SnapshotError> {
-    if !unsafe { AXIsProcessTrusted() } {
+    if !accessibility_trusted() {
         return Err(SnapshotError::AccessibilityPermissionRequired);
     }
+    snapshot_in_output(cycle, main_output()?)
+}
 
+pub fn accessibility_trusted() -> bool {
+    unsafe { AXIsProcessTrusted() }
+}
+
+pub fn main_output() -> Result<Rect, SnapshotError> {
     let marker = MainThreadMarker::new().ok_or(SnapshotError::MainThreadRequired)?;
     let screen = NSScreen::mainScreen(marker).ok_or(SnapshotError::MainScreenUnavailable)?;
     let primary_height = primary_screen_height(marker)?;
-    snapshot_in_output(cycle, screen_output(&screen, primary_height))
+    Ok(screen_output(&screen, primary_height))
 }
 
 pub fn snapshot_for_window(
     cycle: u64,
     window_id: u32,
 ) -> Result<(NativeObservation, Settings), SnapshotError> {
-    if !unsafe { AXIsProcessTrusted() } {
+    if !accessibility_trusted() {
         return Err(SnapshotError::AccessibilityPermissionRequired);
     }
     let marker = MainThreadMarker::new().ok_or(SnapshotError::MainThreadRequired)?;
@@ -122,7 +129,7 @@ pub fn snapshot_in_output(
     cycle: u64,
     output: Rect,
 ) -> Result<(NativeObservation, Settings), SnapshotError> {
-    if !unsafe { AXIsProcessTrusted() } {
+    if !accessibility_trusted() {
         return Err(SnapshotError::AccessibilityPermissionRequired);
     }
     let onscreen = onscreen_windows().ok_or(SnapshotError::WindowListUnavailable)?;

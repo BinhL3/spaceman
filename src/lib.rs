@@ -1,4 +1,9 @@
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub mod app;
 pub mod geometry;
+#[cfg(target_os = "macos")]
+pub mod live;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 pub mod macos;
@@ -7,6 +12,9 @@ pub mod observation;
 pub mod reconcile;
 pub mod runtime;
 mod serde_map;
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod status_item;
 
 pub use geometry::{Axis, Rect};
 pub use model::{AppInstanceId, BindingState, Model, PhysicalWindowId, Slot, SlotId};
