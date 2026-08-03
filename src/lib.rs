@@ -5,6 +5,7 @@ pub mod macos;
 pub mod model;
 pub mod observation;
 pub mod reconcile;
+pub mod runtime;
 mod serde_map;
 
 pub use geometry::{Axis, Rect};
@@ -13,3 +14,4 @@ pub use observation::{AppObservation, NativeObservation, ObservedApplication, Ob
 pub use reconcile::{
     Decision, Placement, Reconciliation, ReconciliationEvidence, Settings, reconcile,
 };
+pub use runtime::{CycleTicket, Engine, StaleCycle};

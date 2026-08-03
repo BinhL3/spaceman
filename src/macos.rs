@@ -189,9 +189,18 @@ fn contains_center(output: Rect, frame: Rect) -> bool {
 }
 
 pub fn apply(placements: &[Placement], settings: &Settings) -> Vec<ApplyResult> {
+    apply_while(placements, settings, || true)
+}
+
+pub fn apply_while(
+    placements: &[Placement],
+    settings: &Settings,
+    mut should_continue: impl FnMut() -> bool,
+) -> Vec<ApplyResult> {
     let onscreen = onscreen_windows().unwrap_or_default();
     placements
         .iter()
+        .take_while(|_| should_continue())
         .filter_map(|placement| {
             placement.window.as_ref().map(|window| {
                 apply_window(window, placement.frame, settings, &onscreen).unwrap_or_else(|| {
@@ -300,6 +309,10 @@ fn process_incarnation_matches(id: &AppInstanceId) -> bool {
         let application = running.objectAtIndex(index);
         application.processIdentifier() == id.pid && launch_time(&application) == id.launched_at
     })
+}
+
+pub fn is_process_incarnation_running(id: &AppInstanceId) -> bool {
+    process_incarnation_matches(id)
 }
 
 fn launch_time(application: &NSRunningApplication) -> u64 {

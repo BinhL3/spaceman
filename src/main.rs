@@ -1,14 +1,19 @@
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
+    io::{self, Write},
     process::ExitCode,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
 use spaceman::{
-    Model, NativeObservation, Reconciliation, ReconciliationEvidence, Settings, reconcile,
+    Engine, Model, NativeObservation, Reconciliation, ReconciliationEvidence, Settings, reconcile,
 };
 
 #[derive(Deserialize)]
@@ -98,6 +103,15 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
         },
+        #[cfg(target_os = "macos")]
+        "run" => match (args.next(), args.next()) {
+            (None, None) => run_persistent(false),
+            (Some(flag), None) if flag == "--apply" => run_persistent(true),
+            _ => {
+                print_usage(&executable);
+                return ExitCode::from(2);
+            }
+        },
         _ => {
             eprintln!("unknown command: {command}");
             print_usage(&executable);
@@ -127,6 +141,8 @@ fn print_usage(executable: &str) {
     eprintln!("       {executable} watch <cycles> [--apply]");
     #[cfg(target_os = "macos")]
     eprintln!("       {executable} watch-window <window-id> <cycles> [--apply]");
+    #[cfg(target_os = "macos")]
+    eprintln!("       {executable} run [--apply]");
 }
 
 fn parse_window_id(value: &str) -> Result<u32, String> {
@@ -148,6 +164,67 @@ fn parse_cycles(value: &str) -> Result<u64, String> {
 fn to_json(value: impl Serialize) -> Result<String, String> {
     serde_json::to_string_pretty(&value)
         .map_err(|error| format!("failed to encode output: {error}"))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_mismatched_observed_frames_need_application() {
+        let app = spaceman::AppInstanceId {
+            pid: 10,
+            launched_at: 1,
+        };
+        let window = spaceman::PhysicalWindowId {
+            app: app.clone(),
+            window_id: 20,
+        };
+        let settings = Settings {
+            output: spaceman::Rect {
+                width: 200,
+                height: 100,
+                ..spaceman::Rect::default()
+            },
+            frame_tolerance: 2,
+        };
+        let mut observation = NativeObservation {
+            cycle: 1,
+            mouse_down: false,
+            applications: vec![spaceman::AppObservation::Complete {
+                app: spaceman::ObservedApplication {
+                    id: app,
+                    bundle_id: "com.example.Editor".into(),
+                },
+                focused: Some(window.clone()),
+                windows: vec![spaceman::ObservedWindow {
+                    id: window,
+                    frame: spaceman::Rect {
+                        width: 100,
+                        height: 100,
+                        ..spaceman::Rect::default()
+                    },
+                }],
+            }],
+        };
+        let reconciliation = reconcile(
+            &Model::default(),
+            &observation,
+            &ReconciliationEvidence::default(),
+            &settings,
+        );
+
+        assert_eq!(
+            applicable_placements(&observation, &reconciliation, &settings).len(),
+            1
+        );
+        let spaceman::AppObservation::Complete { windows, .. } = &mut observation.applications[0]
+        else {
+            unreachable!()
+        };
+        windows[0].frame = reconciliation.placements[0].frame;
+        assert!(applicable_placements(&observation, &reconciliation, &settings).is_empty());
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -188,17 +265,22 @@ fn run_watch(
     should_apply: bool,
     initial_window_id: Option<u32>,
 ) -> Result<WatchOutput, String> {
-    let mut model = Model::default();
-    let mut evidence = ReconciliationEvidence::default();
+    let mut engine = Engine::default();
     let mut known_apps = HashMap::new();
     let mut scope: Option<WindowScope> = None;
     let mut steps = Vec::new();
 
     for cycle in 1..=cycles {
+        engine.invalidate();
+        let ticket = engine.begin_cycle();
         let (mut observation, mut settings) = match (initial_window_id, scope.as_ref()) {
-            (Some(window_id), None) => spaceman::macos::snapshot_for_window(cycle, window_id),
-            (Some(_), Some(scope)) => spaceman::macos::snapshot_in_output(cycle, scope.output),
-            (None, _) => spaceman::macos::snapshot(cycle),
+            (Some(window_id), None) => {
+                spaceman::macos::snapshot_for_window(ticket.cycle, window_id)
+            }
+            (Some(_), Some(scope)) => {
+                spaceman::macos::snapshot_in_output(ticket.cycle, scope.output)
+            }
+            (None, _) => spaceman::macos::snapshot(ticket.cycle),
         }
         .map_err(|error| error.to_string())?;
         if let Some(initial_window_id) = initial_window_id {
@@ -215,20 +297,12 @@ fn run_watch(
         } else {
             add_absent_applications(&mut observation, &mut known_apps);
         }
-        let reconciliation = reconcile(&model, &observation, &evidence, &settings);
-        let incomplete = observation
-            .applications
-            .iter()
-            .any(|app| matches!(app, spaceman::AppObservation::Unavailable { .. }));
-        let apply_results = (should_apply && !incomplete)
-            .then(|| spaceman::macos::apply(&reconciliation.placements, &settings));
+        let reconciliation = engine
+            .accept(ticket, &observation, &settings)
+            .map_err(|error| format!("stale synchronous cycle: {error:?}"))?;
+        let placements = applicable_placements(&observation, &reconciliation, &settings);
+        let apply_results = should_apply.then(|| spaceman::macos::apply(&placements, &settings));
 
-        evidence.previous_placements = reconciliation
-            .placements
-            .iter()
-            .map(|placement| (placement.slot, placement.frame))
-            .collect();
-        model = reconciliation.model.clone();
         steps.push(SnapshotOutput {
             observation,
             reconciliation,
@@ -240,6 +314,85 @@ fn run_watch(
         }
     }
     Ok(WatchOutput { steps })
+}
+
+#[cfg(target_os = "macos")]
+fn run_persistent(should_apply: bool) -> Result<String, String> {
+    let running = Arc::new(AtomicBool::new(true));
+    let stop = Arc::clone(&running);
+    ctrlc::set_handler(move || stop.store(false, Ordering::Release))
+        .map_err(|error| format!("failed to install signal handler: {error}"))?;
+
+    let mut engine = Engine::default();
+    let mut known_apps = HashMap::new();
+    let mut output = io::BufWriter::new(io::stdout().lock());
+    let mut completed_cycles = 0_u64;
+
+    while running.load(Ordering::Acquire) {
+        engine.invalidate();
+        let ticket = engine.begin_cycle();
+        let (mut observation, settings) = match spaceman::macos::snapshot(ticket.cycle) {
+            Ok(snapshot) => snapshot,
+            Err(spaceman::macos::SnapshotError::AccessibilityPermissionRequired) => {
+                return Err(
+                    "Accessibility permission is required for the persistent runtime".into(),
+                );
+            }
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "type": "snapshot_error",
+                        "cycle": ticket.cycle,
+                        "error": error.to_string(),
+                    })
+                );
+                thread::sleep(Duration::from_millis(250));
+                continue;
+            }
+        };
+        if !running.load(Ordering::Acquire) {
+            engine.invalidate();
+            break;
+        }
+        add_absent_applications(&mut observation, &mut known_apps);
+        let reconciliation = engine
+            .accept(ticket, &observation, &settings)
+            .map_err(|error| format!("stale synchronous cycle: {error:?}"))?;
+        let placements = applicable_placements(&observation, &reconciliation, &settings);
+        let apply_results = (should_apply && running.load(Ordering::Acquire)).then(|| {
+            spaceman::macos::apply_while(&placements, &settings, || running.load(Ordering::Acquire))
+        });
+        let step = SnapshotOutput {
+            observation,
+            reconciliation,
+            apply_results,
+        };
+        serde_json::to_writer(
+            &mut output,
+            &serde_json::json!({ "type": "cycle", "step": step }),
+        )
+        .map_err(|error| format!("failed to encode runtime step: {error}"))?;
+        output
+            .write_all(b"\n")
+            .and_then(|()| output.flush())
+            .map_err(|error| format!("failed to write runtime step: {error}"))?;
+        completed_cycles += 1;
+
+        for _ in 0..10 {
+            if !running.load(Ordering::Acquire) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    Ok(serde_json::json!({
+        "type": "stopped",
+        "cycles": completed_cycles,
+        "revision": engine.revision(),
+    })
+    .to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -372,19 +525,59 @@ fn add_absent_applications(
             known_apps.insert(app.id.clone(), app.bundle_id.clone());
         }
     }
-    observation.applications.extend(
-        known_apps
-            .iter()
-            .filter(|(app, _)| !present.contains(*app))
-            .map(|(id, bundle_id)| spaceman::AppObservation::Complete {
-                app: spaceman::ObservedApplication {
-                    id: id.clone(),
-                    bundle_id: bundle_id.clone(),
-                },
-                focused: None,
-                windows: Vec::new(),
-            }),
-    );
+    let missing: Vec<_> = known_apps
+        .iter()
+        .filter(|(app, _)| !present.contains(*app))
+        .map(|(app, bundle_id)| (app.clone(), bundle_id.clone()))
+        .collect();
+    for (app, bundle_id) in missing {
+        if spaceman::macos::is_process_incarnation_running(&app) {
+            observation
+                .applications
+                .push(spaceman::AppObservation::Complete {
+                    app: spaceman::ObservedApplication { id: app, bundle_id },
+                    focused: None,
+                    windows: Vec::new(),
+                });
+        } else {
+            known_apps.remove(&app);
+            observation
+                .applications
+                .push(spaceman::AppObservation::Terminated { app });
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn applicable_placements(
+    observation: &NativeObservation,
+    reconciliation: &Reconciliation,
+    settings: &Settings,
+) -> Vec<spaceman::Placement> {
+    let observed_frames: HashMap<_, _> = observation
+        .applications
+        .iter()
+        .flat_map(|app| match app {
+            spaceman::AppObservation::Complete { windows, .. } => windows.as_slice(),
+            spaceman::AppObservation::Unavailable { .. }
+            | spaceman::AppObservation::Terminated { .. } => &[],
+        })
+        .map(|window| (&window.id, window.frame))
+        .collect();
+    reconciliation
+        .placements
+        .iter()
+        .filter(|placement| {
+            placement
+                .window
+                .as_ref()
+                .and_then(|window| observed_frames.get(window))
+                .is_some_and(|frame| {
+                    !frame.approximately_equals(placement.frame, settings.frame_tolerance)
+                })
+        })
+        .cloned()
+        .collect()
 }
 
 fn run_replay(path: &str) -> Result<ReplayOutput, String> {

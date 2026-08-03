@@ -41,6 +41,15 @@ cargo run -- watch 20 --apply
 The bounded watch is intended for hands-on Ghostty tests: create, select, and close tabs while it is
 running, then inspect the per-cycle decisions in the JSON output.
 
+Run the persistent polling engine in dry-run mode, or explicitly enable frame application. Each cycle
+is emitted as a tagged JSON line, transient snapshot failures are retried, and `Ctrl-C` performs a
+clean shutdown:
+
+```sh
+cargo run -- run
+cargo run -- run --apply
+```
+
 For isolated integration tests, scope the watcher and writes to one initial physical window ID. New
 physical IDs at the same logical frame are treated as candidates for that window's slot:
 

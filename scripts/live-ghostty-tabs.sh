@@ -226,6 +226,21 @@ physical_ids="$(jq '[.steps[].observation.applications[] | select(.status == "co
 window_menu_delta=$((tabbed_window_menu_items - initial_window_menu_items))
 applied="$(jq '[.steps[].apply_results[]? | select(.outcome == "applied")] | length' "$output")"
 apply_failures="$(jq '[.steps[].apply_results[]? | select(.outcome == "unavailable" or .outcome == "constrained")] | length' "$output")"
+pending_frames="$(jq '[
+  .steps[] as $step
+  | $step.reconciliation.placements[] as $placement
+  | select($placement.window != null)
+  | $step.observation.applications[]?
+  | select(.status == "complete")
+  | .windows[]?
+  | select(.id == $placement.window)
+  | select(
+      (.frame.x - $placement.frame.x > 2) or ($placement.frame.x - .frame.x > 2)
+      or (.frame.y - $placement.frame.y > 2) or ($placement.frame.y - .frame.y > 2)
+      or (.frame.width - $placement.frame.width > 2) or ($placement.frame.width - .frame.width > 2)
+      or (.frame.height - $placement.frame.height > 2) or ($placement.frame.height - .frame.height > 2)
+    )
+] | length' "$output")"
 
 if (( baseline != 1 || peak != 1 || managed_cycles < 2 )); then
   echo "FAIL: native tabs changed the logical slot count (baseline=$baseline peak=$peak managed_cycles=$managed_cycles)" >&2
@@ -247,8 +262,8 @@ if (( physical_ids < 4 || replacements < 3 )); then
   echo "FAIL: native physical replacement was not exercised (physical_ids=$physical_ids replacements=$replacements)" >&2
   exit 1
 fi
-if (( applied < 1 || apply_failures != 0 )); then
-  echo "FAIL: frame application did not converge cleanly (applied=$applied failures=$apply_failures)" >&2
+if (( (pending_frames > 0 && applied < 1) || apply_failures != 0 )); then
+  echo "FAIL: frame application did not converge cleanly (pending=$pending_frames applied=$applied failures=$apply_failures)" >&2
   exit 1
 fi
 if ! baseline_workspaces_restored; then
@@ -268,4 +283,5 @@ jq -n \
   --argjson window_menu_delta "$window_menu_delta" \
   --argjson created_native_tabs 3 \
   --argjson applied "$applied" \
-  '{status: "pass", output: $output, test_monitor: $test_monitor, baseline_slots: $baseline, peak_slots: $peak, final_slots: $final, created_native_tabs: $created_native_tabs, window_menu_delta: $window_menu_delta, physical_window_ids: $physical_ids, native_tab_replacements: $replacements, native_tab_ambiguities: $ambiguities, applied_frames: $applied}'
+  --argjson pending_frames "$pending_frames" \
+  '{status: "pass", output: $output, test_monitor: $test_monitor, baseline_slots: $baseline, peak_slots: $peak, final_slots: $final, created_native_tabs: $created_native_tabs, window_menu_delta: $window_menu_delta, physical_window_ids: $physical_ids, native_tab_replacements: $replacements, native_tab_ambiguities: $ambiguities, pending_frames: $pending_frames, applied_frames: $applied}'
