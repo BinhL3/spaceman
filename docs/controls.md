@@ -26,15 +26,17 @@ The menu-bar control shows active workspace/layout glyphs and runtime errors. It
 
 - `Disable Tiling`, or `Enable Tiling` while paused;
 - `Launch at Login`, shown checked when macOS has enabled the signed app bundle;
-- `Open Accessibility Settings...`;
+- `Settings...`, with Accessibility, launch-at-login, and software-update controls;
 - `Quit Spaceman`.
 
 If macOS reports that the login item requires approval, the menu label says
 `Launch at Login (Approval Required...)`; choosing it opens Login Items settings. Registration does
 not bypass macOS consent and does not affect the currently running process.
 
-Pausing and quitting restore parked windows before completing. Restoration retries are visible in the
-menu status.
+Pausing, quitting, and external macOS termination requests restore parked windows before completing.
+Restoration retries are visible in the menu status. Installing a Sparkle update uses the same
+restoration gate: Spaceman does not allow the installer or application termination to continue until
+parked windows are restored and their recovery metadata is durably removed.
 
 ## CLI
 

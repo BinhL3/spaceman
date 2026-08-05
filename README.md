@@ -30,11 +30,23 @@ Spaceman uses Accessibility APIs to observe, focus, move, and resize eligible wi
 SIP change. Read [Security and privacy](docs/security-and-privacy.md),
 [Compatibility](docs/compatibility.md), and [Limitations](docs/limitations.md) before trying it.
 
+## Install Preview
+
+The current preview is a Developer ID-signed, notarized arm64 build for Apple silicon Macs. It remains
+experimental; read [Known limitations](docs/limitations.md) before installing it.
+
+1. Disable every other window manager. For AeroSpace: `aerospace enable off`.
+2. Download [Spaceman 0.1.0 for Apple silicon](https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.0-macos-arm64.zip).
+3. Unzip it, move `Spaceman.app` to `~/Applications`, and open it.
+4. Complete the Accessibility setup shown by Spaceman.
+
+The matching [SHA-256 checksum](https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.0-macos-arm64.zip.sha256)
+is published alongside the archive. Later preview updates are signed and delivered through Sparkle.
+
 ## Install From Source
 
-There is no supported downloadable release artifact yet. The source build is distinct from a future
-signed and notarized release: **building the app currently requires your own `Developer ID
-Application` signing identity**.
+Source builds are distinct from the notarized preview artifact and require your own `Developer ID
+Application` signing identity.
 
 Requirements: macOS, Xcode command-line tools, Rust 1.95.0, and a Developer ID Application identity.
 
@@ -55,23 +67,24 @@ printf '\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$HOME/.zshrc"
 exec zsh
 ```
 
-Future release artifacts should not require users to possess a Developer ID identity. They do not
-exist yet; see [Releasing](docs/releasing.md).
+Artifact users do not need a Developer ID identity. See [Releasing](docs/releasing.md) for the
+maintainer workflow.
 
 ## First Open
 
 1. Disable every other window manager. For AeroSpace: `aerospace enable off`.
 2. Open Spaceman: `open "$HOME/Applications/Spaceman.app"`.
-3. Use `Open Accessibility Settings...` in the Spaceman menu and grant Spaceman access under
-   **System Settings > Privacy & Security > Accessibility**.
-4. Optionally enable `Launch at Login` in the Spaceman menu.
+3. Spaceman opens Settings when Accessibility access is missing. Choose `Grant Access`, then enable
+   Spaceman under **System Settings > Privacy & Security > Accessibility**.
+4. Optionally enable `Launch at Login` in Spaceman Settings.
 5. Confirm operation with `spaceman ctl status`.
 
 When hotkeys register successfully, Spaceman starts automatic tiling; it does not intentionally start
 paused. Without Accessibility permission, the menu reports the permission error and tiling cannot
 manage windows. The menu actions are `Disable Tiling` (or `Enable Tiling` while paused),
-`Launch at Login`, `Open Accessibility Settings...`, and `Quit Spaceman`. If macOS requires approval,
-the login item action opens **System Settings > General > Login Items & Extensions**.
+`Launch at Login`, `Settings...`, and `Quit Spaceman`. Settings shows Accessibility, launch-at-login,
+and signed software-update controls. If macOS requires approval, the login item action opens **System
+Settings > General > Login Items & Extensions**.
 
 ## Everyday Use
 

@@ -1,9 +1,9 @@
 # Releasing
 
 Spaceman is not release-ready merely because `scripts/build-app.sh` produces a signed bundle. The
-script builds locked release binaries, assembles `Spaceman.app`, applies hardened-runtime Developer ID
-signing with a timestamp, and verifies the signature. It does not create, notarize, staple, publish,
-or update an artifact.
+script builds locked release binaries, embeds Sparkle 2.9.4, assembles `Spaceman.app`, applies
+hardened-runtime Developer ID signing from the innermost Sparkle helpers outward, and verifies the
+signature. It does not notarize, staple, or publish an artifact.
 
 ## Direct Distribution
 
@@ -20,15 +20,37 @@ xcrun notarytool store-credentials spaceman-notary \
   --team-id "YOUR_TEAM_ID"
 ```
 
-Then build, sign, notarize, staple, validate, archive, and checksum the exact bundle:
+Add release notes at `docs/releases/<version>.md`, commit and push a clean release revision, then
+prepare the exact artifact:
 
 ```sh
-./scripts/release-app.sh
+SPACEMAN_FIRST_RELEASE=1 ./scripts/release-app.sh # initial release only
+./scripts/release-app.sh                         # subsequent releases
 ```
 
 The script auto-detects the first `Developer ID Application` identity and uses the
 `spaceman-notary` Keychain profile. Override those choices with `SPACEMAN_CODESIGN_IDENTITY` and
-`SPACEMAN_NOTARY_KEYCHAIN_PROFILE`. Successful artifacts are written to `dist/`.
+`SPACEMAN_NOTARY_KEYCHAIN_PROFILE`. Preparation builds, signs, notarizes, staples, validates, archives,
+checksums, and signs a local Sparkle appcast. Artifacts are written to `dist/` but are not uploaded.
+
+After testing the prepared archive, publish it and its appcast:
+
+```sh
+SPACEMAN_FIRST_RELEASE=1 ./scripts/release-app.sh publish # initial release only
+./scripts/release-app.sh publish                         # subsequent releases
+```
+
+Publishing uploads the immutable versioned ZIP, checksum, and latest alias before replacing
+`appcast.xml`. The script downloads and compares each public object before publishing the feed, then
+compares the public feed byte-for-byte. This artifact-first/feed-last order prevents clients from
+seeing an update whose download is not available. The bucket is `spaceman-releases`; the public URL
+is the `SUFeedURL` baked into `Info.plist`. A missing feed is accepted only when
+`SPACEMAN_FIRST_RELEASE=1` explicitly confirms initial publication; other fetch failures abort.
+
+Sparkle update archives and the appcast are signed with the Ed25519 private key stored in Keychain
+under service `https://sparkle-project.org`, account `ed25519`. Only its public key is embedded in
+`Info.plist`; release preparation derives the Keychain key's public half and refuses to continue if it
+does not match. Installed builds require a valid signed feed as well as a valid signed archive.
 
 ## Source Build
 

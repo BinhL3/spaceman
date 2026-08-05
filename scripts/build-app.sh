@@ -5,6 +5,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 bundle="$root/target/Spaceman.app"
 icon_output="$root/target/AppIcon.assets"
 icon_info="$root/target/AppIcon-info.plist"
+sparkle_dir=$("$root/scripts/setup-sparkle.sh")
 identity=${SPACEMAN_CODESIGN_IDENTITY:-}
 deployment_target=$(/usr/bin/plutil -extract LSMinimumSystemVersion raw "$root/app/Info.plist")
 cargo_bin=${CARGO:-}
@@ -41,7 +42,7 @@ MACOSX_DEPLOYMENT_TARGET="$deployment_target" \
   CARGO_TARGET_DIR="$root/target" \
   "$cargo_bin" build --manifest-path "$root/Cargo.toml" --release --locked --bins
 rm -rf "$bundle"
-mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
+mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" "$bundle/Contents/Frameworks"
 cp "$root/target/release/spaceman-agent" "$bundle/Contents/MacOS/spaceman-agent"
 cp "$root/target/release/spaceman" "$bundle/Contents/MacOS/spaceman"
 cp "$root/app/Info.plist" "$bundle/Contents/Info.plist"
@@ -58,7 +59,17 @@ xcrun actool "$root/app/AppIcon.icon" \
   --warnings \
   --notices >&2
 cp "$icon_output/AppIcon.icns" "$icon_output/Assets.car" "$bundle/Contents/Resources/"
+/usr/bin/ditto "$sparkle_dir/Sparkle.framework" "$bundle/Contents/Frameworks/Sparkle.framework"
 plutil -lint "$bundle/Contents/Info.plist" >/dev/null
+sparkle="$bundle/Contents/Frameworks/Sparkle.framework/Versions/B"
+codesign --force --timestamp --options runtime --sign "$identity" \
+  "$sparkle/XPCServices/Installer.xpc"
+codesign --force --timestamp --options runtime --preserve-metadata=entitlements --sign "$identity" \
+  "$sparkle/XPCServices/Downloader.xpc"
+codesign --force --timestamp --options runtime --sign "$identity" "$sparkle/Autoupdate"
+codesign --force --timestamp --options runtime --sign "$identity" "$sparkle/Updater.app"
+codesign --force --timestamp --options runtime --sign "$identity" \
+  "$bundle/Contents/Frameworks/Sparkle.framework"
 codesign --force --timestamp --options runtime --sign "$identity" \
   "$bundle/Contents/MacOS/spaceman-agent"
 codesign --force --timestamp --options runtime --sign "$identity" \

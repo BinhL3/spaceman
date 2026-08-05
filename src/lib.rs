@@ -4,6 +4,8 @@ pub mod app;
 pub mod config;
 #[cfg(target_os = "macos")]
 pub mod control;
+#[cfg(target_os = "macos")]
+mod desktop_ui;
 pub mod geometry;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
@@ -27,8 +29,16 @@ pub mod reconcile;
 pub mod runtime;
 mod serde_map;
 #[cfg(target_os = "macos")]
+mod settings;
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod sparkle;
+#[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod status_item;
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod termination;
 pub mod workspace;
 
 pub use geometry::{Axis, Rect};

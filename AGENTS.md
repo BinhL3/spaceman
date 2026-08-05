@@ -7,8 +7,9 @@ This file is the current engineering contract. README and `docs/` describe curre
 
 - `src/bin/spaceman-agent.rs`, `src/app.rs`: GPUI/AppKit foreground lifecycle, action queue, gestures,
   status, restore-before-exit coordination, and the worker boundary.
-- `src/status_item.rs`, `src/hotkeys.rs`, `src/keyboard_layout.rs`: main-thread menu bar and Carbon
-  global shortcut adapters.
+- `src/status_item.rs`, `src/settings.rs`, `src/sparkle.rs`, `src/termination.rs`: main-thread menu,
+  settings, signed updates, and asynchronous AppKit termination coordination.
+- `src/hotkeys.rs`, `src/keyboard_layout.rs`: Carbon global shortcut adapters.
 - `src/macos.rs`: Accessibility/Core Graphics observation and writes, display discovery, native event
   monitor, and native handle cache.
 - `src/observation.rs`, `src/model.rs`, `src/reconcile.rs`: immutable observations, stable logical slots,

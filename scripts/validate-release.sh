@@ -5,6 +5,8 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 plist="$root/app/Info.plist"
 expected_bundle_id=com.kitlangton.spaceman
 expected_executables="spaceman spaceman-agent"
+expected_feed_url=https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/appcast.xml
+expected_sparkle_key=mIek27lttJe8cIBqVZFhh6reRKjpTx1h9ZY9OKWPtuM=
 
 fail() {
   echo "release validation failed: $*" >&2
@@ -24,6 +26,9 @@ plist_version=$(plist_value CFBundleShortVersionString "$plist")
 plist_build=$(plist_value CFBundleVersion "$plist")
 bundle_id=$(plist_value CFBundleIdentifier "$plist")
 deployment_target=$(plist_value LSMinimumSystemVersion "$plist")
+feed_url=$(plist_value SUFeedURL "$plist")
+sparkle_key=$(plist_value SUPublicEDKey "$plist")
+signed_feed=$(plist_value SURequireSignedFeed "$plist")
 
 [ -n "$cargo_version" ] || fail "Cargo package version is missing"
 [ "$cargo_version" = "$plist_version" ] || \
@@ -35,6 +40,9 @@ case "$plist_build" in
   0) fail "CFBundleVersion must be greater than zero" ;;
 esac
 [ -n "$deployment_target" ] || fail "Info.plist does not declare LSMinimumSystemVersion"
+[ "$feed_url" = "$expected_feed_url" ] || fail "Info.plist has an unexpected Sparkle feed"
+[ "$sparkle_key" = "$expected_sparkle_key" ] || fail "Info.plist has an unexpected Sparkle public key"
+[ "$signed_feed" = true ] || fail "Info.plist does not require signed Sparkle feeds"
 /usr/bin/plutil -lint "$plist" >/dev/null || fail "source Info.plist is invalid"
 
 if [ "${1:-}" = "--metadata-only" ]; then
@@ -67,8 +75,16 @@ esac
   fail "built bundle deployment target differs from source Info.plist"
 [ "$(plist_value CFBundleExecutable "$bundle/Contents/Info.plist")" = "spaceman-agent" ] || \
   fail "built bundle has an unexpected main executable"
+[ "$(plist_value SUFeedURL "$bundle/Contents/Info.plist")" = "$expected_feed_url" ] || \
+  fail "built bundle has an unexpected Sparkle feed"
+[ "$(plist_value SUPublicEDKey "$bundle/Contents/Info.plist")" = "$expected_sparkle_key" ] || \
+  fail "built bundle has an unexpected Sparkle public key"
+[ "$(plist_value SURequireSignedFeed "$bundle/Contents/Info.plist")" = true ] || \
+  fail "built bundle does not require signed Sparkle feeds"
 [ -s "$bundle/Contents/Resources/AppIcon.icns" ] || fail "built bundle is missing AppIcon.icns"
 [ -s "$bundle/Contents/Resources/Assets.car" ] || fail "built bundle is missing Assets.car"
+[ -s "$bundle/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" ] || \
+  fail "built bundle is missing Sparkle.framework"
 
 for executable in $expected_executables; do
   path="$bundle/Contents/MacOS/$executable"
@@ -111,27 +127,23 @@ xcrun stapler validate "$bundle" || fail "bundle has no valid stapled notarizati
 
 /usr/bin/unzip -tq "$archive" >/dev/null || fail "ZIP integrity check failed"
 actual_contents=$(mktemp)
-expected_contents=$(mktemp)
 extracted=$(mktemp -d)
-trap 'rm -f "$actual_contents" "$expected_contents"; rm -rf "$extracted"' EXIT HUP INT TERM
-/usr/bin/unzip -Z1 "$archive" | LC_ALL=C sort >"$actual_contents"
-cat >"$expected_contents" <<'EOF'
-Spaceman.app/
-Spaceman.app/Contents/
-Spaceman.app/Contents/CodeResources
-Spaceman.app/Contents/Info.plist
-Spaceman.app/Contents/MacOS/
-Spaceman.app/Contents/MacOS/spaceman
-Spaceman.app/Contents/MacOS/spaceman-agent
-Spaceman.app/Contents/Resources/
-Spaceman.app/Contents/Resources/AppIcon.icns
-Spaceman.app/Contents/Resources/Assets.car
-Spaceman.app/Contents/_CodeSignature/
-Spaceman.app/Contents/_CodeSignature/CodeResources
-EOF
-LC_ALL=C sort -o "$expected_contents" "$expected_contents"
-/usr/bin/diff -u "$expected_contents" "$actual_contents" || \
-  fail "ZIP contains missing or unexpected files"
+trap 'rm -f "$actual_contents"; rm -rf "$extracted"' EXIT HUP INT TERM
+/usr/bin/unzip -Z1 "$archive" >"$actual_contents"
+if grep -Ev '^Spaceman\.app(/|$)' "$actual_contents" >/dev/null; then
+  fail "ZIP contains files outside Spaceman.app"
+fi
+for required in \
+  Spaceman.app/Contents/Info.plist \
+  Spaceman.app/Contents/MacOS/spaceman \
+  Spaceman.app/Contents/MacOS/spaceman-agent \
+  Spaceman.app/Contents/Resources/AppIcon.icns \
+  Spaceman.app/Contents/Resources/Assets.car \
+  Spaceman.app/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle \
+  Spaceman.app/Contents/_CodeSignature/CodeResources
+do
+  grep -Fxq "$required" "$actual_contents" || fail "ZIP is missing $required"
+done
 /usr/bin/unzip -qq "$archive" -d "$extracted"
 for relative_path in \
   Contents/CodeResources \
@@ -140,6 +152,7 @@ for relative_path in \
   Contents/MacOS/spaceman-agent \
   Contents/Resources/AppIcon.icns \
   Contents/Resources/Assets.car \
+  Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle \
   Contents/_CodeSignature/CodeResources
 do
   /usr/bin/cmp "$bundle/$relative_path" "$extracted/Spaceman.app/$relative_path" || \

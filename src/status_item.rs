@@ -36,9 +36,9 @@ objc2::define_class!(
             let _ = self.ivars().actions.send(Action::Retile);
         }
 
-        #[unsafe(method(openAccessibility:))]
-        fn open_accessibility(&self, _sender: &NSObject) {
-            let _ = self.ivars().actions.send(Action::OpenAccessibility);
+        #[unsafe(method(openSettings:))]
+        fn open_settings(&self, _sender: &NSObject) {
+            let _ = self.ivars().actions.send(Action::OpenSettings);
         }
 
         #[unsafe(method(toggleLaunchAtLogin:))]
@@ -98,9 +98,9 @@ pub fn install(sender: Sender<Action>) -> Result<(), String> {
     menu.addItem(&launch_at_login);
     menu.addItem(&NSMenuItem::separatorItem(marker));
     menu.addItem(&action_item(
-        "Open Accessibility Settings...",
+        "Settings...",
         &target,
-        sel!(openAccessibility:),
+        sel!(openSettings:),
         marker,
     ));
     menu.addItem(&NSMenuItem::separatorItem(marker));

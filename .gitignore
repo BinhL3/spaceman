@@ -4,6 +4,7 @@ DerivedData/
 *.xcuserstate
 target/
 /dist/
+.wrangler/
 .release.env
 *.p12
 *.provisionprofile

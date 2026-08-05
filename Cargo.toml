@@ -19,6 +19,7 @@ ctrlc = { version = "3", features = ["termination"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 libc = "0.2"
+libloading = "0.9"
 objc2 = { version = "0.6", default-features = false, features = ["std"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "block2",
@@ -69,12 +70,15 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
   "CGWindow",
 ] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
+  "block2",
   "NSArray",
   "NSAttributedString",
   "NSDictionary",
   "NSDate",
   "NSGeometry",
+  "NSNotification",
   "NSObject",
+  "NSOperation",
   "NSValue",
   "NSString",
 ] }

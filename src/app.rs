@@ -22,7 +22,7 @@ use crate::{
     config::{Config, WindowDisposition},
     control::{self, Command as ControlCommand, Request as ControlRequest},
     hotkeys::{HotkeyPlan, Hotkeys},
-    live, login_item, macos, status_item,
+    live, login_item, macos, settings, sparkle, status_item, termination,
 };
 
 /// Timestamped diagnostic line on stderr (redirected to `agent.log` in bundle
@@ -131,7 +131,11 @@ pub(crate) enum Action {
     Resize(ResizeDirection),
     Balance,
     ToggleMaximize,
+    OpenSettings,
     OpenAccessibility,
+    CheckForUpdates,
+    InstallUpdate,
+    Terminate,
     ToggleLaunchAtLogin,
     Restart,
     Quit,
@@ -169,7 +173,11 @@ impl TryFrom<Action> for WorkerAction {
             Action::Balance => Ok(Self::Balance),
             Action::ToggleMaximize => Ok(Self::ToggleMaximize),
             Action::ToggleAutomatic
+            | Action::OpenSettings
             | Action::OpenAccessibility
+            | Action::CheckForUpdates
+            | Action::InstallUpdate
+            | Action::Terminate
             | Action::ToggleLaunchAtLogin
             | Action::Restart
             | Action::Quit => Err(()),
@@ -215,6 +223,8 @@ enum FinalGesture {
 enum ExitIntent {
     Quit,
     Restart,
+    Update,
+    Terminate,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -558,11 +568,17 @@ pub fn run() -> Result<(), String> {
             NSApplication::sharedApplication(marker)
                 .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         }
-        if let Err(error) = status_item::install(actions_sender.clone()) {
-            log_event!("failed to install Spaceman status item: {error}");
+        if let Err(error) = termination::install(actions_sender.clone()) {
+            log_event!("failed to install application termination gate: {error}");
             cx.quit();
             return;
         }
+        if let Err(error) = status_item::install(actions_sender.clone()) {
+            log_event!("failed to install Spaceman status item: {error}");
+            quit_app(cx);
+            return;
+        }
+        sparkle::start(actions_sender.clone());
         match login_item::status() {
             Ok(status) => status_item::set_launch_at_login(status),
             Err(error) => status_item::set_status(&format!("Launch at Login unavailable: {error}")),
@@ -574,6 +590,9 @@ pub fn run() -> Result<(), String> {
         }
         if !macos::accessibility_trusted() {
             status_item::set_status("Paused · Accessibility required");
+            if let Err(error) = settings::open(actions_sender.clone(), cx) {
+                status_item::set_status(&format!("Could not open Settings: {error}"));
+            }
         }
         let events = macos::WindowEventMonitor::new();
         cx.spawn(async move |cx| {
@@ -598,6 +617,11 @@ pub fn run() -> Result<(), String> {
         .detach();
     });
     Ok(())
+}
+
+fn quit_app(cx: &mut gpui::App) {
+    termination::allow_next();
+    cx.quit();
 }
 
 async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
@@ -665,9 +689,21 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                 Err(TryRecvError::Disconnected) => {
                     _hotkeys = None;
                     status_item::set_automatic(false);
+                    if exit_intent.is_some_and(|intent| {
+                        matches!(intent, ExitIntent::Update | ExitIntent::Terminate)
+                    }) {
+                        automatic = false;
+                        worker_busy = false;
+                        last_error =
+                            Some("Exit blocked because window restoration is unavailable".into());
+                        status_item::set_status("Exit blocked · restoration unavailable");
+                        break;
+                    }
                     status_item::set_status("Worker stopped unexpectedly");
-                    if exit_intent.is_some() {
-                        let _ = cx.update(|cx| cx.quit());
+                    if exit_intent.is_some_and(|intent| {
+                        !matches!(intent, ExitIntent::Update | ExitIntent::Terminate)
+                    }) {
+                        let _ = cx.update(quit_app);
                         return;
                     }
                     automatic = false;
@@ -702,9 +738,36 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                         last_error = Some(error);
                     }
                 }
+                WorkerResult::Restored { failed: 0 } if exit_intent == Some(ExitIntent::Update) => {
+                    let _ = commands.send(WorkerCommand::Stop);
+                    worker_busy = false;
+                    restoring = false;
+                    let continuation = cx
+                        .update(|_| sparkle::continue_install())
+                        .map_err(|error| error.to_string())
+                        .and_then(|result| result);
+                    match continuation {
+                        Ok(()) => {
+                            termination::allow_next();
+                            status_item::set_status("Installing update...");
+                        }
+                        Err(error) => {
+                            log_event!("Sparkle continuation failed after restoration: {error}");
+                            let _ = cx.update(quit_app);
+                            return;
+                        }
+                    }
+                }
+                WorkerResult::Restored { failed: 0 }
+                    if exit_intent == Some(ExitIntent::Terminate) =>
+                {
+                    let _ = commands.send(WorkerCommand::Stop);
+                    termination::reply(true);
+                    return;
+                }
                 WorkerResult::Restored { failed: 0 } if exit_intent.is_some() => {
                     let _ = commands.send(WorkerCommand::Stop);
-                    let _ = cx.update(|cx| cx.quit());
+                    let _ = cx.update(quit_app);
                     return;
                 }
                 WorkerResult::Restored { failed: 0 } => {
@@ -722,8 +785,12 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
             if restore_pending && !worker_busy {
                 restore_pending = false;
                 send_restore(&commands, &mut worker_busy, &mut restoring);
-                if !worker_busy && exit_intent.is_some() {
-                    let _ = cx.update(|cx| cx.quit());
+                if !worker_busy
+                    && exit_intent.is_some_and(|intent| {
+                        !matches!(intent, ExitIntent::Update | ExitIntent::Terminate)
+                    })
+                {
+                    let _ = cx.update(quit_app);
                     return;
                 }
             }
@@ -735,6 +802,10 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                         "restarting"
                     } else if exit_intent == Some(ExitIntent::Quit) {
                         "quitting"
+                    } else if exit_intent == Some(ExitIntent::Update) {
+                        "updating"
+                    } else if exit_intent == Some(ExitIntent::Terminate) {
+                        "terminating"
                     } else if restoring || restore_pending {
                         "restoring"
                     } else if automatic {
@@ -892,10 +963,25 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                         }
                     }
                 }
+                Action::OpenSettings => {
+                    let actions = actions_sender.clone();
+                    let result = cx
+                        .update(|cx| settings::open(actions, cx))
+                        .map_err(|error| error.to_string())
+                        .and_then(|result| result);
+                    if let Err(error) = result {
+                        status_item::set_status(&format!("Could not open Settings: {error}"));
+                    }
+                }
                 Action::OpenAccessibility => open_accessibility_settings(),
+                Action::CheckForUpdates => {
+                    sparkle::check_for_updates();
+                    let _ = cx.update(settings::refresh);
+                }
                 Action::ToggleLaunchAtLogin => match login_item::toggle() {
                     Ok(status) => {
                         status_item::set_launch_at_login(status);
+                        let _ = cx.update(settings::refresh);
                         if status == login_item::Status::RequiresApproval {
                             status_item::set_status(
                                 "Launch at Login requires approval in System Settings",
@@ -908,11 +994,12 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                         ));
                     }
                 },
-                Action::Restart | Action::Quit => {
-                    let intent = if matches!(action, Action::Restart) {
-                        ExitIntent::Restart
-                    } else {
-                        ExitIntent::Quit
+                Action::Restart | Action::Quit | Action::InstallUpdate | Action::Terminate => {
+                    let intent = match action {
+                        Action::Restart => ExitIntent::Restart,
+                        Action::InstallUpdate => ExitIntent::Update,
+                        Action::Terminate => ExitIntent::Terminate,
+                        _ => ExitIntent::Quit,
                     };
                     automatic = false;
                     exit_intent = Some(intent);
@@ -930,10 +1017,22 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                         status_item::set_status(match intent {
                             ExitIntent::Quit => "Restoring windows...",
                             ExitIntent::Restart => "Restarting · restoring windows...",
+                            ExitIntent::Update => "Update ready · restoring windows...",
+                            ExitIntent::Terminate => "Terminating · restoring windows...",
                         });
                     } else {
-                        let _ = cx.update(|cx| cx.quit());
-                        return;
+                        match intent {
+                            ExitIntent::Update | ExitIntent::Terminate => {
+                                last_error = Some(
+                                    "Exit blocked because window restoration is unavailable".into(),
+                                );
+                                status_item::set_status("Exit blocked · restoration unavailable");
+                            }
+                            ExitIntent::Quit | ExitIntent::Restart => {
+                                let _ = cx.update(quit_app);
+                                return;
+                            }
+                        }
                     }
                 }
                 action => {
@@ -969,11 +1068,18 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
             next_restore_retry = None;
             send_restore(&commands, &mut worker_busy, &mut restoring);
             if !worker_busy {
-                if exit_intent.is_some() {
-                    let _ = cx.update(|cx| cx.quit());
-                    return;
+                match exit_intent {
+                    Some(ExitIntent::Update | ExitIntent::Terminate) => {
+                        last_error =
+                            Some("Exit blocked because window restoration is unavailable".into());
+                        status_item::set_status("Exit blocked · restoration unavailable");
+                    }
+                    Some(ExitIntent::Quit | ExitIntent::Restart) => {
+                        let _ = cx.update(quit_app);
+                        return;
+                    }
+                    None => status_item::set_status("Paused · worker unavailable"),
                 }
-                status_item::set_status("Paused · worker unavailable");
             }
         }
         if automatic {
@@ -3114,24 +3220,23 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
 
     fn restore_all(&mut self) -> usize {
         let parked: Vec<_> = self.parked.keys().cloned().collect();
-        let mut failed = 0;
         let mut restored = Vec::new();
         for window in parked {
             let frame = self.parked[&window];
             match self.restore_window_uncommitted(&window) {
-                macos::ApplyOutcome::Applied | macos::ApplyOutcome::Gone => {
-                    if self.parked.contains_key(&window) {
-                        // Pending window-server confirmation; retry will finish it.
-                        failed += 1;
-                    } else {
-                        restored.push((window, frame));
-                    }
+                macos::ApplyOutcome::Applied | macos::ApplyOutcome::Gone
+                    if !self.parked.contains_key(&window) =>
+                {
+                    restored.push((window, frame));
                 }
-                _ => failed += 1,
+                _ => {}
             }
         }
         self.persist_removals_or_rollback(restored);
-        failed
+        // Persistence failure rolls recovery entries back into this map. The
+        // caller may only exit when both native restoration and durable state
+        // removal have completed.
+        self.parked.len()
     }
 
     fn forget_window(&mut self, workspace: WorkspaceId, window: &crate::PhysicalWindowId) {
@@ -3949,8 +4054,13 @@ mod tests {
     }
 
     #[test]
-    fn quit_and_restart_both_restore_before_exiting() {
-        for intent in [ExitIntent::Quit, ExitIntent::Restart] {
+    fn every_exit_intent_restores_before_exiting() {
+        for intent in [
+            ExitIntent::Quit,
+            ExitIntent::Restart,
+            ExitIntent::Update,
+            ExitIntent::Terminate,
+        ] {
             assert_eq!(exit_restore_plan(intent, false), RestorePlan::Now);
             assert_eq!(exit_restore_plan(intent, true), RestorePlan::AfterWorker);
         }
@@ -5284,6 +5394,7 @@ mod tests {
 
         assert_eq!(runtime.backend.frames[&window], normal);
         assert_eq!(runtime.parked[&window], normal);
+        assert_eq!(runtime.restore_all(), 1);
     }
 
     #[test]

@@ -13,8 +13,11 @@ size are settable. It does not require disabling System Integrity Protection.
 
 ## Data Handling
 
-Spaceman currently has no telemetry, analytics, network requests, or update checks. Runtime data stays
-on the Mac unless the user shares CLI output or files.
+Spaceman has no telemetry or analytics. Packaged release builds use Sparkle to request the signed
+`appcast.xml` update feed and, when an update is selected, its signed archive from Spaceman's public
+Cloudflare R2 bucket. Automatic checks are enabled; automatic installation is not. Source CLI and
+test binaries have no adjacent Sparkle framework and do not perform update checks. Other runtime data
+stays on the Mac unless the user shares CLI output or files.
 
 The optional `Launch at Login` menu action registers or unregisters the signed main app through
 macOS Service Management. Registration is stored and enforced by macOS; Spaceman does not install a
