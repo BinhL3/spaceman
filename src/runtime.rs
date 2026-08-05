@@ -345,6 +345,7 @@ mod tests {
                         height: 100,
                         ..Rect::default()
                     },
+                    resizable: true,
                     title: None,
                 }],
             }],

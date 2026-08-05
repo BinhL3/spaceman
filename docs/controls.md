@@ -25,8 +25,13 @@ during the gesture and applies the final result on mouse-up.
 The menu-bar control shows active workspace/layout glyphs and runtime errors. Its actions are:
 
 - `Disable Tiling`, or `Enable Tiling` while paused;
+- `Launch at Login`, shown checked when macOS has enabled the signed app bundle;
 - `Open Accessibility Settings...`;
 - `Quit Spaceman`.
+
+If macOS reports that the login item requires approval, the menu label says
+`Launch at Login (Approval Required...)`; choosing it opens Login Items settings. Registration does
+not bypass macOS consent and does not affect the currently running process.
 
 Pausing and quitting restore parked windows before completing. Restoration retries are visible in the
 menu status.
@@ -60,6 +65,10 @@ spaceman hud
 Directions are `left`, `down`, `up`, and `right`. `balance` equalizes the focused tile's immediate
 split while respecting nested minimum sizes. `hud` repeatedly renders sanitized runtime geometry in
 the terminal until interrupted.
+
+`ctl debug` excludes window titles. It reports tiled geometry plus floating-window workspace, parked
+state, and original recovery frame so workspace leaks can be diagnosed safely. Its `ignored` list
+names quarantined windows that un-parked themselves repeatedly and are left unmanaged.
 
 The agent listens at `~/Library/Application Support/Spaceman/control.sock`; both socket and lock file
 are mode `0600`. Requests are newline-delimited, limited to 4 KiB, and served locally over a Unix

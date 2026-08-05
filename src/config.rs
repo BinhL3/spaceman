@@ -15,6 +15,9 @@ pub enum WindowDisposition {
     Managed,
     Floating,
     Route(WorkspaceId),
+    /// Never tiled, owned, moved, or parked. For windows whose applications
+    /// insist on managing them themselves.
+    Ignored,
 }
 
 #[derive(Clone, Debug)]
@@ -76,10 +79,12 @@ impl Config {
             }
             let action = match (rule.action.as_str(), rule.workspace) {
                 ("float", None) => WindowDisposition::Floating,
+                ("ignore", None) => WindowDisposition::Ignored,
                 ("route", Some(workspace)) => {
                     WindowDisposition::Route(WorkspaceId::new(workspace)?)
                 }
                 ("float", Some(_)) => return Err("float rule cannot specify workspace".into()),
+                ("ignore", Some(_)) => return Err("ignore rule cannot specify workspace".into()),
                 ("route", None) => return Err("route rule requires workspace".into()),
                 (action, _) => return Err(format!("unknown window rule action {action:?}")),
             };
@@ -194,6 +199,7 @@ mod tests {
                 window_id: 1,
             },
             frame: Rect::default(),
+            resizable: true,
             title: title.map(std::sync::Arc::from),
         }
     }

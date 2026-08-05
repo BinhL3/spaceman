@@ -19,10 +19,16 @@ pub struct Rect {
 impl Rect {
     #[must_use]
     pub fn approximately_equals(self, other: Self, tolerance: i32) -> bool {
-        (self.x - other.x).abs() <= tolerance
-            && (self.y - other.y).abs() <= tolerance
+        self.position_approximately_equals(other, tolerance)
             && (self.width - other.width).abs() <= tolerance
             && (self.height - other.height).abs() <= tolerance
+    }
+
+    /// Position-only tolerance comparison; sizes may legitimately differ when
+    /// an application constrains its own dimensions.
+    #[must_use]
+    pub fn position_approximately_equals(self, other: Self, tolerance: i32) -> bool {
+        (self.x - other.x).abs() <= tolerance && (self.y - other.y).abs() <= tolerance
     }
 
     #[must_use]

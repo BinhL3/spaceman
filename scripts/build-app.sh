@@ -7,6 +7,18 @@ icon_output="$root/target/AppIcon.assets"
 icon_info="$root/target/AppIcon-info.plist"
 identity=${SPACEMAN_CODESIGN_IDENTITY:-}
 deployment_target=$(/usr/bin/plutil -extract LSMinimumSystemVersion raw "$root/app/Info.plist")
+cargo_bin=${CARGO:-}
+
+if [ -z "$cargo_bin" ]; then
+  cargo_bin=$(command -v cargo 2>/dev/null || true)
+fi
+if [ -z "$cargo_bin" ] && [ -x "$HOME/.cargo/bin/cargo" ]; then
+  cargo_bin="$HOME/.cargo/bin/cargo"
+fi
+if [ -z "$cargo_bin" ] || ! command -v "$cargo_bin" >/dev/null 2>&1; then
+  echo "cargo was not found; install Rust 1.95.0 or set CARGO to its absolute path." >&2
+  exit 1
+fi
 
 if [ -z "$identity" ]; then
   identity=$(security find-identity -v -p codesigning \
@@ -20,7 +32,7 @@ fi
 
 MACOSX_DEPLOYMENT_TARGET="$deployment_target" \
   CARGO_TARGET_DIR="$root/target" \
-  cargo build --manifest-path "$root/Cargo.toml" --release --locked --bins
+  "$cargo_bin" build --manifest-path "$root/Cargo.toml" --release --locked --bins
 rm -rf "$bundle"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 cp "$root/target/release/spaceman-agent" "$bundle/Contents/MacOS/spaceman-agent"

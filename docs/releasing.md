@@ -21,8 +21,8 @@ Do not publish `target/Spaceman.app` as a release based only on those commands.
 - Produce a downloadable artifact with an integrity checksum and documented install path.
 - Decide and validate supported architectures, including universal packaging if promised.
 - Validate the declared minimum macOS version and a current macOS version.
-- Test first install, Accessibility onboarding, launch, shortcuts, displays, upgrade, crash recovery,
-  pause/quit restoration, and uninstall on a clean machine.
+- Test first install, Accessibility onboarding, launch-at-login registration and relaunch, shortcuts,
+  displays, upgrade, crash recovery, pause/quit restoration, and uninstall on a clean machine.
 - Add and verify a concise product demo.
 - Recheck the private `_AXUIElementGetWindow` risk and state clearly that the Mac App Store is not
   supported.

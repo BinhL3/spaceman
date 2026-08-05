@@ -19,8 +19,11 @@ Spaceman currently:
   to the main display when a preferred display disconnects;
 - persists active workspaces, nested split layouts, tile order and weights, and parked-window recovery
   metadata across restarts;
+- can register its signed app bundle with macOS to launch automatically at login;
 - supports directional focus and movement across displays, drag-to-reorder/nest, mouse and keyboard
   resizing, balancing, and non-fullscreen maximize;
+- keeps movable non-resizable and rule-floated windows with their logical workspace without tiling
+  or resizing them;
 - exposes a local CLI over a user-only Unix socket.
 
 Spaceman uses Accessibility APIs to observe, focus, move, and resize eligible windows. It requires no
@@ -61,12 +64,14 @@ exist yet; see [Releasing](docs/releasing.md).
 2. Open Spaceman: `open "$HOME/Applications/Spaceman.app"`.
 3. Use `Open Accessibility Settings...` in the Spaceman menu and grant Spaceman access under
    **System Settings > Privacy & Security > Accessibility**.
-4. Confirm operation with `spaceman ctl status`.
+4. Optionally enable `Launch at Login` in the Spaceman menu.
+5. Confirm operation with `spaceman ctl status`.
 
 When hotkeys register successfully, Spaceman starts automatic tiling; it does not intentionally start
 paused. Without Accessibility permission, the menu reports the permission error and tiling cannot
 manage windows. The menu actions are `Disable Tiling` (or `Enable Tiling` while paused),
-`Open Accessibility Settings...`, and `Quit Spaceman`.
+`Launch at Login`, `Open Accessibility Settings...`, and `Quit Spaceman`. If macOS requires approval,
+the login item action opens **System Settings > General > Login Items & Extensions**.
 
 ## Everyday Use
 

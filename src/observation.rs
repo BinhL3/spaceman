@@ -13,8 +13,14 @@ pub struct ObservedApplication {
 pub struct ObservedWindow {
     pub id: PhysicalWindowId,
     pub frame: Rect,
+    #[serde(default = "default_true")]
+    pub resizable: bool,
     #[serde(skip)]
     pub title: Option<Arc<str>>,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -34,6 +40,7 @@ mod tests {
                 window_id: 1,
             },
             frame: Rect::default(),
+            resizable: true,
             title: Some(Arc::from("Private document")),
         };
 

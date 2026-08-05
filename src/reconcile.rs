@@ -444,6 +444,7 @@ mod tests {
                 window_id,
             },
             frame,
+            resizable: true,
             title: None,
         }
     }

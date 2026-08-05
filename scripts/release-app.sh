@@ -50,7 +50,7 @@ mkdir -p "$dist"
 rm -f "$artifact" "$checksum" "$submission"
 trap 'rm -f "$submission"' EXIT HUP INT TERM
 
-bundle=$(SPACEMAN_CODESIGN_IDENTITY="$identity" "$root/scripts/build-app.sh" | tail -1)
+bundle=$(SPACEMAN_CODESIGN_IDENTITY="$identity" "$root/scripts/build-app.sh")
 (cd "$(dirname "$bundle")" && /usr/bin/zip -qry --symlinks "$submission" "$(basename "$bundle")")
 notary_result=$(xcrun notarytool submit "$submission" \
   --keychain-profile "$notary_profile" --wait --output-format plist)

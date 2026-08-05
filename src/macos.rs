@@ -24,8 +24,8 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{
     CGEvent, CGEventSource, CGEventSourceStateID, CGMouseButton, CGWindowID,
-    CGWindowListCopyWindowInfo, CGWindowListOption, kCGWindowLayer, kCGWindowNumber,
-    kCGWindowOwnerPID,
+    CGWindowListCopyWindowInfo, CGWindowListOption, kCGWindowBounds, kCGWindowLayer,
+    kCGWindowNumber, kCGWindowOwnerPID,
 };
 use objc2_foundation::{NSNumber, NSString};
 
@@ -756,6 +756,15 @@ pub fn frame(id: &PhysicalWindowId) -> Result<Rect, WindowAccessError> {
     }
 }
 
+/// Point file descriptor 2 (stderr) at the given open file so diagnostics from
+/// bundle launches land in a log instead of nowhere.
+pub fn redirect_stderr_to(file: &std::fs::File) {
+    let fd = std::os::unix::io::AsRawFd::as_raw_fd(file);
+    // SAFETY: dup2 atomically replaces descriptor 2 with a duplicate of a
+    // descriptor we own; the original File may close independently afterwards.
+    let _ = unsafe { libc::dup2(fd, 2) };
+}
+
 pub fn set_position_only(id: &PhysicalWindowId, target: Rect) -> ApplyOutcome {
     let outcome = match with_managed_window_result(id, |window| {
         let result = without_window_animations(&id.app, || set_position(window, target));
@@ -779,8 +788,7 @@ pub fn set_position_only(id: &PhysicalWindowId, target: Rect) -> ApplyOutcome {
 }
 
 fn position_matches(actual: Rect, target: Rect) -> bool {
-    let tolerance = crate::reconcile::DEFAULT_FRAME_TOLERANCE;
-    (actual.x - target.x).abs() <= tolerance && (actual.y - target.y).abs() <= tolerance
+    actual.position_approximately_equals(target, crate::reconcile::DEFAULT_FRAME_TOLERANCE)
 }
 
 pub fn focused_window() -> Option<PhysicalWindowId> {
@@ -1248,10 +1256,11 @@ fn observe_window(
             .map_err(|error| format!("AXFullScreen: {error:?}"))?
         || !is_settable(window, "AXPosition")
             .map_err(|error| format!("AXPosition settable: {error:?}"))?
-        || !is_settable(window, "AXSize").map_err(|error| format!("AXSize settable: {error:?}"))?
     {
         return Ok(WindowObservation::Ignored);
     }
+    let resizable =
+        is_settable(window, "AXSize").map_err(|error| format!("AXSize settable: {error:?}"))?;
 
     let frame = window_frame(window).ok_or("AX frame was unavailable")?;
     let id = physical_window_id(app, window).ok_or("physical window ID unavailable")?;
@@ -1265,6 +1274,7 @@ fn observe_window(
     Ok(WindowObservation::Observed(ObservedWindow {
         id,
         frame,
+        resizable,
         title,
     }))
 }
@@ -1292,6 +1302,79 @@ fn onscreen_windows() -> Option<HashMap<i32, HashSet<CGWindowID>>> {
         }
     }
     Some(windows)
+}
+
+/// The window server's authoritative frame for a window. Accessibility frame
+/// reads can lag behind reality for apps with asynchronous accessibility
+/// servers (Electron); Core Graphics reflects the real position immediately.
+/// The full window list is queried because the single-window variant
+/// (`kCGWindowListOptionIncludingWindow`) silently returns nothing for some
+/// applications' windows.
+pub fn window_server_frame(id: &PhysicalWindowId) -> Option<Rect> {
+    window_server_frames().remove(&id.window_id)
+}
+
+/// Window-server frames for every ordinary window in one list copy. Use this
+/// instead of [`window_server_frame`] when checking more than one window.
+pub fn window_server_frames() -> HashMap<CGWindowID, Rect> {
+    let mut frames = HashMap::new();
+    let Some(list) = CGWindowListCopyWindowInfo(
+        CGWindowListOption::OptionAll | CGWindowListOption::ExcludeDesktopElements,
+        0,
+    ) else {
+        return frames;
+    };
+    for index in 0..list.count() {
+        let entry = unsafe { list.value_at_index(index) };
+        let Some(entry) = (unsafe { entry.cast::<CFType>().as_ref() })
+            .and_then(|value| value.downcast_ref::<CFDictionary>())
+        else {
+            continue;
+        };
+        if dictionary_number(entry, unsafe { kCGWindowLayer }) != Some(0) {
+            continue;
+        }
+        let Some(id) = dictionary_number(entry, unsafe { kCGWindowNumber })
+            .and_then(|id| u32::try_from(id).ok())
+        else {
+            continue;
+        };
+        let raw = unsafe { entry.value((kCGWindowBounds as *const CFString).cast::<c_void>()) };
+        let Some(bounds) = (unsafe { raw.cast::<CFType>().as_ref() })
+            .and_then(|value| value.downcast_ref::<CFDictionary>())
+        else {
+            continue;
+        };
+        let field = |name: &'static str| {
+            dictionary_double(bounds, &CFString::from_static_str(name))
+                .map(|value| value.round() as i32)
+        };
+        if let (Some(x), Some(y), Some(width), Some(height)) =
+            (field("X"), field("Y"), field("Width"), field("Height"))
+        {
+            frames.insert(
+                id,
+                Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+            );
+        }
+    }
+    frames
+}
+
+fn dictionary_double(dictionary: &CFDictionary, key: &CFString) -> Option<f64> {
+    let raw = unsafe { dictionary.value(key as *const CFString as *const c_void) };
+    let number = unsafe { raw.cast::<CFType>().as_ref() }?.downcast_ref::<CFNumber>()?;
+    let mut value = 0_f64;
+    unsafe {
+        number
+            .value(CFNumberType::Float64Type, ptr::from_mut(&mut value).cast())
+            .then_some(value)
+    }
 }
 
 fn dictionary_number(dictionary: &CFDictionary, key: &CFString) -> Option<i64> {

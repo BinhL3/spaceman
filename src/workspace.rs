@@ -69,6 +69,8 @@ pub(crate) struct WorkspaceState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     layouts: Vec<crate::layout_tree::LayoutTree>,
     slots: Vec<Vec<crate::Slot>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    floating: Vec<(crate::PhysicalWindowId, WorkspaceId)>,
 }
 
 impl WorkspaceState {
@@ -106,6 +108,21 @@ impl WorkspaceState {
         if self.layouts.len() > self.slots.len() {
             return Err("workspace layouts have no matching slot state".into());
         }
+        let tiled: HashSet<_> = self
+            .slots
+            .iter()
+            .flatten()
+            .filter_map(crate::Slot::bound_window)
+            .collect();
+        let mut floating = HashSet::new();
+        for (window, _) in &self.floating {
+            if tiled.contains(window) {
+                return Err("window is both tiled and floating".into());
+            }
+            if !floating.insert(window) {
+                return Err("floating window is owned by multiple workspaces".into());
+            }
+        }
         Ok(())
     }
 }
@@ -137,6 +154,7 @@ pub struct Workspaces {
     assignments: [DisplaySelector; WorkspaceId::COUNT],
     active: HashMap<DisplaySelector, WorkspaceId>,
     previous: HashMap<DisplaySelector, WorkspaceId>,
+    floating_owners: HashMap<PhysicalWindowId, WorkspaceId>,
 }
 
 impl Default for Workspaces {
@@ -156,6 +174,7 @@ impl Default for Workspaces {
                 (DisplaySelector::Secondary, WorkspaceId::SIX),
             ]),
             previous: HashMap::new(),
+            floating_owners: HashMap::new(),
         }
     }
 }
@@ -189,6 +208,14 @@ impl Workspaces {
                 .iter()
                 .map(|engine| engine.model().workspace.slots.clone())
                 .collect(),
+            floating: {
+                let mut floating = self
+                    .floating_entries()
+                    .map(|(window, workspace)| (window.clone(), workspace))
+                    .collect::<Vec<_>>();
+                floating.sort();
+                floating
+            },
         }
     }
 
@@ -199,6 +226,7 @@ impl Workspaces {
             axes,
             layouts,
             slots,
+            floating,
         } = state;
         for (index, slots) in slots.into_iter().take(WorkspaceId::COUNT).enumerate() {
             let workspace = WorkspaceId::new(u8::try_from(index + 1).expect("workspace fits u8"))
@@ -225,6 +253,11 @@ impl Workspaces {
                 && self.active_for(&selector) != Some(workspace)
             {
                 self.previous.insert(selector, workspace);
+            }
+        }
+        for (window, workspace) in floating {
+            if self.workspace_of(&window).is_none() {
+                self.floating_owners.insert(window, workspace);
             }
         }
     }
@@ -343,6 +376,53 @@ impl Workspaces {
     }
 
     #[must_use]
+    pub(crate) fn floating_workspace_of(&self, window: &PhysicalWindowId) -> Option<WorkspaceId> {
+        self.floating_owners.get(window).copied()
+    }
+
+    #[must_use]
+    pub(crate) fn workspace_of_any(&self, window: &PhysicalWindowId) -> Option<WorkspaceId> {
+        self.workspace_of(window)
+            .or_else(|| self.floating_workspace_of(window))
+    }
+
+    pub(crate) fn own_floating(&mut self, window: PhysicalWindowId, workspace: WorkspaceId) {
+        self.floating_owners.insert(window, workspace);
+    }
+
+    pub(crate) fn windows(&self, workspace: WorkspaceId) -> Vec<PhysicalWindowId> {
+        let mut windows = self.engine(workspace).bound_windows();
+        windows.extend(
+            self.floating_entries()
+                .filter(|(_, owner)| *owner == workspace)
+                .map(|(window, _)| window.clone()),
+        );
+        windows
+    }
+
+    pub(crate) fn floating_windows_for_app(
+        &self,
+        app: &crate::AppInstanceId,
+    ) -> Vec<PhysicalWindowId> {
+        self.floating_entries()
+            .filter(|(window, _)| &window.app == app)
+            .map(|(window, _)| window.clone())
+            .collect()
+    }
+
+    pub(crate) fn floating_entries(
+        &self,
+    ) -> impl Iterator<Item = (&PhysicalWindowId, WorkspaceId)> {
+        self.floating_owners
+            .iter()
+            .map(|(window, workspace)| (window, *workspace))
+    }
+
+    pub(crate) fn forget_floating(&mut self, window: &PhysicalWindowId) {
+        self.floating_owners.remove(window);
+    }
+
+    #[must_use]
     pub fn workspace_for_app(&self, app: &crate::AppInstanceId) -> Option<WorkspaceId> {
         let mut matches = WorkspaceId::all().filter(|workspace| {
             self.engine(*workspace)
@@ -377,30 +457,18 @@ impl Workspaces {
         self.owners.remove(window);
     }
 
-    pub fn inactive_bound_windows(
+    pub(crate) fn inactive_windows_except(
         &self,
-    ) -> impl Iterator<Item = (WorkspaceId, PhysicalWindowId)> + '_ {
-        let visible: HashSet<_> = self.active.values().copied().collect();
-        self.inactive_bound_windows_except(visible)
-    }
-
-    pub fn inactive_bound_windows_except(
-        &self,
-        visible: HashSet<WorkspaceId>,
-    ) -> impl Iterator<Item = (WorkspaceId, PhysicalWindowId)> + '_ {
-        self.engines
-            .iter()
-            .enumerate()
-            .filter_map(move |(index, engine)| {
-                let workspace = WorkspaceId::new(u8::try_from(index + 1).ok()?).ok()?;
-                (!visible.contains(&workspace)).then_some((workspace, engine))
-            })
-            .flat_map(|(workspace, engine)| {
-                engine
-                    .bound_windows()
+        visible: &HashSet<WorkspaceId>,
+    ) -> Vec<(WorkspaceId, PhysicalWindowId)> {
+        WorkspaceId::all()
+            .filter(|workspace| !visible.contains(workspace))
+            .flat_map(|workspace| {
+                self.windows(workspace)
                     .into_iter()
                     .map(move |window| (workspace, window))
             })
+            .collect()
     }
 }
 
@@ -523,6 +591,23 @@ mod tests {
             vec![first.clone(), second]
         );
         assert_eq!(restored.workspace_of(&first), Some(WorkspaceId::ONE));
+    }
+
+    #[test]
+    fn persisted_state_restores_floating_window_ownership() {
+        let floating = window(30);
+        let workspace = WorkspaceId::new(3).unwrap();
+        let mut workspaces = Workspaces::default();
+        workspaces.own_floating(floating.clone(), workspace);
+
+        let encoded = serde_json::to_vec(&workspaces.state()).unwrap();
+        let state: WorkspaceState = serde_json::from_slice(&encoded).unwrap();
+        state.validate().unwrap();
+        let mut restored = Workspaces::default();
+        restored.restore(state);
+
+        assert_eq!(restored.floating_workspace_of(&floating), Some(workspace));
+        assert_eq!(restored.workspace_of(&floating), None);
     }
 
     #[test]

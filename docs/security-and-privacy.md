@@ -16,6 +16,10 @@ size are settable. It does not require disabling System Integrity Protection.
 Spaceman currently has no telemetry, analytics, network requests, or update checks. Runtime data stays
 on the Mac unless the user shares CLI output or files.
 
+The optional `Launch at Login` menu action registers or unregisters the signed main app through
+macOS Service Management. Registration is stored and enforced by macOS; Spaceman does not install a
+separate helper, daemon, or launch-agent plist.
+
 Spaceman can read a window title for exact config-rule matching. Titles remain in memory and are
 explicitly excluded from serialized observations, persisted state, `spaceman ctl debug`, and
 `spaceman hud` output.
@@ -23,9 +27,12 @@ explicitly excluded from serialized observations, persisted state, `spaceman ctl
 Local files live under `~/Library/Application Support/Spaceman/`:
 
 - `config.toml`: user-authored configuration;
-- `workspace-state.json`: active workspace selectors, previous-workspace history, logical slots, and
-  layout trees;
+- `workspace-state.json`: active workspace selectors, previous-workspace history, logical slots,
+  floating-window ownership, and layout trees;
 - `parked-windows.json`: physical process/window identifiers and original frames needed for recovery;
+- `agent.log`: timestamped diagnostic events (switches, parking, restoration, ownership changes) with
+  process/window identifiers and frames, never window titles; mode `0600`, discarded past 5 MB at the
+  next launch. Terminal launches keep diagnostics on stderr instead;
 - `control.sock`: local Unix control socket, mode `0600`;
 - `control.lock`: single-agent lock, mode `0600`.
 

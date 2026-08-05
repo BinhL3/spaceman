@@ -5,12 +5,13 @@ use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, msg_send, rc::Retained, runtime::Bool, sel,
 };
 use objc2_app_kit::{
-    NSBezierPath, NSColor, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusBarButton,
-    NSStatusItem, NSStringDrawing, NSVariableStatusItemLength,
+    NSBezierPath, NSColor, NSControlStateValueOff, NSControlStateValueOn, NSImage, NSMenu,
+    NSMenuItem, NSStatusBar, NSStatusBarButton, NSStatusItem, NSStringDrawing,
+    NSVariableStatusItemLength,
 };
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
-use crate::app::Action;
+use crate::{app::Action, login_item};
 
 struct TargetIvars {
     actions: Sender<Action>,
@@ -40,6 +41,11 @@ objc2::define_class!(
             let _ = self.ivars().actions.send(Action::OpenAccessibility);
         }
 
+        #[unsafe(method(toggleLaunchAtLogin:))]
+        fn toggle_launch_at_login(&self, _sender: &NSObject) {
+            let _ = self.ivars().actions.send(Action::ToggleLaunchAtLogin);
+        }
+
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: &NSObject) {
             let _ = self.ivars().actions.send(Action::Quit);
@@ -61,6 +67,7 @@ struct Controller {
     button: Retained<NSStatusBarButton>,
     status: Retained<NSMenuItem>,
     automatic: Retained<NSMenuItem>,
+    launch_at_login: Retained<NSMenuItem>,
     status_title: String,
     workspace_title: String,
     workspace_layouts: Vec<(u8, Vec<crate::Rect>)>,
@@ -81,6 +88,14 @@ pub fn install(sender: Sender<Action>) -> Result<(), String> {
     menu.addItem(&NSMenuItem::separatorItem(marker));
     let automatic = action_item("Disable Tiling", &target, sel!(toggleAutomatic:), marker);
     menu.addItem(&automatic);
+    menu.addItem(&NSMenuItem::separatorItem(marker));
+    let launch_at_login = action_item(
+        "Launch at Login",
+        &target,
+        sel!(toggleLaunchAtLogin:),
+        marker,
+    );
+    menu.addItem(&launch_at_login);
     menu.addItem(&NSMenuItem::separatorItem(marker));
     menu.addItem(&action_item(
         "Open Accessibility Settings...",
@@ -105,6 +120,7 @@ pub fn install(sender: Sender<Action>) -> Result<(), String> {
             button,
             status,
             automatic,
+            launch_at_login,
             status_title: String::new(),
             workspace_title: String::new(),
             workspace_layouts: Vec::new(),
@@ -146,6 +162,25 @@ pub fn set_automatic(enabled: bool) {
                 } else {
                     "Enable Tiling"
                 }));
+        }
+    });
+}
+
+pub fn set_launch_at_login(status: login_item::Status) {
+    CONTROLLER.with(|controller| {
+        if let Some(controller) = controller.borrow().as_ref() {
+            let (title, state) = match status {
+                login_item::Status::Disabled => ("Launch at Login", NSControlStateValueOff),
+                login_item::Status::Enabled => ("Launch at Login", NSControlStateValueOn),
+                login_item::Status::RequiresApproval => (
+                    "Launch at Login (Approval Required...)",
+                    NSControlStateValueOff,
+                ),
+            };
+            controller
+                .launch_at_login
+                .setTitle(&NSString::from_str(title));
+            controller.launch_at_login.setState(state);
         }
     });
 }

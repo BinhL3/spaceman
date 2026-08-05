@@ -2,7 +2,7 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-source_bundle=$("$root/scripts/build-app.sh" | tail -1)
+source_bundle=$("$root/scripts/build-app.sh")
 install_root="$HOME/Applications"
 installed_bundle="$install_root/Spaceman.app"
 cli_root="$HOME/.local/bin"

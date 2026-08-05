@@ -16,6 +16,9 @@ mod layout_tree;
 pub mod live;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
+mod login_item;
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 pub mod macos;
 pub mod model;
 pub mod navigation;

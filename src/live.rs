@@ -142,6 +142,7 @@ mod tests {
                         height: 100,
                         ..Rect::default()
                     },
+                    resizable: true,
                     title: None,
                 }],
             }],
@@ -196,6 +197,7 @@ mod tests {
                     windows: vec![ObservedWindow {
                         id: window.clone(),
                         frame: settings.output,
+                        resizable: true,
                         title: None,
                     }],
                 }],
