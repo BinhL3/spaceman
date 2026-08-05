@@ -18,35 +18,6 @@
   },
   "groups": [
     {
-      "name": "Foreground orbit",
-      "layers": [
-        {
-          "image-name": "OrbitFront.svg",
-          "name": "Foreground orbit",
-          "glass": true,
-          "position": {
-            "scale": 1,
-            "translation-in-points": [
-              0,
-              0
-            ]
-          }
-        }
-      ],
-      "lighting": "combined",
-      "specular": true,
-      "blur-material": 0.04,
-      "shadow": {
-        "kind": "neutral",
-        "opacity": 0.3
-      },
-      "translucency": {
-        "enabled": true,
-        "value": 0.06
-      },
-      "opacity": 0.96
-    },
-    {
       "name": "Spatial panes",
       "layers": [
         {
@@ -64,23 +35,23 @@
       ],
       "lighting": "combined",
       "specular": true,
-      "blur-material": 0.12,
+      "blur-material": 0.18,
       "shadow": {
         "kind": "neutral",
-        "opacity": 0.46
+        "opacity": 0.4
       },
       "translucency": {
         "enabled": true,
-        "value": 0.12
+        "value": 0.32
       },
       "opacity": 1
     },
     {
-      "name": "Rear orbit",
+      "name": "Visor boundary",
       "layers": [
         {
-          "image-name": "OrbitBack.svg",
-          "name": "Rear orbit",
+          "image-name": "Visor.svg",
+          "name": "Visor boundary",
           "glass": true,
           "position": {
             "scale": 1,
@@ -93,16 +64,45 @@
       ],
       "lighting": "combined",
       "specular": true,
-      "blur-material": 0.04,
+      "blur-material": 0.08,
       "shadow": {
         "kind": "neutral",
-        "opacity": 0.24
+        "opacity": 0.34
       },
       "translucency": {
         "enabled": true,
-        "value": 0.08
+        "value": 0.14
       },
-      "opacity": 0.82
+      "opacity": 0.94
+    },
+    {
+      "name": "Helmet",
+      "layers": [
+        {
+          "image-name": "Helmet.svg",
+          "name": "Helmet",
+          "glass": true,
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "lighting": "combined",
+      "specular": true,
+      "blur-material": 0.16,
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.38
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.22
+      },
+      "opacity": 0.98
     },
     {
       "name": "Space",
