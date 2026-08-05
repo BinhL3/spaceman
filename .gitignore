@@ -4,6 +4,9 @@ DerivedData/
 *.xcuserstate
 target/
 /dist/
+/website/dist/
+/website/node_modules/
+/website/*.tsbuildinfo
 .wrangler/
 .release.env
 *.p12

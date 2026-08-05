@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "spaceman-site",
+  "compatibility_date": "2026-08-05",
+  "assets": {
+    "directory": "./dist"
+  },
+  "routes": [
+    {
+      "pattern": "spaceman.kitlangton.dev",
+      "custom_domain": true
+    }
+  ]
+}
