@@ -2,27 +2,27 @@
   "color-space-for-untagged-svg-colors": "display-p3",
   "fill": {
     "linear-gradient": [
-      "display-p3:0.02745,0.03922,0.10980,1.00000",
-      "display-p3:0.10588,0.05490,0.23529,1.00000"
+      "display-p3:0.00392,0.01176,0.04706,1.00000",
+      "display-p3:0.01961,0.10196,0.35294,1.00000"
     ],
     "orientation": {
       "start": {
-        "x": 0.18,
+        "x": 0.16,
         "y": 0.05
       },
       "stop": {
-        "x": 0.82,
+        "x": 0.86,
         "y": 0.95
       }
     }
   },
   "groups": [
     {
-      "name": "Spatial panes",
+      "name": "Workspace panes",
       "layers": [
         {
           "image-name": "Panes.svg",
-          "name": "Spatial panes",
+          "name": "Workspace panes",
           "glass": true,
           "position": {
             "scale": 1,
@@ -35,52 +35,23 @@
       ],
       "lighting": "combined",
       "specular": true,
-      "blur-material": 0.18,
+      "blur-material": 0.12,
       "shadow": {
         "kind": "neutral",
-        "opacity": 0.4
+        "opacity": 0.28
       },
       "translucency": {
         "enabled": true,
-        "value": 0.32
-      },
-      "opacity": 1
-    },
-    {
-      "name": "Visor boundary",
-      "layers": [
-        {
-          "image-name": "Visor.svg",
-          "name": "Visor boundary",
-          "glass": true,
-          "position": {
-            "scale": 1,
-            "translation-in-points": [
-              0,
-              0
-            ]
-          }
-        }
-      ],
-      "lighting": "combined",
-      "specular": true,
-      "blur-material": 0.08,
-      "shadow": {
-        "kind": "neutral",
-        "opacity": 0.34
-      },
-      "translucency": {
-        "enabled": true,
-        "value": 0.14
+        "value": 0.42
       },
       "opacity": 0.94
     },
     {
-      "name": "Helmet",
+      "name": "Porthole rim",
       "layers": [
         {
-          "image-name": "Helmet.svg",
-          "name": "Helmet",
+          "image-name": "Rim.svg",
+          "name": "Porthole rim",
           "glass": true,
           "position": {
             "scale": 1,
@@ -93,41 +64,16 @@
       ],
       "lighting": "combined",
       "specular": true,
-      "blur-material": 0.16,
+      "blur-material": 0.06,
       "shadow": {
         "kind": "neutral",
-        "opacity": 0.38
+        "opacity": 0.32
       },
       "translucency": {
         "enabled": true,
-        "value": 0.22
+        "value": 0.26
       },
-      "opacity": 0.98
-    },
-    {
-      "name": "Space",
-      "layers": [
-        {
-          "image-name": "Space.png",
-          "name": "Space",
-          "position": {
-            "scale": 1,
-            "translation-in-points": [
-              0,
-              0
-            ]
-          }
-        }
-      ],
-      "shadow": {
-        "kind": "neutral",
-        "opacity": 0
-      },
-      "translucency": {
-        "enabled": false,
-        "value": 0
-      },
-      "opacity": 1
+      "opacity": 0.9
     }
   ],
   "supported-platforms": {
