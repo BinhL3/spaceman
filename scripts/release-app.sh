@@ -2,25 +2,21 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-identity=${SPACEMAN_CODESIGN_IDENTITY:-}
-notary_profile=${SPACEMAN_NOTARY_KEYCHAIN_PROFILE:-}
+notary_profile=${SPACEMAN_NOTARY_KEYCHAIN_PROFILE:-spaceman-notary}
+host_arch=$(uname -m)
+arch=${SPACEMAN_RELEASE_ARCH:-$host_arch}
 
-[ -n "$identity" ] || {
-  echo "SPACEMAN_CODESIGN_IDENTITY must name a Developer ID Application identity." >&2
-  exit 1
-}
-[ -n "$notary_profile" ] || {
-  echo "SPACEMAN_NOTARY_KEYCHAIN_PROFILE must name a notarytool keychain profile." >&2
-  exit 1
-}
-
-case "$identity" in
-  "Developer ID Application:"*) ;;
+case "$arch" in
+  arm64|x86_64) ;;
   *)
-    echo "SPACEMAN_CODESIGN_IDENTITY must be a Developer ID Application identity, not '$identity'." >&2
+    echo "SPACEMAN_RELEASE_ARCH must be arm64 or x86_64, not '$arch'." >&2
     exit 1
     ;;
 esac
+[ "$arch" = "$host_arch" ] || {
+  echo "Cross-architecture release builds are not supported: requested '$arch' on '$host_arch'." >&2
+  exit 1
+}
 
 [ -z "$(git -C "$root" status --porcelain)" ] || {
   echo "Release builds require a clean, reviewed Git worktree." >&2
@@ -33,14 +29,6 @@ xcrun notarytool history --keychain-profile "$notary_profile" >/dev/null || {
 }
 
 version=$(/usr/bin/plutil -extract CFBundleShortVersionString raw "$root/app/Info.plist")
-arch=${SPACEMAN_RELEASE_ARCH:-$(uname -m)}
-case "$arch" in
-  arm64|x86_64) ;;
-  *)
-    echo "SPACEMAN_RELEASE_ARCH must be arm64 or x86_64, not '$arch'." >&2
-    exit 1
-    ;;
-esac
 dist="$root/dist"
 artifact="$dist/Spaceman-v$version-macos-$arch.zip"
 checksum="$artifact.sha256"
@@ -50,7 +38,7 @@ mkdir -p "$dist"
 rm -f "$artifact" "$checksum" "$submission"
 trap 'rm -f "$submission"' EXIT HUP INT TERM
 
-bundle=$(SPACEMAN_CODESIGN_IDENTITY="$identity" "$root/scripts/build-app.sh")
+bundle=$("$root/scripts/build-app.sh")
 (cd "$(dirname "$bundle")" && /usr/bin/zip -qry --symlinks "$submission" "$(basename "$bundle")")
 notary_result=$(xcrun notarytool submit "$submission" \
   --keychain-profile "$notary_profile" --wait --output-format plist)

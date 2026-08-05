@@ -29,6 +29,13 @@ if [ -z "$identity" ]; then
   echo "No Developer ID Application identity found; set SPACEMAN_CODESIGN_IDENTITY." >&2
   exit 1
 fi
+case "$identity" in
+  "Developer ID Application:"*) ;;
+  *)
+    echo "SPACEMAN_CODESIGN_IDENTITY must be a Developer ID Application identity, not '$identity'." >&2
+    exit 1
+    ;;
+esac
 
 MACOSX_DEPLOYMENT_TARGET="$deployment_target" \
   CARGO_TARGET_DIR="$root/target" \

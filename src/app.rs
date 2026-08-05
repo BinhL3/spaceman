@@ -137,6 +137,46 @@ pub(crate) enum Action {
     Quit,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum WorkerAction {
+    Retile,
+    SwitchWorkspace(WorkspaceId),
+    WorkspaceBackAndForth,
+    MoveFocused(WorkspaceId),
+    MoveApp(String, WorkspaceId),
+    Focus(Direction),
+    Reorder(Direction),
+    ToggleLayout,
+    Resize(ResizeDirection),
+    Balance,
+    ToggleMaximize,
+}
+
+impl TryFrom<Action> for WorkerAction {
+    type Error = ();
+
+    fn try_from(action: Action) -> Result<Self, Self::Error> {
+        match action {
+            Action::Retile => Ok(Self::Retile),
+            Action::SwitchWorkspace(workspace) => Ok(Self::SwitchWorkspace(workspace)),
+            Action::WorkspaceBackAndForth => Ok(Self::WorkspaceBackAndForth),
+            Action::MoveFocused(workspace) => Ok(Self::MoveFocused(workspace)),
+            Action::MoveApp(bundle_id, workspace) => Ok(Self::MoveApp(bundle_id, workspace)),
+            Action::Focus(direction) => Ok(Self::Focus(direction)),
+            Action::Reorder(direction) => Ok(Self::Reorder(direction)),
+            Action::ToggleLayout => Ok(Self::ToggleLayout),
+            Action::Resize(direction) => Ok(Self::Resize(direction)),
+            Action::Balance => Ok(Self::Balance),
+            Action::ToggleMaximize => Ok(Self::ToggleMaximize),
+            Action::ToggleAutomatic
+            | Action::OpenAccessibility
+            | Action::ToggleLaunchAtLogin
+            | Action::Restart
+            | Action::Quit => Err(()),
+        }
+    }
+}
+
 enum WorkerCommand {
     Cycle(macos::DisplayOutputs),
     Switch(WorkspaceId, macos::DisplayOutputs),
@@ -852,123 +892,6 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                         }
                     }
                 }
-                Action::Retile if automatic && !worker_busy => {
-                    pending_action = None;
-                    cancelled.store(false, Ordering::Release);
-                    send_with_outputs(&commands, WorkerCommand::Cycle, &mut worker_busy)
-                }
-                Action::Retile if automatic => {
-                    queue_latest(&mut pending_action, Action::Retile);
-                }
-                Action::Retile => {}
-                Action::SwitchWorkspace(workspace) if automatic && !worker_busy => {
-                    pending_action = None;
-                    send_with_outputs(
-                        &commands,
-                        |outputs| WorkerCommand::Switch(workspace, outputs),
-                        &mut worker_busy,
-                    )
-                }
-                Action::SwitchWorkspace(workspace) if automatic => {
-                    queue_latest(&mut pending_action, Action::SwitchWorkspace(workspace));
-                }
-                Action::WorkspaceBackAndForth if automatic && !worker_busy => {
-                    pending_action = None;
-                    send_with_outputs(
-                        &commands,
-                        WorkerCommand::WorkspaceBackAndForth,
-                        &mut worker_busy,
-                    );
-                }
-                Action::WorkspaceBackAndForth if automatic => {
-                    queue_latest(&mut pending_action, Action::WorkspaceBackAndForth);
-                }
-                Action::MoveFocused(workspace) if automatic && !worker_busy => {
-                    pending_action = None;
-                    send_with_outputs(
-                        &commands,
-                        |outputs| WorkerCommand::MoveFocused(workspace, outputs),
-                        &mut worker_busy,
-                    );
-                }
-                Action::MoveFocused(workspace) if automatic => {
-                    queue_latest(&mut pending_action, Action::MoveFocused(workspace));
-                }
-                Action::MoveApp(bundle_id, workspace) if automatic && !worker_busy => {
-                    pending_action = None;
-                    send_with_outputs(
-                        &commands,
-                        |outputs| WorkerCommand::MoveApp(bundle_id, workspace, outputs),
-                        &mut worker_busy,
-                    );
-                }
-                Action::MoveApp(bundle_id, workspace) if automatic => {
-                    queue_latest(&mut pending_action, Action::MoveApp(bundle_id, workspace));
-                }
-                Action::Focus(offset) if automatic && !worker_busy => {
-                    pending_action = None;
-                    send_with_outputs(
-                        &commands,
-                        |outputs| WorkerCommand::Focus(offset, outputs),
-                        &mut worker_busy,
-                    );
-                }
-                Action::Focus(offset) if automatic => {
-                    queue_latest(&mut pending_action, Action::Focus(offset));
-                }
-                Action::Reorder(offset) if automatic && !worker_busy => {
-                    pending_action = None;
-                    send_with_outputs(
-                        &commands,
-                        |outputs| WorkerCommand::Reorder(offset, outputs),
-                        &mut worker_busy,
-                    );
-                }
-                Action::Reorder(offset) if automatic => {
-                    queue_latest(&mut pending_action, Action::Reorder(offset));
-                }
-                Action::ToggleLayout if automatic && !worker_busy => {
-                    pending_action = None;
-                    send_with_outputs(&commands, WorkerCommand::ToggleLayout, &mut worker_busy);
-                }
-                Action::ToggleLayout if automatic => {
-                    queue_latest(&mut pending_action, Action::ToggleLayout);
-                }
-                Action::Resize(direction) if automatic && !worker_busy => {
-                    pending_action = None;
-                    send_with_outputs(
-                        &commands,
-                        |outputs| WorkerCommand::Resize(direction, outputs),
-                        &mut worker_busy,
-                    );
-                }
-                Action::Resize(direction) if automatic => {
-                    queue_latest(&mut pending_action, Action::Resize(direction));
-                }
-                Action::Balance if automatic && !worker_busy => {
-                    pending_action = None;
-                    send_with_outputs(&commands, WorkerCommand::Balance, &mut worker_busy);
-                }
-                Action::Balance if automatic => {
-                    queue_latest(&mut pending_action, Action::Balance);
-                }
-                Action::ToggleMaximize if automatic && !worker_busy => {
-                    pending_action = None;
-                    send_with_outputs(&commands, WorkerCommand::ToggleMaximize, &mut worker_busy);
-                }
-                Action::ToggleMaximize if automatic => {
-                    queue_latest(&mut pending_action, Action::ToggleMaximize);
-                }
-                Action::SwitchWorkspace(_)
-                | Action::WorkspaceBackAndForth
-                | Action::MoveFocused(_)
-                | Action::MoveApp(_, _)
-                | Action::Focus(_)
-                | Action::Reorder(_)
-                | Action::ToggleLayout
-                | Action::Resize(_)
-                | Action::Balance
-                | Action::ToggleMaximize => {}
                 Action::OpenAccessibility => open_accessibility_settings(),
                 Action::ToggleLaunchAtLogin => match login_item::toggle() {
                     Ok(status) => {
@@ -1013,6 +936,16 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                         return;
                     }
                 }
+                action => {
+                    if let Ok(action) = WorkerAction::try_from(action) {
+                        if automatic && !worker_busy {
+                            pending_action = None;
+                            send_worker_action(&commands, action, &mut worker_busy, &cancelled);
+                        } else if automatic {
+                            queue_latest(&mut pending_action, action);
+                        }
+                    }
+                }
             }
         }
 
@@ -1023,58 +956,11 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
             cancelled.store(false, Ordering::Release);
             send_final_gesture(&commands, gesture, &mut worker_busy);
         }
-        if !worker_busy && let Some(action) = pending_action.take() {
-            match action {
-                Action::Retile => {
-                    cancelled.store(false, Ordering::Release);
-                    send_with_outputs(&commands, WorkerCommand::Cycle, &mut worker_busy);
-                }
-                Action::SwitchWorkspace(workspace) if automatic => send_with_outputs(
-                    &commands,
-                    |outputs| WorkerCommand::Switch(workspace, outputs),
-                    &mut worker_busy,
-                ),
-                Action::WorkspaceBackAndForth if automatic => send_with_outputs(
-                    &commands,
-                    WorkerCommand::WorkspaceBackAndForth,
-                    &mut worker_busy,
-                ),
-                Action::MoveFocused(workspace) if automatic => send_with_outputs(
-                    &commands,
-                    |outputs| WorkerCommand::MoveFocused(workspace, outputs),
-                    &mut worker_busy,
-                ),
-                Action::MoveApp(bundle_id, workspace) if automatic => send_with_outputs(
-                    &commands,
-                    |outputs| WorkerCommand::MoveApp(bundle_id, workspace, outputs),
-                    &mut worker_busy,
-                ),
-                Action::Focus(offset) if automatic => send_with_outputs(
-                    &commands,
-                    |outputs| WorkerCommand::Focus(offset, outputs),
-                    &mut worker_busy,
-                ),
-                Action::Reorder(offset) if automatic => send_with_outputs(
-                    &commands,
-                    |outputs| WorkerCommand::Reorder(offset, outputs),
-                    &mut worker_busy,
-                ),
-                Action::ToggleLayout if automatic => {
-                    send_with_outputs(&commands, WorkerCommand::ToggleLayout, &mut worker_busy)
-                }
-                Action::Resize(direction) if automatic => send_with_outputs(
-                    &commands,
-                    |outputs| WorkerCommand::Resize(direction, outputs),
-                    &mut worker_busy,
-                ),
-                Action::Balance if automatic => {
-                    send_with_outputs(&commands, WorkerCommand::Balance, &mut worker_busy)
-                }
-                Action::ToggleMaximize if automatic => {
-                    send_with_outputs(&commands, WorkerCommand::ToggleMaximize, &mut worker_busy)
-                }
-                _ => {}
-            }
+        if automatic
+            && !worker_busy
+            && let Some(action) = pending_action.take()
+        {
+            send_worker_action(&commands, action, &mut worker_busy, &cancelled);
         }
         if restoring
             && !worker_busy
@@ -1323,8 +1209,38 @@ fn send_restore(commands: &Sender<WorkerCommand>, worker_busy: &mut bool, restor
     *restoring = *worker_busy;
 }
 
-fn queue_latest(pending_action: &mut Option<Action>, action: Action) {
+fn queue_latest(pending_action: &mut Option<WorkerAction>, action: WorkerAction) {
     pending_action.replace(action);
+}
+
+fn send_worker_action(
+    commands: &Sender<WorkerCommand>,
+    action: WorkerAction,
+    worker_busy: &mut bool,
+    cancelled: &AtomicBool,
+) {
+    if matches!(action, WorkerAction::Retile) {
+        cancelled.store(false, Ordering::Release);
+    }
+    send_with_outputs(
+        commands,
+        |outputs| match action {
+            WorkerAction::Retile => WorkerCommand::Cycle(outputs),
+            WorkerAction::SwitchWorkspace(workspace) => WorkerCommand::Switch(workspace, outputs),
+            WorkerAction::WorkspaceBackAndForth => WorkerCommand::WorkspaceBackAndForth(outputs),
+            WorkerAction::MoveFocused(workspace) => WorkerCommand::MoveFocused(workspace, outputs),
+            WorkerAction::MoveApp(bundle_id, workspace) => {
+                WorkerCommand::MoveApp(bundle_id, workspace, outputs)
+            }
+            WorkerAction::Focus(direction) => WorkerCommand::Focus(direction, outputs),
+            WorkerAction::Reorder(direction) => WorkerCommand::Reorder(direction, outputs),
+            WorkerAction::ToggleLayout => WorkerCommand::ToggleLayout(outputs),
+            WorkerAction::Resize(direction) => WorkerCommand::Resize(direction, outputs),
+            WorkerAction::Balance => WorkerCommand::Balance(outputs),
+            WorkerAction::ToggleMaximize => WorkerCommand::ToggleMaximize(outputs),
+        },
+        worker_busy,
+    );
 }
 
 fn send_with_outputs(
@@ -1946,9 +1862,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         original: crate::Rect,
         target: WorkspaceId,
     ) {
-        self.parked.remove(window);
-        self.recently_parked.remove(window);
-        self.repark_attempts.remove(window);
+        self.commit_unparked(window);
         log_event!(
             "heal: {:?} reappeared at {:?}; dropping recovery frame {:?}",
             window,
@@ -2336,7 +2250,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             }
             thread::sleep(REVEAL_POLL_INTERVAL);
             let frames = self.backend.window_server_frames();
-            let mut confirmed = Vec::new();
+            let mut removed = Vec::new();
             for window in &pending {
                 let Some(original) = self.parked.get(window).copied() else {
                     continue;
@@ -2345,18 +2259,24 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     actual.position_approximately_equals(original, RESTORE_CONFIRM_TOLERANCE)
                 }) {
                     self.commit_unparked(window);
-                    confirmed.push((window.clone(), original));
+                    removed.push((window.clone(), original));
                 }
             }
-            self.persist_removals_or_rollback(confirmed);
             if last_rewrite.elapsed() >= REVEAL_REWRITE_INTERVAL {
                 last_rewrite = Instant::now();
                 for window in &pending {
-                    if self.parked.contains_key(window) {
-                        let _ = self.restore_window(window);
+                    let Some(frame) = self.parked.get(window).copied() else {
+                        continue;
+                    };
+                    if matches!(
+                        self.write_restore_position(window, frame),
+                        macos::ApplyOutcome::Gone
+                    ) {
+                        removed.push((window.clone(), frame));
                     }
                 }
             }
+            self.persist_removals_or_rollback(removed);
         }
     }
 
@@ -3317,10 +3237,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let Some(frame) = self.parked.get(window).copied() else {
             return macos::ApplyOutcome::Applied;
         };
-        let outcome = self.backend.set_position(window, frame);
-        log_event!("restore: {:?} to {:?} ({:?})", window, frame, outcome);
+        let outcome = self.write_restore_position(window, frame);
         match outcome {
-            macos::ApplyOutcome::Gone => self.commit_unparked(window),
+            macos::ApplyOutcome::Gone => {}
             macos::ApplyOutcome::Applied => {
                 // Accessibility read-back is optimistic for apps that apply
                 // moves asynchronously. Keep the recovery frame until the
@@ -3335,8 +3254,6 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 if confirmed {
                     self.commit_unparked(window);
                 } else {
-                    // Also throttles the next retry and heal consideration.
-                    self.recently_parked.insert(window.clone(), Instant::now());
                     log_event!(
                         "restore pending: {:?} not yet at {:?} per the window server",
                         window,
@@ -3344,6 +3261,27 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     );
                 }
             }
+            _ => {}
+        }
+        outcome
+    }
+
+    /// Apply a restore write and update transient parking state. Confirmation
+    /// and durable removal remain the caller's responsibility so bulk paths
+    /// can share one window-server snapshot and one persistence transaction.
+    fn write_restore_position(
+        &mut self,
+        window: &crate::PhysicalWindowId,
+        frame: crate::Rect,
+    ) -> macos::ApplyOutcome {
+        let outcome = self.backend.set_position(window, frame);
+        log_event!("restore: {:?} to {:?} ({:?})", window, frame, outcome);
+        match outcome {
+            macos::ApplyOutcome::Applied => {
+                // Also throttles the next retry and heal consideration.
+                self.recently_parked.insert(window.clone(), Instant::now());
+            }
+            macos::ApplyOutcome::Gone => self.commit_unparked(window),
             _ => {}
         }
         outcome
@@ -4002,10 +3940,10 @@ mod tests {
         let cancelled = AtomicBool::new(false);
         let second = WorkspaceId::new(2).unwrap();
         let third = WorkspaceId::new(3).unwrap();
-        queue_latest(&mut pending, Action::SwitchWorkspace(second));
-        queue_latest(&mut pending, Action::SwitchWorkspace(third));
+        queue_latest(&mut pending, WorkerAction::SwitchWorkspace(second));
+        queue_latest(&mut pending, WorkerAction::SwitchWorkspace(third));
 
-        assert_eq!(pending.take(), Some(Action::SwitchWorkspace(third)));
+        assert_eq!(pending.take(), Some(WorkerAction::SwitchWorkspace(third)));
         assert_eq!(pending.take(), None);
         assert!(!cancelled.load(Ordering::Acquire));
     }

@@ -5,7 +5,32 @@ script builds locked release binaries, assembles `Spaceman.app`, applies hardene
 signing with a timestamp, and verifies the signature. It does not create, notarize, staple, publish,
 or update an artifact.
 
-## Current Build
+## Direct Distribution
+
+Spaceman's release path is direct distribution outside the Mac App Store. Release artifacts use
+Developer ID signing and Apple's notarization service so Gatekeeper can verify them. App Store
+Connect upload and TestFlight tooling are not part of this release path.
+
+Create the default notarization credential once. `notarytool` prompts securely for an app-specific
+password and stores the validated credential in Keychain; no secret enters the repository:
+
+```sh
+xcrun notarytool store-credentials spaceman-notary \
+  --apple-id "YOUR_APPLE_ID" \
+  --team-id "YOUR_TEAM_ID"
+```
+
+Then build, sign, notarize, staple, validate, archive, and checksum the exact bundle:
+
+```sh
+./scripts/release-app.sh
+```
+
+The script auto-detects the first `Developer ID Application` identity and uses the
+`spaceman-notary` Keychain profile. Override those choices with `SPACEMAN_CODESIGN_IDENTITY` and
+`SPACEMAN_NOTARY_KEYCHAIN_PROFILE`. Successful artifacts are written to `dist/`.
+
+## Source Build
 
 ```sh
 SPACEMAN_CODESIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
