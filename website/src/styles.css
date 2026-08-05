@@ -16,11 +16,7 @@
   font-family: var(--font-sans);
   font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   color-scheme: dark;
-  background: #0c0d0f;
-}
-
-html {
-  scroll-behavior: smooth;
+  background: #0b0c0e;
 }
 
 body {
@@ -31,18 +27,4 @@ body {
 button,
 a {
   -webkit-tap-highlight-color: transparent;
-}
-
-.page-grid {
-  background-image:
-    linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
-  background-size: 42px 42px;
-  background-position: center top;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  html {
-    scroll-behavior: auto;
-  }
 }
