@@ -22,16 +22,16 @@
       ],
       "lighting": "combined",
       "specular": true,
-      "blur-material": 0.06,
+      "blur-material": 0.03,
       "shadow": {
         "kind": "neutral",
-        "opacity": 0.3
+        "opacity": 0.24
       },
       "translucency": {
         "enabled": true,
-        "value": 0.18
+        "value": 0.68
       },
-      "opacity": 0.92
+      "opacity": 0.72
     }
   ],
   "supported-platforms": {
