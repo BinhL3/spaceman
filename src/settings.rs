@@ -7,7 +7,9 @@ use gpui::{
 
 use crate::{
     app::Action,
-    desktop_ui::{compact_button, primary_button, settings_panel, settings_row, window_frame},
+    desktop_ui::{
+        compact_button, primary_button, settings_panel, settings_row, success_badge, window_frame,
+    },
     login_item, macos, sparkle,
 };
 
@@ -156,6 +158,16 @@ impl Render for SettingsWindow {
                 )
             }
         };
+        let accessibility_control = if accessibility {
+            success_badge("Granted").into_any_element()
+        } else {
+            primary_button("Grant Access")
+                .id("open-accessibility")
+                .on_click(cx.listener(|settings, _, _, _| {
+                    settings.send(Action::OpenAccessibility);
+                }))
+                .into_any_element()
+        };
 
         window_frame().flex().items_center().justify_center().child(
             settings_panel()
@@ -163,19 +175,11 @@ impl Render for SettingsWindow {
                 .child(settings_row(
                     "Accessibility",
                     if accessibility {
-                        "Permission granted."
+                        "Spaceman can observe and arrange your windows."
                     } else {
                         "Permission required to observe and arrange windows."
                     },
-                    if accessibility {
-                        compact_button("Open Settings")
-                    } else {
-                        primary_button("Grant Access")
-                    }
-                    .id("open-accessibility")
-                    .on_click(cx.listener(|settings, _, _, _| {
-                        settings.send(Action::OpenAccessibility);
-                    })),
+                    accessibility_control,
                 ))
                 .child(settings_row(
                     "Launch at Login",

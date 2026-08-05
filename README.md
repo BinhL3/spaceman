@@ -36,11 +36,11 @@ The current preview is a Developer ID-signed, notarized arm64 build for Apple si
 experimental; read [Known limitations](docs/limitations.md) before installing it.
 
 1. Disable every other window manager. For AeroSpace: `aerospace enable off`.
-2. Download [Spaceman 0.1.0 for Apple silicon](https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.0-macos-arm64.zip).
+2. Download [Spaceman 0.1.1 for Apple silicon](https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.1-macos-arm64.zip).
 3. Unzip it, move `Spaceman.app` to `~/Applications`, and open it.
 4. Complete the Accessibility setup shown by Spaceman.
 
-The matching [SHA-256 checksum](https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.0-macos-arm64.zip.sha256)
+The matching [SHA-256 checksum](https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.1-macos-arm64.zip.sha256)
 is published alongside the archive. Later preview updates are signed and delivered through Sparkle.
 
 ## Install From Source

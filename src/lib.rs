@@ -25,6 +25,9 @@ pub mod macos;
 pub mod model;
 pub mod navigation;
 pub mod observation;
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod permission_guide;
 pub mod reconcile;
 pub mod runtime;
 mod serde_map;

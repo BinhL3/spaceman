@@ -2,7 +2,6 @@ use std::{
     collections::{HashMap, HashSet},
     io::Write,
     path::PathBuf,
-    process::Command,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -22,7 +21,7 @@ use crate::{
     config::{Config, WindowDisposition},
     control::{self, Command as ControlCommand, Request as ControlRequest},
     hotkeys::{HotkeyPlan, Hotkeys},
-    live, login_item, macos, settings, sparkle, status_item, termination,
+    live, login_item, macos, permission_guide, settings, sparkle, status_item, termination,
 };
 
 /// Timestamped diagnostic line on stderr (redirected to `agent.log` in bundle
@@ -973,7 +972,7 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                         status_item::set_status(&format!("Could not open Settings: {error}"));
                     }
                 }
-                Action::OpenAccessibility => open_accessibility_settings(),
+                Action::OpenAccessibility => permission_guide::show(),
                 Action::CheckForUpdates => {
                     sparkle::check_for_updates();
                     let _ = cx.update(settings::refresh);
@@ -3629,12 +3628,6 @@ fn persist_workspace_state(state: &crate::workspace::WorkspaceState) -> Result<(
         .map_err(|error| format!("failed to write workspace state: {error}"))?;
     file.commit()
         .map_err(|error| format!("failed to commit workspace state: {error}"))
-}
-
-fn open_accessibility_settings() {
-    let _ = Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        .spawn();
 }
 
 #[cfg(test)]

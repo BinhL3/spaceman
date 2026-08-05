@@ -5,6 +5,8 @@ pub(crate) const SURFACE: u32 = 0x171717;
 pub(crate) const SURFACE_HOVER: u32 = 0x1d1d1d;
 pub(crate) const LINE: u32 = 0x292929;
 pub(crate) const ACCENT: u32 = 0x3b5cf6;
+pub(crate) const SUCCESS: u32 = 0x69d89f;
+const SUCCESS_SURFACE: u32 = 0x183026;
 pub(crate) const TEXT: u32 = 0xeeeeee;
 pub(crate) const TEXT_SOFT: u32 = 0xb8b8b8;
 pub(crate) const MUTED: u32 = 0x858585;
@@ -56,6 +58,23 @@ pub(crate) fn primary_button(label: impl IntoElement) -> Div {
         .bg(rgb(ACCENT))
         .text_color(rgb(0xffffff))
         .hover(|button| button.bg(rgb(0x4a69f7)))
+}
+
+pub(crate) fn success_badge(label: impl IntoElement) -> Div {
+    div()
+        .h(px(26.0))
+        .px_3()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_1()
+        .rounded_full()
+        .bg(rgb(SUCCESS_SURFACE))
+        .text_size(px(11.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(SUCCESS))
+        .child("✓")
+        .child(label)
 }
 
 pub(crate) fn settings_row(
