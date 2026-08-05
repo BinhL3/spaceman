@@ -1,4 +1,4 @@
-use gpui::{Div, FontWeight, IntoElement, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Div, FontWeight, IntoElement, Rgba, div, prelude::*, px, rgb};
 
 pub(crate) const CANVAS: u32 = 0x111111;
 pub(crate) const SURFACE: u32 = 0x171717;
@@ -75,6 +75,37 @@ pub(crate) fn success_badge(label: impl IntoElement) -> Div {
         .text_color(rgb(SUCCESS))
         .child("✓")
         .child(label)
+}
+
+pub(crate) fn toggle(position: f32) -> AnyElement {
+    let color_position = position.clamp(0.0, 1.0);
+    div()
+        .w(px(24.0))
+        .h(px(16.0))
+        .p(px(2.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .rounded(px(4.0))
+        .bg(mix_color(rgb(0x3a3a3a), rgb(ACCENT), color_position))
+        .child(
+            div()
+                .ml(px(8.0 * position.clamp(-0.04, 1.04)))
+                .size(px(12.0))
+                .rounded(px(2.0))
+                .bg(mix_color(rgb(0xc8c8c8), rgb(0xfafafa), color_position)),
+        )
+        .into_any_element()
+}
+
+fn mix_color(from: Rgba, to: Rgba, position: f32) -> Rgba {
+    let position = position.clamp(0.0, 1.0);
+    Rgba {
+        r: from.r + (to.r - from.r) * position,
+        g: from.g + (to.g - from.g) * position,
+        b: from.b + (to.b - from.b) * position,
+        a: from.a + (to.a - from.a) * position,
+    }
 }
 
 pub(crate) fn settings_row(

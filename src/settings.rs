@@ -1,4 +1,8 @@
-use std::{cell::RefCell, sync::mpsc::Sender, time::Duration};
+use std::{
+    cell::RefCell,
+    sync::mpsc::Sender,
+    time::{Duration, Instant},
+};
 
 use gpui::{
     App, Bounds, Context, Render, Subscription, Timer, TitlebarOptions, Window, WindowBounds,
@@ -8,7 +12,8 @@ use gpui::{
 use crate::{
     app::Action,
     desktop_ui::{
-        compact_button, primary_button, settings_panel, settings_row, success_badge, window_frame,
+        compact_button, primary_button, settings_panel, settings_row, success_badge, toggle,
+        window_frame,
     },
     login_item, macos, sparkle,
 };
@@ -72,6 +77,7 @@ struct SettingsWindow {
     actions: Sender<Action>,
     accessibility: bool,
     launch_at_login: login_item::Status,
+    launch_at_login_toggle: ToggleSpring,
     launch_error: Option<String>,
     update_status: sparkle::UpdateStatus,
     _activation: Subscription,
@@ -105,6 +111,9 @@ impl SettingsWindow {
             actions,
             accessibility: macos::accessibility_trusted(),
             launch_at_login,
+            launch_at_login_toggle: ToggleSpring::new(
+                launch_at_login == login_item::Status::Enabled,
+            ),
             launch_error,
             update_status: sparkle::status(),
             _activation: activation,
@@ -121,6 +130,8 @@ impl SettingsWindow {
             || self.update_status != update_status;
         self.accessibility = accessibility;
         self.launch_at_login = launch_at_login;
+        self.launch_at_login_toggle
+            .set_enabled(launch_at_login == login_item::Status::Enabled);
         self.launch_error = launch_error;
         self.update_status = update_status;
         changed
@@ -132,7 +143,7 @@ impl SettingsWindow {
 }
 
 impl Render for SettingsWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let accessibility = self.accessibility;
         let login_enabled = self.launch_at_login == login_item::Status::Enabled;
         let login_description = self.launch_error.clone().unwrap_or_else(|| {
@@ -168,6 +179,12 @@ impl Render for SettingsWindow {
                 }))
                 .into_any_element()
         };
+        let launch_at_login_control =
+            if self.launch_at_login == login_item::Status::RequiresApproval {
+                compact_button("Open Settings").into_any_element()
+            } else {
+                toggle(self.launch_at_login_toggle.render_position(window))
+            };
 
         window_frame().flex().items_center().justify_center().child(
             settings_panel()
@@ -181,15 +198,23 @@ impl Render for SettingsWindow {
                     },
                     accessibility_control,
                 ))
-                .child(settings_row(
-                    "Launch at Login",
-                    login_description,
-                    compact_button(if login_enabled { "Disable" } else { "Enable" })
-                        .id("toggle-launch-at-login")
-                        .on_click(cx.listener(|settings, _, _, _| {
-                            settings.send(Action::ToggleLaunchAtLogin);
-                        })),
-                ))
+                .child(
+                    settings_row(
+                        "Launch at Login",
+                        login_description,
+                        launch_at_login_control,
+                    )
+                    .id("toggle-launch-at-login")
+                    .on_click(cx.listener(|settings, _, _, cx| {
+                        if settings.launch_at_login != login_item::Status::RequiresApproval {
+                            settings.launch_at_login_toggle.set_enabled(
+                                settings.launch_at_login != login_item::Status::Enabled,
+                            );
+                        }
+                        settings.send(Action::ToggleLaunchAtLogin);
+                        cx.notify();
+                    })),
+                )
                 .child(
                     settings_row(
                         "Software Update",
@@ -208,9 +233,95 @@ impl Render for SettingsWindow {
     }
 }
 
+struct ToggleSpring {
+    position: f32,
+    velocity: f32,
+    target: f32,
+    last_frame: Instant,
+}
+
+impl ToggleSpring {
+    fn new(enabled: bool) -> Self {
+        let position = if enabled { 1.0 } else { 0.0 };
+        Self::at(position)
+    }
+
+    fn at(position: f32) -> Self {
+        Self {
+            position,
+            velocity: 0.0,
+            target: position,
+            last_frame: Instant::now(),
+        }
+    }
+
+    fn set_enabled(&mut self, enabled: bool) {
+        let target = if enabled { 1.0 } else { 0.0 };
+        if self.target != target {
+            self.target = target;
+            self.last_frame = Instant::now();
+        }
+    }
+
+    fn advance(&mut self, elapsed: Duration) {
+        const STIFFNESS: f32 = 40.0;
+        let mut remaining = elapsed.as_secs_f32().min(0.1);
+        while remaining > 0.0 {
+            let dt = remaining.min(1.0 / 240.0);
+            let acceleration = -STIFFNESS.powi(2) * (self.position - self.target)
+                - 2.0 * STIFFNESS * self.velocity;
+            self.velocity += acceleration * dt;
+            self.position += self.velocity * dt;
+            remaining -= dt;
+        }
+        if self.is_settled() {
+            self.position = self.target;
+            self.velocity = 0.0;
+        }
+    }
+
+    fn render_position(&mut self, window: &mut Window) -> f32 {
+        let now = Instant::now();
+        self.advance(now.duration_since(self.last_frame));
+        self.last_frame = now;
+        if !self.is_settled() {
+            window.request_animation_frame();
+        }
+        self.position
+    }
+
+    fn is_settled(&self) -> bool {
+        (self.position - self.target).abs() < 0.001 && self.velocity.abs() < 0.01
+    }
+}
+
 fn launch_status() -> (login_item::Status, Option<String>) {
     match login_item::status() {
         Ok(status) => (status, None),
         Err(error) => (login_item::Status::Disabled, Some(error)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toggle_spring_is_frame_rate_independent_and_settles() {
+        let simulate = |frame_rate: u32| {
+            let mut spring = ToggleSpring::new(false);
+            spring.set_enabled(true);
+            for _ in 0..frame_rate {
+                spring.advance(Duration::from_secs_f32(1.0 / frame_rate as f32));
+            }
+            spring
+        };
+
+        let at_60_hz = simulate(60);
+        let at_120_hz = simulate(120);
+        assert!(at_60_hz.is_settled());
+        assert!(at_120_hz.is_settled());
+        assert!((at_60_hz.position - at_120_hz.position).abs() < 0.001);
+        assert_eq!(at_60_hz.position, 1.0);
     }
 }
