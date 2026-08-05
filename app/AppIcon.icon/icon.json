@@ -18,6 +18,35 @@
   },
   "groups": [
     {
+      "name": "Foreground orbit",
+      "layers": [
+        {
+          "image-name": "OrbitFront.svg",
+          "name": "Foreground orbit",
+          "glass": true,
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "lighting": "combined",
+      "specular": true,
+      "blur-material": 0.04,
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.3
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.06
+      },
+      "opacity": 0.96
+    },
+    {
       "name": "Spatial panes",
       "layers": [
         {
@@ -47,11 +76,11 @@
       "opacity": 1
     },
     {
-      "name": "Orbit",
+      "name": "Rear orbit",
       "layers": [
         {
-          "image-name": "Orbit.svg",
-          "name": "Orbit",
+          "image-name": "OrbitBack.svg",
+          "name": "Rear orbit",
           "glass": true,
           "position": {
             "scale": 1,
@@ -74,6 +103,31 @@
         "value": 0.08
       },
       "opacity": 0.82
+    },
+    {
+      "name": "Space",
+      "layers": [
+        {
+          "image-name": "Space.png",
+          "name": "Space",
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0
+      },
+      "translucency": {
+        "enabled": false,
+        "value": 0
+      },
+      "opacity": 1
     }
   ],
   "supported-platforms": {

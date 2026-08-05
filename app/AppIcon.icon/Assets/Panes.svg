@@ -1,21 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
-    <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#68efff"/>
-      <stop offset="1" stop-color="#1689ee"/>
-    </linearGradient>
-    <linearGradient id="ice" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#f1fbff"/>
-      <stop offset="1" stop-color="#9fd8ff"/>
-    </linearGradient>
-    <linearGradient id="violet" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#b49aff"/>
-      <stop offset="1" stop-color="#6549df"/>
+    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#dcebff" stop-opacity=".78"/>
+      <stop offset=".45" stop-color="#609eff" stop-opacity=".38"/>
+      <stop offset="1" stop-color="#1459d9" stop-opacity=".72"/>
     </linearGradient>
   </defs>
-  <rect x="242" y="276" width="226" height="472" rx="54" fill="url(#cyan)"/>
-  <rect x="500" y="276" width="282" height="210" rx="54" fill="url(#ice)"/>
-  <rect x="500" y="518" width="282" height="230" rx="54" fill="url(#violet)"/>
-  <path d="M291 331h112" fill="none" stroke="#fff" stroke-linecap="round" stroke-width="24" opacity=".32"/>
-  <path d="M549 331h150" fill="none" stroke="#fff" stroke-linecap="round" stroke-width="24" opacity=".3"/>
+  <g fill="url(#glass)" stroke="#b9dcff" stroke-width="8">
+    <rect x="225" y="273" width="405" height="292" rx="57"/>
+    <rect x="660" y="273" width="158" height="292" rx="57"/>
+    <rect x="225" y="595" width="405" height="196" rx="57"/>
+    <rect x="660" y="595" width="158" height="196" rx="57"/>
+  </g>
 </svg>
