@@ -4,14 +4,14 @@ import Foundation
 
 let paneSVG = """
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <g fill="#e4ecff">
-    <rect x="196" y="278" width="364" height="468" rx="72"/>
-    <rect x="584" y="278" width="244" height="222" rx="58"/>
-    <rect x="584" y="524" width="244" height="222" rx="58"/>
+  <g fill="#f4f6ff">
+    <rect x="190" y="270" width="374" height="484" rx="76"/>
+    <rect x="590" y="270" width="244" height="229" rx="62"/>
+    <rect x="590" y="525" width="244" height="229" rx="62"/>
   </g>
 </svg>
 """
 
 let output = URL(fileURLWithPath: CommandLine.arguments.dropFirst().first ?? "app/AppIcon.icon/Assets")
 try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-try paneSVG.write(to: output.appendingPathComponent("Panes.svg"), atomically: true, encoding: .utf8)
+try paneSVG.write(to: output.appendingPathComponent("Mark.svg"), atomically: true, encoding: .utf8)
