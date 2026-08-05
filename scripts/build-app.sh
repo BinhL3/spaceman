@@ -3,6 +3,8 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 bundle="$root/target/Spaceman.app"
+icon_output="$root/target/AppIcon.assets"
+icon_info="$root/target/AppIcon-info.plist"
 identity=${SPACEMAN_CODESIGN_IDENTITY:-}
 deployment_target=$(/usr/bin/plutil -extract LSMinimumSystemVersion raw "$root/app/Info.plist")
 
@@ -20,10 +22,23 @@ MACOSX_DEPLOYMENT_TARGET="$deployment_target" \
   CARGO_TARGET_DIR="$root/target" \
   cargo build --manifest-path "$root/Cargo.toml" --release --locked --bins
 rm -rf "$bundle"
-mkdir -p "$bundle/Contents/MacOS"
+mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 cp "$root/target/release/spaceman-agent" "$bundle/Contents/MacOS/spaceman-agent"
 cp "$root/target/release/spaceman" "$bundle/Contents/MacOS/spaceman"
 cp "$root/app/Info.plist" "$bundle/Contents/Info.plist"
+rm -rf "$icon_output"
+mkdir -p "$icon_output"
+xcrun actool "$root/app/AppIcon.icon" \
+  --compile "$icon_output" \
+  --platform macosx \
+  --minimum-deployment-target "$deployment_target" \
+  --app-icon AppIcon \
+  --standalone-icon-behavior all \
+  --output-partial-info-plist "$icon_info" \
+  --output-format human-readable-text \
+  --warnings \
+  --notices >&2
+cp "$icon_output/AppIcon.icns" "$icon_output/Assets.car" "$bundle/Contents/Resources/"
 plutil -lint "$bundle/Contents/Info.plist" >/dev/null
 codesign --force --timestamp --options runtime --sign "$identity" \
   "$bundle/Contents/MacOS/spaceman-agent"

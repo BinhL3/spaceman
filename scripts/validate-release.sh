@@ -67,6 +67,8 @@ esac
   fail "built bundle deployment target differs from source Info.plist"
 [ "$(plist_value CFBundleExecutable "$bundle/Contents/Info.plist")" = "spaceman-agent" ] || \
   fail "built bundle has an unexpected main executable"
+[ -s "$bundle/Contents/Resources/AppIcon.icns" ] || fail "built bundle is missing AppIcon.icns"
+[ -s "$bundle/Contents/Resources/Assets.car" ] || fail "built bundle is missing Assets.car"
 
 for executable in $expected_executables; do
   path="$bundle/Contents/MacOS/$executable"
@@ -121,6 +123,9 @@ Spaceman.app/Contents/Info.plist
 Spaceman.app/Contents/MacOS/
 Spaceman.app/Contents/MacOS/spaceman
 Spaceman.app/Contents/MacOS/spaceman-agent
+Spaceman.app/Contents/Resources/
+Spaceman.app/Contents/Resources/AppIcon.icns
+Spaceman.app/Contents/Resources/Assets.car
 Spaceman.app/Contents/_CodeSignature/
 Spaceman.app/Contents/_CodeSignature/CodeResources
 EOF
@@ -133,6 +138,8 @@ for relative_path in \
   Contents/Info.plist \
   Contents/MacOS/spaceman \
   Contents/MacOS/spaceman-agent \
+  Contents/Resources/AppIcon.icns \
+  Contents/Resources/Assets.car \
   Contents/_CodeSignature/CodeResources
 do
   /usr/bin/cmp "$bundle/$relative_path" "$extracted/Spaceman.app/$relative_path" || \

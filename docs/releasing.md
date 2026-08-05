@@ -23,7 +23,7 @@ Do not publish `target/Spaceman.app` as a release based only on those commands.
 - Validate the declared minimum macOS version and a current macOS version.
 - Test first install, Accessibility onboarding, launch, shortcuts, displays, upgrade, crash recovery,
   pause/quit restoration, and uninstall on a clean machine.
-- Add and verify a real app icon and a concise demo; neither is present now.
+- Add and verify a concise product demo.
 - Recheck the private `_AXUIElementGetWindow` risk and state clearly that the Mac App Store is not
   supported.
 - Review `SECURITY.md`, `CONTRIBUTING.md`, license, version, changelog/release notes, and repository

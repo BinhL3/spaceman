@@ -1,0 +1,114 @@
+{
+  "color-space-for-untagged-svg-colors": "display-p3",
+  "fill": {
+    "linear-gradient": [
+      "display-p3:0.02745,0.03922,0.10980,1.00000",
+      "display-p3:0.10588,0.05490,0.23529,1.00000"
+    ],
+    "orientation": {
+      "start": {
+        "x": 0.18,
+        "y": 0.05
+      },
+      "stop": {
+        "x": 0.82,
+        "y": 0.95
+      }
+    }
+  },
+  "groups": [
+    {
+      "name": "Tiled visor",
+      "layers": [
+        {
+          "image-name": "Visor.svg",
+          "name": "Tiled visor",
+          "glass": true,
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "lighting": "combined",
+      "specular": true,
+      "blur-material": 0.08,
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.42
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.08
+      },
+      "opacity": 1
+    },
+    {
+      "name": "Helmet",
+      "layers": [
+        {
+          "image-name": "Helmet.svg",
+          "name": "Helmet",
+          "glass": true,
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "lighting": "combined",
+      "specular": true,
+      "blur-material": 0.18,
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.3
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.2
+      },
+      "opacity": 0.96
+    },
+    {
+      "name": "Orbit",
+      "layers": [
+        {
+          "image-name": "Orbit.svg",
+          "name": "Orbit",
+          "glass": true,
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "lighting": "combined",
+      "specular": true,
+      "blur-material": 0.06,
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.3
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.12
+      },
+      "opacity": 0.9
+    }
+  ],
+  "supported-platforms": {
+    "circles": [
+      "watchOS"
+    ],
+    "squares": "shared"
+  }
+}

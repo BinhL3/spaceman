@@ -17,7 +17,7 @@ Spaceman is private, experimental software, not a proven public release.
 - Global shortcuts may collide with other applications or fail on keyboard layouts that cannot
   produce required characters.
 - There is no preferences UI, automatic updater, telemetry, or network service.
-- The repository still lacks release presentation such as an app icon and user demo.
+- The repository still lacks a concise product demo.
 
 Use the isolated live harnesses in [Development](development.md) before changing window-management,
 workspace, display, or recovery behavior.
