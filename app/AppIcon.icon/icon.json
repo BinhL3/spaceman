@@ -1,57 +1,15 @@
 {
   "color-space-for-untagged-svg-colors": "display-p3",
   "fill": {
-    "linear-gradient": [
-      "display-p3:0.00392,0.01176,0.04706,1.00000",
-      "display-p3:0.01961,0.10196,0.35294,1.00000"
-    ],
-    "orientation": {
-      "start": {
-        "x": 0.16,
-        "y": 0.05
-      },
-      "stop": {
-        "x": 0.86,
-        "y": 0.95
-      }
-    }
+    "solid": "display-p3:0.00784,0.01176,0.02745,1.00000"
   },
   "groups": [
     {
-      "name": "Workspace panes",
+      "name": "Tiled panes",
       "layers": [
         {
           "image-name": "Panes.svg",
-          "name": "Workspace panes",
-          "glass": true,
-          "position": {
-            "scale": 1,
-            "translation-in-points": [
-              0,
-              0
-            ]
-          }
-        }
-      ],
-      "lighting": "combined",
-      "specular": true,
-      "blur-material": 0.12,
-      "shadow": {
-        "kind": "neutral",
-        "opacity": 0.28
-      },
-      "translucency": {
-        "enabled": true,
-        "value": 0.42
-      },
-      "opacity": 0.94
-    },
-    {
-      "name": "Porthole rim",
-      "layers": [
-        {
-          "image-name": "Rim.svg",
-          "name": "Porthole rim",
+          "name": "Tiled panes",
           "glass": true,
           "position": {
             "scale": 1,
@@ -67,13 +25,13 @@
       "blur-material": 0.06,
       "shadow": {
         "kind": "neutral",
-        "opacity": 0.32
+        "opacity": 0.3
       },
       "translucency": {
         "enabled": true,
-        "value": 0.26
+        "value": 0.18
       },
-      "opacity": 0.9
+      "opacity": 0.92
     }
   ],
   "supported-platforms": {

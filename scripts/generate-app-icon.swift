@@ -10,9 +10,8 @@ struct Point {
 
 struct IconGeometry {
     let center = Point(x: 512, y: 512)
-    let visorRadius = Point(x: 350, y: 265)
+    let visorRadius = Point(x: 330, y: 250)
     let visorExponent: CGFloat = 3.4
-    let rimThickness: CGFloat = 14
     let gutter: CGFloat = 22
     let paneRadius: CGFloat = 30
     let verticalSplit: CGFloat = 570
@@ -89,17 +88,9 @@ func path(_ points: [Point]) -> String {
 }
 
 let geometry = IconGeometry()
-let outerVisor = superellipse(
+let visor = superellipse(
     center: geometry.center,
     radius: geometry.visorRadius,
-    exponent: geometry.visorExponent
-)
-let innerVisor = superellipse(
-    center: geometry.center,
-    radius: Point(
-        x: geometry.visorRadius.x - geometry.rimThickness,
-        y: geometry.visorRadius.y - geometry.rimThickness
-    ),
     exponent: geometry.visorExponent
 )
 let halfGutter = geometry.gutter / 2
@@ -126,22 +117,15 @@ let clips = [
         radius: geometry.paneRadius
     ),
 ]
-let panes = clips.map { intersect(innerVisor, with: $0) }
+let panes = clips.map { intersect(visor, with: $0) }
 let panePaths = panes.map { "    <path d=\"\(path($0))\"/>" }.joined(separator: "\n")
 let paneSVG = """
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <g fill="#244f8f">
+  <g fill="#e4ecff">
 \(panePaths)
   </g>
 </svg>
 """
-let rimSVG = """
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <path fill="#d7e7ff" fill-rule="evenodd" d="\(path(outerVisor))\(path(innerVisor.reversed()))"/>
-</svg>
-"""
-
 let output = URL(fileURLWithPath: CommandLine.arguments.dropFirst().first ?? "app/AppIcon.icon/Assets")
 try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
 try paneSVG.write(to: output.appendingPathComponent("Panes.svg"), atomically: true, encoding: .utf8)
-try rimSVG.write(to: output.appendingPathComponent("Rim.svg"), atomically: true, encoding: .utf8)
