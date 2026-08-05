@@ -59,7 +59,8 @@ baseline_workspaces_restored() {
   current_workspaces="$(mktemp)"
   aerospace list-windows --all --format '%{window-id}|%{workspace}' \
     | sort -t '|' -k1,1 >"$current_workspaces"
-  if ! cmp -s "$baseline_workspaces" "$current_workspaces"; then
+  if ! join -t '|' -1 1 -2 1 "$baseline_workspaces" "$current_workspaces" \
+    | awk -F '|' '$2 != $3 { changed = 1 } END { exit changed }'; then
     rm -f "$current_workspaces"
     return 1
   fi

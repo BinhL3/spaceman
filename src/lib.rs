@@ -1,13 +1,24 @@
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 pub mod app;
+pub mod config;
+#[cfg(target_os = "macos")]
+pub mod control;
 pub mod geometry;
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod hotkeys;
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod keyboard_layout;
+mod layout_tree;
 #[cfg(target_os = "macos")]
 pub mod live;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 pub mod macos;
 pub mod model;
+pub mod navigation;
 pub mod observation;
 pub mod reconcile;
 pub mod runtime;
@@ -15,11 +26,20 @@ mod serde_map;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod status_item;
+pub mod workspace;
 
 pub use geometry::{Axis, Rect};
 pub use model::{AppInstanceId, BindingState, Model, PhysicalWindowId, Slot, SlotId};
+pub use navigation::{Direction, NavigationTile};
 pub use observation::{AppObservation, NativeObservation, ObservedApplication, ObservedWindow};
 pub use reconcile::{
     Decision, Placement, Reconciliation, ReconciliationEvidence, Settings, reconcile,
 };
 pub use runtime::{CycleTicket, Engine, StaleCycle};
+pub use workspace::{DisplayRole, DisplaySelector, WorkspaceId, Workspaces};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResizeDirection {
+    Shrink,
+    Grow,
+}

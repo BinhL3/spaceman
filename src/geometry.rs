@@ -24,6 +24,64 @@ impl Rect {
             && (self.width - other.width).abs() <= tolerance
             && (self.height - other.height).abs() <= tolerance
     }
+
+    #[must_use]
+    pub const fn contains(self, x: i32, y: i32) -> bool {
+        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
+    }
+
+    #[must_use]
+    pub const fn contains_center(self, other: Self) -> bool {
+        self.contains(other.x + other.width / 2, other.y + other.height / 2)
+    }
+}
+
+#[must_use]
+pub fn parked_frame(output: Rect, displays: &[Rect], window: Rect) -> Rect {
+    let x_offset = output.width / 10;
+    let y_offset = output.height / 10;
+    let left_score = corner_score(
+        displays,
+        [
+            (output.x - 2, output.y + output.height - y_offset),
+            (output.x + x_offset, output.y + output.height + 2),
+            (output.x - 2, output.y + output.height + 2),
+        ],
+    );
+    let right_score = corner_score(
+        displays,
+        [
+            (
+                output.x + output.width + 2,
+                output.y + output.height - y_offset,
+            ),
+            (
+                output.x + output.width - x_offset,
+                output.y + output.height + 2,
+            ),
+            (output.x + output.width + 2, output.y + output.height + 2),
+        ],
+    );
+    Rect {
+        x: if left_score < right_score {
+            output.x - window.width + 1
+        } else {
+            output.x + output.width - 1
+        },
+        y: output.y + (output.height - window.height).max(0),
+        ..window
+    }
+}
+
+fn corner_score(displays: &[Rect], points: [(i32, i32); 3]) -> usize {
+    displays
+        .iter()
+        .map(|display| {
+            usize::from(display.contains(points[0].0, points[0].1))
+                + usize::from(display.contains(points[1].0, points[1].1))
+                + 10 * usize::from(display.contains(points[2].0, points[2].1))
+        })
+        .sum()
 }
 
 #[must_use]
@@ -141,5 +199,29 @@ mod tests {
         assert_eq!(placements[0].frame.width, 50);
         assert_eq!(placements[1].frame.width, 50);
         assert_eq!(placements[1].window, None);
+    }
+
+    #[test]
+    fn parks_beyond_outer_edges_without_requesting_a_clamped_position() {
+        let left = Rect {
+            width: 1000,
+            height: 800,
+            ..Rect::default()
+        };
+        let right = Rect {
+            x: 1000,
+            width: 1000,
+            height: 800,
+            ..Rect::default()
+        };
+        let window = Rect {
+            width: 400,
+            height: 300,
+            ..Rect::default()
+        };
+
+        assert_eq!(parked_frame(left, &[left, right], window).x, -399);
+        assert_eq!(parked_frame(right, &[left, right], window).x, 1999);
+        assert_eq!(parked_frame(left, &[left, right], window).y, 500);
     }
 }

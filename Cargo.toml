@@ -2,34 +2,45 @@
 name = "spaceman"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
 license = "MIT"
 description = "A macOS tiling window manager with stable logical windows"
+repository = "https://github.com/kitlangton/spaceman"
+publish = false
 default-run = "spaceman"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-ctrlc = "3"
+toml = "1"
+atomic-write-file = "0.3"
+ctrlc = { version = "3", features = ["termination"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
 libc = "0.2"
 objc2 = { version = "0.6", default-features = false, features = ["std"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+  "block2",
   "libc",
   "objc2-core-foundation",
   "NSApplication",
+  "NSBezierPath",
   "NSButton",
   "NSCell",
   "NSControl",
+  "NSColor",
   "NSImage",
   "NSMenu",
   "NSMenuItem",
   "NSResponder",
   "NSRunningApplication",
   "NSScreen",
+  "NSGraphics",
   "NSStatusBar",
   "NSStatusBarButton",
   "NSStatusItem",
+  "NSStringDrawing",
   "NSView",
   "NSWorkspace",
 ] }
@@ -44,20 +55,27 @@ objc2-application-services = { version = "0.3.2", default-features = false, feat
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
   "std",
   "CFArray",
+  "CFDate",
   "CFDictionary",
   "CFNumber",
+  "CFRunLoop",
   "CFString",
+  "CFUUID",
 ] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+  "CGEvent",
   "CGEventSource",
   "CGEventTypes",
   "CGWindow",
 ] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "NSArray",
+  "NSAttributedString",
+  "NSDictionary",
   "NSDate",
   "NSGeometry",
   "NSObject",
+  "NSValue",
   "NSString",
 ] }
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }

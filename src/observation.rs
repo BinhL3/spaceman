@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use crate::{AppInstanceId, PhysicalWindowId, Rect};
 
@@ -12,6 +13,36 @@ pub struct ObservedApplication {
 pub struct ObservedWindow {
     pub id: PhysicalWindowId,
     pub frame: Rect,
+    #[serde(skip)]
+    pub title: Option<Arc<str>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::AppInstanceId;
+
+    use super::*;
+
+    #[test]
+    fn diagnostics_do_not_serialize_window_titles() {
+        let window = ObservedWindow {
+            id: PhysicalWindowId {
+                app: AppInstanceId {
+                    pid: 1,
+                    launched_at: 1,
+                },
+                window_id: 1,
+            },
+            frame: Rect::default(),
+            title: Some(Arc::from("Private document")),
+        };
+
+        assert!(
+            !serde_json::to_string(&window)
+                .unwrap()
+                .contains("Private document")
+        );
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

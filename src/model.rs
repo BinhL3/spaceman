@@ -10,7 +10,7 @@ pub struct AppInstanceId {
     pub launched_at: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct PhysicalWindowId {
     pub app: AppInstanceId,
     pub window_id: u32,

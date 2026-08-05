@@ -7,6 +7,8 @@ use crate::{
     Slot, SlotId, geometry,
 };
 
+const GHOSTTY_REPLACEMENT_SETTLE_CYCLES: u64 = 3;
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ReconciliationEvidence {
     #[serde(with = "crate::serde_map")]
@@ -21,6 +23,16 @@ pub struct Settings {
 }
 
 pub const DEFAULT_FRAME_TOLERANCE: i32 = 2;
+
+impl Settings {
+    #[must_use]
+    pub const fn for_output(output: Rect) -> Self {
+        Self {
+            output,
+            frame_tolerance: DEFAULT_FRAME_TOLERANCE,
+        }
+    }
+}
 
 const fn default_frame_tolerance() -> i32 {
     DEFAULT_FRAME_TOLERANCE
@@ -248,6 +260,34 @@ fn reconcile_unresolved(
         .filter(|window| !bound.contains(&window.id))
         .map(|window| window.id.clone())
         .collect();
+
+    let expired = unresolved.iter().all(|index| {
+        let BindingState::Unresolved { since, .. } = &model.workspace.slots[*index].binding else {
+            unreachable!()
+        };
+        context.cycle.saturating_sub(*since) >= GHOSTTY_REPLACEMENT_SETTLE_CYCLES
+    });
+    if expired {
+        let expired_slots: HashSet<_> = unresolved
+            .iter()
+            .map(|index| model.workspace.slots[*index].id)
+            .collect();
+        model.workspace.slots.retain(|slot| {
+            if !expired_slots.contains(&slot.id) {
+                return true;
+            }
+            let BindingState::Unresolved { previous, .. } = &slot.binding else {
+                unreachable!()
+            };
+            decisions.push(Decision::WindowRemoved {
+                slot: slot.id,
+                window: previous.clone(),
+            });
+            false
+        });
+        insert_windows(model, &candidates, decisions);
+        return true;
+    }
     if unresolved.len() == 1 && candidates.len() == 1 && context.focused == candidates.first() {
         let index = unresolved[0];
         let slot = &model.workspace.slots[index];
@@ -285,14 +325,10 @@ fn reconcile_unresolved(
     for index in unresolved {
         if let BindingState::Unresolved {
             candidates: existing,
-            since,
             ..
         } = &mut model.workspace.slots[index].binding
         {
             *existing = candidates.clone();
-            if existing.is_empty() {
-                *since = context.cycle;
-            }
         }
     }
     decisions.push(Decision::NativeTabAmbiguous { app: app.clone() });
@@ -408,6 +444,7 @@ mod tests {
                 window_id,
             },
             frame,
+            title: None,
         }
     }
 
@@ -698,6 +735,66 @@ mod tests {
         assert!(matches!(
             retried.model.workspace.slots[0].binding,
             BindingState::Unresolved { .. }
+        ));
+    }
+
+    #[test]
+    fn unresolved_ghostty_slot_expires_after_bounded_settling() {
+        let ghostty = app(10, 1);
+        let first = run(
+            &Model::default(),
+            1,
+            vec![complete(
+                &ghostty,
+                "com.mitchellh.ghostty",
+                Some(1),
+                vec![window(&ghostty, 1, OUTPUT)],
+            )],
+        );
+        let settling = run(
+            &first.model,
+            2,
+            vec![complete(
+                &ghostty,
+                "com.mitchellh.ghostty",
+                Some(2),
+                vec![window(
+                    &ghostty,
+                    2,
+                    Rect {
+                        width: 500,
+                        ..OUTPUT
+                    },
+                )],
+            )],
+        );
+
+        let still_settling = run(
+            &settling.model,
+            4,
+            vec![complete(
+                &ghostty,
+                "com.mitchellh.ghostty",
+                None,
+                Vec::new(),
+            )],
+        );
+        assert_eq!(still_settling.model.workspace.slots.len(), 1);
+
+        let expired = run(
+            &still_settling.model,
+            5,
+            vec![complete(
+                &ghostty,
+                "com.mitchellh.ghostty",
+                None,
+                Vec::new(),
+            )],
+        );
+        assert!(expired.model.workspace.slots.is_empty());
+        assert!(matches!(
+            expired.decisions.as_slice(),
+            [Decision::WindowRemoved { .. }]
         ));
     }
 

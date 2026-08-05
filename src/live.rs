@@ -1,13 +1,24 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    AppInstanceId, AppObservation, NativeObservation, ObservedApplication, Placement,
-    Reconciliation, Settings, macos,
+    AppInstanceId, AppObservation, NativeObservation, Placement, Reconciliation, Settings, macos,
 };
 
 pub fn add_absent_applications(
     observation: &mut NativeObservation,
     known_apps: &mut HashMap<AppInstanceId, String>,
+) {
+    add_absent_applications_with(
+        observation,
+        known_apps,
+        macos::is_process_incarnation_running,
+    );
+}
+
+pub fn add_absent_applications_with(
+    observation: &mut NativeObservation,
+    known_apps: &mut HashMap<AppInstanceId, String>,
+    mut is_running: impl FnMut(&AppInstanceId) -> bool,
 ) {
     let present: HashSet<_> = observation
         .applications
@@ -29,12 +40,11 @@ pub fn add_absent_applications(
         .filter(|(app, _)| !present.contains(*app))
         .map(|(app, bundle_id)| (app.clone(), bundle_id.clone()))
         .collect();
-    for (app, bundle_id) in missing {
-        if macos::is_process_incarnation_running(&app) {
-            observation.applications.push(AppObservation::Complete {
-                app: ObservedApplication { id: app, bundle_id },
-                focused: None,
-                windows: Vec::new(),
+    for (app, _) in missing {
+        if is_running(&app) {
+            observation.applications.push(AppObservation::Unavailable {
+                app,
+                error: "application was absent from the Core Graphics snapshot".into(),
             });
         } else {
             known_apps.remove(&app);
@@ -50,15 +60,29 @@ pub fn applicable_placements(
     reconciliation: &Reconciliation,
     settings: &Settings,
 ) -> Vec<Placement> {
-    let observed_frames: HashMap<_, _> = observation
+    let observed_frames = observed_frames(observation);
+    applicable_placements_with_frames(reconciliation, settings, &observed_frames)
+}
+
+pub fn observed_frames(
+    observation: &NativeObservation,
+) -> HashMap<crate::PhysicalWindowId, crate::Rect> {
+    observation
         .applications
         .iter()
         .flat_map(|app| match app {
             AppObservation::Complete { windows, .. } => windows.as_slice(),
             AppObservation::Unavailable { .. } | AppObservation::Terminated { .. } => &[],
         })
-        .map(|window| (&window.id, window.frame))
-        .collect();
+        .map(|window| (window.id.clone(), window.frame))
+        .collect()
+}
+
+pub fn applicable_placements_with_frames(
+    reconciliation: &Reconciliation,
+    settings: &Settings,
+    observed_frames: &HashMap<crate::PhysicalWindowId, crate::Rect>,
+) -> Vec<Placement> {
     reconciliation
         .placements
         .iter()
@@ -77,7 +101,10 @@ pub fn applicable_placements(
 
 #[cfg(test)]
 mod tests {
-    use crate::{Model, ObservedWindow, PhysicalWindowId, ReconciliationEvidence, Rect, reconcile};
+    use crate::{
+        Model, ObservedApplication, ObservedWindow, PhysicalWindowId, ReconciliationEvidence, Rect,
+        reconcile,
+    };
 
     use super::*;
 
@@ -115,6 +142,7 @@ mod tests {
                         height: 100,
                         ..Rect::default()
                     },
+                    title: None,
                 }],
             }],
         };
@@ -134,5 +162,70 @@ mod tests {
         };
         windows[0].frame = reconciliation.placements[0].frame;
         assert!(applicable_placements(&observation, &reconciliation, &settings).is_empty());
+    }
+
+    #[test]
+    fn one_missing_snapshot_does_not_authoritatively_remove_a_running_apps_windows() {
+        let app = AppInstanceId {
+            pid: 10,
+            launched_at: 1,
+        };
+        let window = PhysicalWindowId {
+            app: app.clone(),
+            window_id: 20,
+        };
+        let settings = Settings {
+            output: Rect {
+                width: 200,
+                height: 100,
+                ..Rect::default()
+            },
+            frame_tolerance: 2,
+        };
+        let initial = reconcile(
+            &Model::default(),
+            &NativeObservation {
+                cycle: 1,
+                mouse_down: false,
+                applications: vec![AppObservation::Complete {
+                    app: ObservedApplication {
+                        id: app.clone(),
+                        bundle_id: "com.example.Editor".into(),
+                    },
+                    focused: Some(window.clone()),
+                    windows: vec![ObservedWindow {
+                        id: window.clone(),
+                        frame: settings.output,
+                        title: None,
+                    }],
+                }],
+            },
+            &ReconciliationEvidence::default(),
+            &settings,
+        );
+        let mut known = HashMap::from([(app.clone(), "com.example.Editor".into())]);
+        let mut missing = NativeObservation {
+            cycle: 2,
+            mouse_down: false,
+            applications: Vec::new(),
+        };
+
+        add_absent_applications_with(&mut missing, &mut known, |_| true);
+        let result = reconcile(
+            &initial.model,
+            &missing,
+            &ReconciliationEvidence::default(),
+            &settings,
+        );
+
+        assert!(matches!(
+            missing.applications.as_slice(),
+            [AppObservation::Unavailable { app: missing, .. }] if missing == &app
+        ));
+        assert_eq!(result.model.workspace.slots, initial.model.workspace.slots);
+        assert_eq!(
+            result.model.workspace.slots[0].bound_window(),
+            Some(&window)
+        );
     }
 }

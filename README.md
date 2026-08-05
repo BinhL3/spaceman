@@ -1,111 +1,140 @@
 # Spaceman
 
-Spaceman is an experimental macOS tiling window manager that treats native tabs as one logical
-window. Its first target is the Ghostty failure where opening a native tab causes AeroSpace to
-allocate another tile and halve the visible terminal.
+Spaceman is an experimental macOS tiling window manager built around stable logical windows. A
+native window, including a selected Ghostty native tab, can change physical Accessibility identity
+without creating a new tile. Spaceman keeps the logical slot and replaces its physical binding when
+the evidence is unambiguous.
 
-The project uses Rust, will use GPUI for its foreground shell, requires no SIP changes, and keeps native Accessibility observation
-separate from layout state. A physical `AXWindow` may disappear or change identity while its logical
-tile remains in place. GPUI owns the foreground runtime and optional diagnostics UI; direct `objc2`
-adapters own the menu-bar item and macOS window-management seams.
+> [!WARNING]
+> Disable AeroSpace, yabai, Amethyst, and every other window manager before first opening Spaceman
+> or installing it from source. Two managers can repeatedly move the same windows. Keep the parked
+> window state until Spaceman has successfully paused or quit and restored every window.
 
-The first executable vertical slice implements fixture-driven reconciliation and layout:
+Spaceman currently:
 
-```sh
-cargo run -- replay fixtures/ghostty-tab-replacement.json
-```
+- starts automatic tiling when its global hotkeys are available;
+- provides ten logical workspaces, with 1-5 on the main display and 6-10 on the secondary display by
+  default;
+- assigns workspaces to `main`, `secondary`, a display UUID, or an exact display name, falling back
+  to the main display when a preferred display disconnects;
+- persists active workspaces, nested split layouts, tile order and weights, and parked-window recovery
+  metadata across restarts;
+- supports directional focus and movement across displays, drag-to-reorder/nest, mouse and keyboard
+  resizing, balancing, and non-fullscreen maximize;
+- exposes a local CLI over a user-only Unix socket.
 
-The JSON output shows every model revision, decision, and proposed placement. This path is also the
-contract that live macOS observation and frame application will use.
+Spaceman uses Accessibility APIs to observe, focus, move, and resize eligible windows. It requires no
+SIP change. Read [Security and privacy](docs/security-and-privacy.md),
+[Compatibility](docs/compatibility.md), and [Limitations](docs/limitations.md) before trying it.
 
-On macOS with Accessibility permission granted, inspect the live observation and proposed layout:
+## Install From Source
 
-```sh
-cargo run -- snapshot
-cargo run -- retile
-```
+There is no supported downloadable release artifact yet. The source build is distinct from a future
+signed and notarized release: **building the app currently requires your own `Developer ID
+Application` signing identity**.
 
-Apply the proposed layout only when the dry run contains the expected windows:
+Requirements: macOS, Xcode command-line tools, Rust 1.95.0, and a Developer ID Application identity.
 
-```sh
-cargo run -- retile --apply
-```
-
-Exercise reconciliation across repeated live observations, optionally applying each accepted layout:
-
-```sh
-cargo run -- watch 20
-cargo run -- watch 20 --apply
-```
-
-The bounded watch is intended for hands-on Ghostty tests: create, select, and close tabs while it is
-running, then inspect the per-cycle decisions in the JSON output.
-
-Run the persistent polling engine in dry-run mode, or explicitly enable frame application. Each cycle
-is emitted as a tagged JSON line, transient snapshot failures are retried, and `Ctrl-C` performs a
-clean shutdown:
-
-```sh
-cargo run -- run
-cargo run -- run --apply
-```
-
-## Menu Bar App
-
-Build, sign, install, and open the zero-window menu-bar app at the stable path
-`~/Applications/Spaceman.app`:
+From an existing repository checkout, first disable every other window manager, then run:
 
 ```sh
 ./scripts/install-app.sh
 ```
 
-The app starts paused. Its menu shows runtime status and provides **Automatic Tiling**, **Retile
-Now**, an Accessibility Settings shortcut, and **Quit Spaceman**. Grant Spaceman access under
-**System Settings → Privacy & Security → Accessibility** when prompted by the status message.
+Set `SPACEMAN_CODESIGN_IDENTITY` if auto-detection does not choose the desired identity. The script
+builds and signs `target/Spaceman.app`, installs it at `~/Applications/Spaceman.app`, links the CLI to
+`~/.local/bin/spaceman`, and opens the app.
 
-To try Spaceman as the active window manager, pause AeroSpace first so the two managers do not fight:
-
-```sh
-aerospace enable off
-open "$HOME/Applications/Spaceman.app"
-```
-
-Then enable **Automatic Tiling** from the Spaceman menu.
-
-Restore AeroSpace after quitting Spaceman:
+Ensure `~/.local/bin` is on `PATH`. For zsh:
 
 ```sh
-aerospace enable on
+printf '\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$HOME/.zshrc"
+exec zsh
 ```
 
-For isolated integration tests, scope the watcher and writes to one initial physical window ID. New
-physical IDs at the same logical frame are treated as candidates for that window's slot:
+Future release artifacts should not require users to possess a Developer ID identity. They do not
+exist yet; see [Releasing](docs/releasing.md).
+
+## First Open
+
+1. Disable every other window manager. For AeroSpace: `aerospace enable off`.
+2. Open Spaceman: `open "$HOME/Applications/Spaceman.app"`.
+3. Use `Open Accessibility Settings...` in the Spaceman menu and grant Spaceman access under
+   **System Settings > Privacy & Security > Accessibility**.
+4. Confirm operation with `spaceman ctl status`.
+
+When hotkeys register successfully, Spaceman starts automatic tiling; it does not intentionally start
+paused. Without Accessibility permission, the menu reports the permission error and tiling cannot
+manage windows. The menu actions are `Disable Tiling` (or `Enable Tiling` while paused),
+`Open Accessibility Settings...`, and `Quit Spaceman`.
+
+## Everyday Use
+
+Core controls:
+
+| Keys | Action |
+| --- | --- |
+| `Option+1` ... `Option+9`, `Option+0` | Switch to workspace 1 ... 10 |
+| `Option+Shift+1` ... `Option+Shift+0` | Move the focused window to workspace 1 ... 10 |
+| `Option+Tab` | Return to the previous workspace on the focused display |
+| `Option+H/J/K/L` | Focus left/down/up/right |
+| `Option+Shift+H/J/K/L` | Move the focused tile left/down/up/right |
+| `Option+/` | Toggle the active layout's root split axis |
+| `Option+-`, `Option+=` | Shrink/grow the focused tile by 50 pixels |
+| `Option+Shift+F` | Toggle maximize without native fullscreen |
+
+Character shortcuts follow the active macOS keyboard layout. Workspace digits remain the physical
+ANSI number row, and Tab remains physical Tab. See [Controls](docs/controls.md) for drag, resize,
+balance, CLI, and socket behavior.
 
 ```sh
-cargo run -- watch-window 12345 40 --apply
+spaceman ctl status
+spaceman ctl switch 2
+spaceman ctl move 7
+spaceman ctl layout
+spaceman ctl balance
+spaceman ctl pause
+spaceman ctl resume
 ```
 
-Run the complete autonomous Ghostty acceptance flow:
+## Configure
+
+Spaceman reads `~/Library/Application Support/Spaceman/config.toml` at process startup. See the exact
+current schema and [config.example.toml](config.example.toml) in
+[Configuration](docs/configuration.md).
 
 ```sh
-./scripts/live-ghostty-tabs.sh
+spaceman config-check "$HOME/Library/Application Support/Spaceman/config.toml"
+spaceman displays
 ```
 
-The harness launches a disposable Ghostty process on an isolated AeroSpace workspace on the
-non-focused display, snapshots all existing window/workspace assignments, pauses AeroSpace while Spaceman owns layout, creates and
-switches native tabs through PID-targeted menu actions, closes the disposable group, restores every
-baseline workspace, and verifies that no test windows or workspace changes leaked.
+## Recover Or Remove
 
-The repository also contains the implementation plan and supporting research:
+Use `spaceman ctl pause` or `spaceman ctl quit` and wait for `ctl status`/process exit to confirm that
+restoration completed **before** removing the app or state. Do not delete `parked-windows.json` as an
+early troubleshooting step: it records where off-screen parked windows must return.
 
-- [PLAN.md](PLAN.md) defines the MVP, architecture, milestones, and acceptance tests.
-- [docs/RESEARCH.md](docs/RESEARCH.md) records the source-backed findings behind the plan.
+Follow [Recovery](docs/recovery.md) for stuck or crashed processes and safe uninstall instructions.
+
+## Documentation
+
+- [Configuration](docs/configuration.md)
+- [Controls](docs/controls.md)
+- [Recovery and uninstall](docs/recovery.md)
+- [Security and privacy](docs/security-and-privacy.md)
+- [Compatibility](docs/compatibility.md)
+- [Known limitations](docs/limitations.md)
+- [Development](docs/development.md)
+- [Releasing](docs/releasing.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- [Historical implementation plan](PLAN.md) and [historical research](docs/RESEARCH.md)
 
 ## Status
 
-Active development. Fixture replay, live main-display/current-Space observation, bounded continuous
-reconciliation, dry-run layout, and explicit frame application are executable and tested. A persistent
-event-driven runtime and menu-bar packaging follow after the polling engine is stable.
+Private and experimental. Core behavior and automated tests exist, but release readiness is not
+proven. Notarization/stapling, downloadable artifacts, architecture and minimum-OS validation, a
+clean-machine test, and release presentation remain blockers.
 
 ## License
 

@@ -1,5 +1,8 @@
+use std::collections::HashMap;
+
 use crate::{
-    Model, NativeObservation, Reconciliation, ReconciliationEvidence, Settings, reconcile,
+    Model, NativeObservation, PhysicalWindowId, Placement, Reconciliation, ReconciliationEvidence,
+    Settings, Slot, layout_tree::LayoutTree, reconcile,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -17,6 +20,7 @@ pub struct StaleCycle {
 #[derive(Clone, Debug, Default)]
 pub struct Engine {
     model: Model,
+    layout: LayoutTree,
     evidence: ReconciliationEvidence,
     revision: u64,
     next_cycle: u64,
@@ -56,7 +60,10 @@ impl Engine {
         }
         self.pending = None;
 
-        let result = reconcile(&self.model, observation, &self.evidence, settings);
+        let mut result = reconcile(&self.model, observation, &self.evidence, settings);
+        self.layout
+            .sync(result.model.workspace.axis, &result.model.workspace.slots);
+        result.placements = placements_for(&self.layout, &result.model, settings.output);
         self.evidence.previous_placements = result
             .placements
             .iter()
@@ -75,6 +82,233 @@ impl Engine {
     pub const fn revision(&self) -> u64 {
         self.revision
     }
+
+    #[must_use]
+    pub fn bound_windows(&self) -> Vec<PhysicalWindowId> {
+        let slots: HashMap<_, _> = self
+            .model
+            .workspace
+            .slots
+            .iter()
+            .map(|slot| (slot.id, slot))
+            .collect();
+        self.layout
+            .slots()
+            .into_iter()
+            .filter_map(|id| slots.get(&id)?.bound_window().cloned())
+            .collect()
+    }
+
+    #[must_use]
+    pub fn placements(&self, settings: &Settings) -> Vec<Placement> {
+        placements_for(&self.layout, &self.model, settings.output)
+    }
+
+    pub(crate) fn toggle_axis(&mut self) {
+        self.layout.toggle_root_axis();
+        self.model.workspace.axis = self.layout.root_axis();
+        self.pending = None;
+        self.invalidate();
+    }
+
+    pub(crate) fn take_slot(&mut self, window: &PhysicalWindowId) -> Option<Slot> {
+        let index = self
+            .model
+            .workspace
+            .slots
+            .iter()
+            .position(|slot| slot.bound_window() == Some(window))?;
+        let slot = self.model.workspace.slots.remove(index);
+        self.layout
+            .sync(self.model.workspace.axis, &self.model.workspace.slots);
+        self.evidence.previous_placements.remove(&slot.id);
+        Some(slot)
+    }
+
+    pub(crate) fn insert_slot(&mut self, mut slot: Slot) {
+        if self
+            .model
+            .workspace
+            .slots
+            .iter()
+            .any(|existing| existing.id == slot.id)
+        {
+            slot.id = crate::SlotId(self.model.next_slot_id);
+        }
+        self.model.next_slot_id = self.model.next_slot_id.max(slot.id.0.saturating_add(1));
+        self.model.workspace.slots.push(slot);
+        self.layout
+            .sync(self.model.workspace.axis, &self.model.workspace.slots);
+    }
+
+    pub(crate) fn swap_windows(
+        &mut self,
+        first: &PhysicalWindowId,
+        second: &PhysicalWindowId,
+    ) -> bool {
+        let first = self.slot_for_window(first);
+        let second = self.slot_for_window(second);
+        let Some((first, second)) = first.zip(second).filter(|(first, second)| first != second)
+        else {
+            return false;
+        };
+        if !self.layout.swap(first, second) {
+            return false;
+        }
+        self.pending = None;
+        self.invalidate();
+        true
+    }
+
+    pub(crate) fn resize_window(
+        &mut self,
+        window: &PhysicalWindowId,
+        current: crate::Rect,
+        output: crate::Rect,
+    ) -> bool {
+        let Some(slot) = self.slot_for_window(window) else {
+            return false;
+        };
+        if !self.layout.resize(slot, current, output) {
+            return false;
+        }
+        self.layout_changed();
+        true
+    }
+
+    pub(crate) fn resize_focused_tile(
+        &mut self,
+        window: &PhysicalWindowId,
+        direction: crate::ResizeDirection,
+        amount: i32,
+        output: crate::Rect,
+    ) -> bool {
+        let Some(slot) = self.slot_for_window(window) else {
+            return false;
+        };
+        if !self.layout.resize_by(slot, direction, amount, output) {
+            return false;
+        }
+        self.layout_changed();
+        true
+    }
+
+    pub(crate) fn balance_focused_parent(
+        &mut self,
+        window: &PhysicalWindowId,
+        output: crate::Rect,
+    ) -> bool {
+        let Some(slot) = self.slot_for_window(window) else {
+            return false;
+        };
+        if !self.layout.balance(slot, output) {
+            return false;
+        }
+        self.layout_changed();
+        true
+    }
+
+    pub(crate) fn create_implicit_split(
+        &mut self,
+        window: &PhysicalWindowId,
+        direction: crate::Direction,
+    ) -> bool {
+        let Some(slot) = self.slot_for_window(window) else {
+            return false;
+        };
+        if !self.layout.create_implicit_split(slot, direction) {
+            return false;
+        }
+        self.model.workspace.axis = self.layout.root_axis();
+        self.pending = None;
+        self.invalidate();
+        true
+    }
+
+    pub(crate) fn move_window_relative(
+        &mut self,
+        moved: &PhysicalWindowId,
+        target: &PhysicalWindowId,
+        direction: crate::Direction,
+    ) -> bool {
+        let Some((moved, target)) = self
+            .slot_for_window(moved)
+            .zip(self.slot_for_window(target))
+        else {
+            return false;
+        };
+        if !self.layout.move_relative(moved, target, direction) {
+            return false;
+        }
+        self.model.workspace.axis = self.layout.root_axis();
+        self.pending = None;
+        self.invalidate();
+        true
+    }
+
+    pub(crate) fn layout(&self) -> &LayoutTree {
+        &self.layout
+    }
+
+    pub(crate) const fn root_axis(&self) -> crate::Axis {
+        self.layout.root_axis()
+    }
+
+    pub(crate) fn preview(&self, output: crate::Rect) -> Vec<crate::Rect> {
+        self.layout
+            .placements(output)
+            .into_iter()
+            .map(|(_, frame)| frame)
+            .collect()
+    }
+
+    pub(crate) fn restore_layout(&mut self, mut layout: LayoutTree) {
+        layout.sync(self.model.workspace.axis, &self.model.workspace.slots);
+        self.model.workspace.axis = layout.root_axis();
+        self.layout = layout;
+        self.pending = None;
+        self.invalidate();
+    }
+
+    fn slot_for_window(&self, window: &PhysicalWindowId) -> Option<crate::SlotId> {
+        self.model
+            .workspace
+            .slots
+            .iter()
+            .find(|slot| slot.bound_window() == Some(window))
+            .map(|slot| slot.id)
+    }
+
+    fn layout_changed(&mut self) {
+        for slot in &mut self.model.workspace.slots {
+            if let Some(weight) = self.layout.weight(slot.id) {
+                slot.weight = weight;
+            }
+        }
+        self.pending = None;
+        self.invalidate();
+    }
+}
+
+fn placements_for(layout: &LayoutTree, model: &Model, output: crate::Rect) -> Vec<Placement> {
+    let slots: HashMap<_, _> = model
+        .workspace
+        .slots
+        .iter()
+        .map(|slot| (slot.id, slot))
+        .collect();
+    layout
+        .placements(output)
+        .into_iter()
+        .filter_map(|(id, frame)| {
+            let slot = slots.get(&id)?;
+            Some(Placement {
+                slot: id,
+                window: slot.bound_window().cloned(),
+                frame,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -111,6 +345,7 @@ mod tests {
                         height: 100,
                         ..Rect::default()
                     },
+                    title: None,
                 }],
             }],
         }
@@ -190,5 +425,40 @@ mod tests {
 
         assert!(engine.accept(ticket, &observation, &settings()).is_ok());
         assert!(engine.accept(ticket, &observation, &settings()).is_err());
+    }
+
+    #[test]
+    fn reordering_a_window_invalidates_pending_work() {
+        let first = PhysicalWindowId {
+            app: AppInstanceId {
+                pid: 1,
+                launched_at: 1,
+            },
+            window_id: 1,
+        };
+        let second = PhysicalWindowId {
+            window_id: 2,
+            ..first.clone()
+        };
+        let mut engine = Engine::default();
+        engine.insert_slot(Slot {
+            id: crate::SlotId(1),
+            weight: 1,
+            binding: crate::BindingState::Bound(first.clone()),
+        });
+        engine.insert_slot(Slot {
+            id: crate::SlotId(2),
+            weight: 1,
+            binding: crate::BindingState::Bound(second.clone()),
+        });
+        let pending = engine.begin_cycle();
+
+        assert!(engine.swap_windows(&second, &first));
+        assert_eq!(engine.bound_windows(), vec![second, first]);
+        assert!(
+            engine
+                .accept(pending, &observation(pending.cycle, 1), &settings())
+                .is_err()
+        );
     }
 }

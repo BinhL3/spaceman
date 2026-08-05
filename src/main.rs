@@ -65,6 +65,23 @@ fn main() -> ExitCode {
         #[cfg(target_os = "macos")]
         "snapshot" if args.next().is_none() => run_snapshot().and_then(to_json),
         #[cfg(target_os = "macos")]
+        "displays" if args.next().is_none() => spaceman::macos::outputs()
+            .map(|outputs| outputs.displays().to_vec())
+            .map_err(|error| error.to_string())
+            .and_then(to_json),
+        "config-check" => match (args.next(), args.next()) {
+            (Some(path), None) => spaceman::config::load_path(std::path::Path::new(&path))
+                .map(|_| "configuration is valid".into()),
+            _ => {
+                print_usage(&executable);
+                return ExitCode::from(2);
+            }
+        },
+        #[cfg(target_os = "macos")]
+        "ctl" => spaceman::control::send(&args.collect::<Vec<_>>()),
+        #[cfg(target_os = "macos")]
+        "hud" if args.next().is_none() => run_hud(),
+        #[cfg(target_os = "macos")]
         "retile" => match (args.next(), args.next()) {
             (None, None) => run_retile(false).and_then(to_json),
             (Some(flag), None) if flag == "--apply" => run_retile(true).and_then(to_json),
@@ -133,8 +150,17 @@ fn main() -> ExitCode {
 
 fn print_usage(executable: &str) {
     eprintln!("usage: {executable} replay <fixture.json>");
+    eprintln!("       {executable} config-check <config.toml>");
     #[cfg(target_os = "macos")]
     eprintln!("       {executable} snapshot");
+    #[cfg(target_os = "macos")]
+    eprintln!("       {executable} displays");
+    #[cfg(target_os = "macos")]
+    eprintln!(
+        "       {executable} ctl <status|debug|switch N|back-and-forth|move N|move-app ID N|focus DIR|move-direction DIR|layout|resize shrink|resize grow|balance|pause|resume|retile|restart|quit>"
+    );
+    #[cfg(target_os = "macos")]
+    eprintln!("       {executable} hud");
     #[cfg(target_os = "macos")]
     eprintln!("       {executable} retile [--apply]");
     #[cfg(target_os = "macos")]
@@ -143,6 +169,70 @@ fn print_usage(executable: &str) {
     eprintln!("       {executable} watch-window <window-id> <cycles> [--apply]");
     #[cfg(target_os = "macos")]
     eprintln!("       {executable} run [--apply]");
+}
+
+#[cfg(target_os = "macos")]
+fn run_hud() -> Result<String, String> {
+    loop {
+        let source = spaceman::control::send(&["debug".into()])?;
+        let debug: serde_json::Value =
+            serde_json::from_str(&source).map_err(|error| error.to_string())?;
+        print!("\x1b[2J\x1b[HSpaceman HUD  (Ctrl-C to close)\n\n");
+        for display in debug["displays"].as_array().into_iter().flatten() {
+            let frame = &display["frame"];
+            println!(
+                "{}  workspace {}  {}  @ {},{} {}x{}",
+                display["name"].as_str().unwrap_or("Display"),
+                display["workspace"].as_u64().unwrap_or_default(),
+                display["axis"].as_str().unwrap_or("unknown"),
+                frame["x"].as_i64().unwrap_or_default(),
+                frame["y"].as_i64().unwrap_or_default(),
+                frame["width"].as_i64().unwrap_or_default(),
+                frame["height"].as_i64().unwrap_or_default(),
+            );
+            for tile in debug["tiles"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|tile| tile["workspace"] == display["workspace"])
+            {
+                let frame = &tile["frame"];
+                let window = &tile["window"];
+                let focused = if window == &debug["focused"] {
+                    "*"
+                } else {
+                    " "
+                };
+                println!(
+                    "  {focused} window {} (pid {})  {},{} {}x{}",
+                    window["window_id"].as_u64().unwrap_or_default(),
+                    window["app"]["pid"].as_i64().unwrap_or_default(),
+                    frame["x"].as_i64().unwrap_or_default(),
+                    frame["y"].as_i64().unwrap_or_default(),
+                    frame["width"].as_i64().unwrap_or_default(),
+                    frame["height"].as_i64().unwrap_or_default(),
+                );
+            }
+            println!();
+        }
+        println!("Directional targets:");
+        for direction in ["left", "down", "up", "right"] {
+            let target = &debug["targets"][direction];
+            if target.is_null() {
+                println!("  {direction:>5}: none");
+            } else {
+                println!(
+                    "  {direction:>5}: window {} (pid {})",
+                    target["window_id"].as_u64().unwrap_or_default(),
+                    target["app"]["pid"].as_i64().unwrap_or_default(),
+                );
+            }
+        }
+        io::stdout()
+            .flush()
+            .map_err(|error| format!("failed to render HUD: {error}"))?;
+        thread::sleep(Duration::from_millis(150));
+    }
 }
 
 fn parse_window_id(value: &str) -> Result<u32, String> {

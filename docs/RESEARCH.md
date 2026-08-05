@@ -1,4 +1,9 @@
-# Research Behind The Rust + GPUI Plan
+# Historical: Research Behind The Rust + GPUI Plan
+
+> [!IMPORTANT]
+> This July 2026 research record informed the original plan. It is preserved as historical evidence,
+> not current product documentation. See [README](../README.md) and
+> [Compatibility](compatibility.md) for current claims.
 
 ## The Ghostty Failure Comes From Physical Identity Churn
 

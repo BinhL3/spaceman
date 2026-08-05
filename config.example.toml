@@ -1,0 +1,24 @@
+# Spaceman configuration schema version. Only version 1 is accepted.
+version = 1
+
+# Rules are optional, ordered, and first-match wins. Every matcher present in a
+# rule must match exactly. Valid actions are "float" and "route".
+[[rules]]
+bundle_id = "com.apple.systempreferences"
+action = "float"
+
+[[rules]]
+bundle_id = "com.example.Application"
+title = "Preferences"
+action = "float"
+
+[[rules]]
+bundle_id = "com.tinyspeck.slackmacgap"
+action = "route"
+workspace = 2
+
+# Workspace assignments are optional. monitor accepts "main", "secondary", a
+# display UUID, or an exact display name from `spaceman displays`.
+[[workspaces]]
+workspace = 9
+monitor = "main"

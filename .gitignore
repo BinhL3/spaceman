@@ -3,3 +3,7 @@
 DerivedData/
 *.xcuserstate
 target/
+/dist/
+.release.env
+*.p12
+*.provisionprofile

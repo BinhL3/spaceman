@@ -1,4 +1,9 @@
-# Spaceman Rust + GPUI Plan
+# Historical: Spaceman Rust + GPUI Plan
+
+> [!IMPORTANT]
+> This is the original implementation plan, preserved as design history. It includes superseded scope
+> and architecture statements. See [README.md](README.md) and [AGENTS.md](AGENTS.md) for current
+> behavior and engineering invariants.
 
 ## The First Version Proves Stable Logical Windows
 
