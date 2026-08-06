@@ -1,5 +1,11 @@
 import { AnimatePresence, motion, type Variants } from "motion/react";
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 
 const DOWNLOAD_URL =
   "https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.1-macos-arm64.zip";
@@ -93,9 +99,29 @@ function WorkspaceDemo({
   direction: number;
   onSelect: (workspace: number) => void;
 }) {
+  const frameRef = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ w: 520, h: 325 });
+
+  useEffect(() => {
+    const element = frameRef.current;
+    if (!element) return;
+    const observer = new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect;
+      if (width > 0 && height > 0) {
+        setSize({ w: Math.round(width), h: Math.round(height) });
+      }
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
   return (
     <div className="relative flex w-full max-w-[520px] flex-col items-center gap-4">
-      <div className="relative aspect-[16/10] w-full overflow-hidden rounded-2xl border border-white/[0.12] bg-white/[0.04] shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(255,255,255,0.04),0_16px_48px_rgba(0,0,0,0.5)] backdrop-blur-2xl">
+      <LiquidGlassFilter width={size.w} height={size.h} />
+      <div
+        ref={frameRef}
+        className="liquid-glass relative aspect-[16/10] w-full overflow-hidden rounded-2xl border border-white/[0.12] bg-white/[0.04] shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(255,255,255,0.04),0_16px_48px_rgba(0,0,0,0.5)]"
+      >
         <AnimatePresence initial={false} custom={direction}>
           <motion.div
             key={workspace}
@@ -108,16 +134,7 @@ function WorkspaceDemo({
             className="absolute inset-0"
           >
             {Object.entries(layouts[workspace]).map(([id, rect]) => (
-              <div
-                key={id}
-                className="absolute rounded-md bg-white/[0.07] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
-                style={{
-                  left: `${rect.x}%`,
-                  top: `${rect.y}%`,
-                  width: `${rect.w}%`,
-                  height: `${rect.h}%`,
-                }}
-              />
+              <FakeWindow key={id} id={id} rect={rect} />
             ))}
           </motion.div>
         </AnimatePresence>
@@ -154,6 +171,193 @@ function WorkspaceDemo({
             </motion.span>
           </button>
         ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Edge-refraction displacement map: red encodes horizontal displacement,
+ * green encodes vertical. The blurred neutral-gray rounded rect in the middle
+ * limits the warp to a lens-like band around the frame's edge.
+ */
+function displacementMapUri(width: number, height: number) {
+  const edge = 18;
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">` +
+    `<defs>` +
+    `<linearGradient id="x" x1="0%" y1="0%" x2="100%" y2="0%">` +
+    `<stop offset="0%" stop-color="#000"/><stop offset="100%" stop-color="#f00"/>` +
+    `</linearGradient>` +
+    `<linearGradient id="y" x1="0%" y1="0%" x2="0%" y2="100%">` +
+    `<stop offset="0%" stop-color="#000"/><stop offset="100%" stop-color="#0f0"/>` +
+    `</linearGradient>` +
+    `</defs>` +
+    `<rect width="${width}" height="${height}" fill="#000"/>` +
+    `<rect width="${width}" height="${height}" fill="url(#x)"/>` +
+    `<rect width="${width}" height="${height}" fill="url(#y)" style="mix-blend-mode:screen"/>` +
+    `<rect x="${edge}" y="${edge}" width="${width - edge * 2}" height="${height - edge * 2}" rx="14" fill="rgb(128,128,128)" style="filter:blur(${Math.round(edge * 0.65)}px)"/>` +
+    `</svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
+function LiquidGlassFilter({ width, height }: { width: number; height: number }) {
+  const href = useMemo(() => displacementMapUri(width, height), [width, height]);
+  return (
+    <svg width="0" height="0" aria-hidden="true" className="absolute">
+      <filter
+        id="liquid-glass"
+        x="0"
+        y="0"
+        width={width}
+        height={height}
+        filterUnits="userSpaceOnUse"
+        primitiveUnits="userSpaceOnUse"
+        colorInterpolationFilters="sRGB"
+      >
+        <feImage href={href} x="0" y="0" width={width} height={height} result="map" />
+        <feDisplacementMap
+          in="SourceGraphic"
+          in2="map"
+          scale={-48}
+          xChannelSelector="R"
+          yChannelSelector="G"
+        />
+      </filter>
+    </svg>
+  );
+}
+
+const appNames: Record<string, string> = {
+  a: "Editor",
+  b: "Terminal",
+  c: "Music",
+  d: "Chat",
+  e: "Web",
+};
+
+function FakeWindow({ id, rect }: { id: string; rect: Rect }) {
+  return (
+    <div
+      className="absolute flex flex-col overflow-hidden rounded-md bg-[#14161b]/90 shadow-[inset_0_1px_0_rgba(255,255,255,0.07),0_4px_16px_rgba(0,0,0,0.35)]"
+      style={{
+        left: `${rect.x}%`,
+        top: `${rect.y}%`,
+        width: `${rect.w}%`,
+        height: `${rect.h}%`,
+      }}
+    >
+      <div className="flex h-6 shrink-0 items-center gap-1.5 border-b border-white/[0.05] px-2.5">
+        <span className="size-[7px] rounded-full bg-[#ff5f57]/60" />
+        <span className="size-[7px] rounded-full bg-[#febc2e]/60" />
+        <span className="size-[7px] rounded-full bg-[#28c840]/60" />
+        <span className="ml-1.5 text-[10px] font-medium text-white/30">{appNames[id]}</span>
+      </div>
+      <AppBody id={id} />
+    </div>
+  );
+}
+
+const codeLines: Array<[number, Array<[string, number]>]> = [
+  [0, [["bg-[#c084fc]/50", 24], ["bg-white/20", 40]]],
+  [1, [["bg-[#8ea0ff]/50", 32], ["bg-[#7dd3a8]/40", 52], ["bg-white/15", 20]]],
+  [1, [["bg-white/15", 44], ["bg-[#f0b46a]/45", 28]]],
+  [2, [["bg-[#8ea0ff]/50", 24], ["bg-white/15", 60]]],
+  [2, [["bg-[#7dd3a8]/40", 36], ["bg-white/15", 32]]],
+  [1, [["bg-white/15", 24]]],
+  [0, [["bg-[#c084fc]/50", 20], ["bg-white/20", 48]]],
+  [1, [["bg-[#8ea0ff]/50", 40], ["bg-[#f0b46a]/45", 24], ["bg-white/15", 36]]],
+  [1, [["bg-[#7dd3a8]/40", 28], ["bg-white/15", 44]]],
+  [0, [["bg-white/15", 16]]],
+];
+
+function AppBody({ id }: { id: string }) {
+  if (id === "a") {
+    return (
+      <div className="flex min-h-0 flex-1">
+        <div className="w-14 shrink-0 space-y-1.5 border-r border-white/[0.05] p-2">
+          {[32, 24, 36, 20, 28].map((width, index) => (
+            <div
+              key={index}
+              className="h-1.5 rounded-full bg-white/10"
+              style={{ width }}
+            />
+          ))}
+        </div>
+        <div className="min-w-0 flex-1 space-y-[7px] overflow-hidden p-2.5">
+          {codeLines.map(([indent, segments], index) => (
+            <div key={index} className="flex gap-1.5" style={{ paddingLeft: indent * 12 }}>
+              {segments.map(([tone, width], segment) => (
+                <span
+                  key={segment}
+                  className={`h-1.5 shrink-0 rounded-full ${tone}`}
+                  style={{ width }}
+                />
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (id === "b") {
+    return (
+      <div className="flex-1 space-y-1 overflow-hidden p-2.5 font-mono text-[10px] leading-relaxed">
+        <p>
+          <span className="text-[#7dd3a8]/80">❯</span>{" "}
+          <span className="text-white/55">spaceman ctl focus right</span>
+        </p>
+        <p className="text-white/25">focused Editor</p>
+        <p>
+          <span className="text-[#7dd3a8]/80">❯</span>{" "}
+          <span className="text-white/55">cargo build --release</span>
+        </p>
+        <p className="text-white/25">Finished in 4.2s</p>
+        <p>
+          <span className="text-[#7dd3a8]/80">❯</span>{" "}
+          <span className="terminal-cursor inline-block h-2.5 w-[7px] translate-y-px bg-white/50" />
+        </p>
+      </div>
+    );
+  }
+
+  if (id === "c") {
+    return (
+      <div className="flex flex-1 items-center gap-3 overflow-hidden p-3">
+        <div className="size-12 shrink-0 rounded-md bg-gradient-to-br from-[#8ea0ff]/60 via-[#c084fc]/40 to-[#f0b46a]/30" />
+        <div className="min-w-0 flex-1 space-y-2">
+          <div className="h-1.5 w-3/5 rounded-full bg-white/25" />
+          <div className="h-1.5 w-2/5 rounded-full bg-white/10" />
+          <div className="h-1 w-full rounded-full bg-white/10">
+            <div className="h-full w-1/3 rounded-full bg-white/40" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (id === "d") {
+    return (
+      <div className="flex flex-1 flex-col justify-end gap-1.5 overflow-hidden p-2.5">
+        <div className="h-5 w-4/5 self-start rounded-lg rounded-bl-sm bg-white/[0.08]" />
+        <div className="h-5 w-3/5 self-end rounded-lg rounded-br-sm bg-[#4a7dff]/40" />
+        <div className="h-8 w-5/6 self-start rounded-lg rounded-bl-sm bg-white/[0.08]" />
+        <div className="h-5 w-1/2 self-end rounded-lg rounded-br-sm bg-[#4a7dff]/40" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden p-2.5">
+      <div className="flex h-5 shrink-0 items-center rounded-full bg-white/[0.07] px-2.5">
+        <div className="h-1 w-24 rounded-full bg-white/15" />
+      </div>
+      <div className="h-16 shrink-0 rounded bg-gradient-to-br from-white/[0.08] to-white/[0.02]" />
+      <div className="space-y-1.5">
+        <div className="h-1.5 w-11/12 rounded-full bg-white/12" />
+        <div className="h-1.5 w-4/5 rounded-full bg-white/[0.07]" />
+        <div className="h-1.5 w-3/5 rounded-full bg-white/[0.07]" />
       </div>
     </div>
   );
