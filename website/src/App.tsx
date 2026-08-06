@@ -567,49 +567,178 @@ const MAP_LAYERS = [
   { count: 8, speed: 0.08, size: 1.5, alpha: 0.75, seed: 91 },
 ];
 const PLANET_PERIOD_S = 16;
+const MAP_HOME = { x: 0.5, y: 0.56 };
+const HYPERSPACE_AFTER_S = 6;
+
+/** Shared scroll clock so the field never resets across mounts. */
+let mapScroll = 0;
+
+type ShipSim = {
+  initialized: boolean;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  heading: number;
+  flyTime: number;
+  mode: "fly" | "align" | "jump";
+  modeTime: number;
+  boost: number;
+};
 
 function StarMapApp() {
+  const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const shipRef = useRef<HTMLDivElement>(null);
+  const cursor = useRef<{ x: number; y: number; at: number } | null>(null);
+  const sim = useRef<ShipSim>({
+    initialized: false,
+    x: 0,
+    y: 0,
+    vx: 0,
+    vy: 0,
+    heading: -90,
+    flyTime: 0,
+    mode: "fly",
+    modeTime: 0,
+    boost: 0,
+  });
   const reduced = useReducedMotion();
 
-  useAnimationFrame(() => {
+  useAnimationFrame((_, delta) => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    const bounds = canvas.getBoundingClientRect();
+    const container = containerRef.current;
+    const ship = shipRef.current;
+    if (!canvas || !container || !ship) return;
+    const bounds = container.getBoundingClientRect();
     if (bounds.width === 0 || bounds.height === 0) return;
+    const dt = Math.min(delta, 64) / 1000;
+    const w = bounds.width;
+    const h = bounds.height;
+    const now = performance.now();
+    const t = now / 1000;
+    const s = sim.current;
+
+    if (!s.initialized) {
+      s.x = MAP_HOME.x * w;
+      s.y = MAP_HOME.y * h;
+      s.initialized = true;
+    }
+
+    const fresh = cursor.current !== null && now - cursor.current.at < 2500;
+
+    /* --- state machine: fly → align → jump → fly --- */
+    if (reduced) {
+      s.mode = "fly";
+      s.boost = 0;
+      s.flyTime = 0;
+    } else if (s.mode === "fly") {
+      if (fresh) s.flyTime += dt;
+      if (s.flyTime > HYPERSPACE_AFTER_S) {
+        s.mode = "align";
+        s.modeTime = 0;
+      }
+    } else if (s.mode === "align") {
+      s.modeTime += dt;
+      if (s.modeTime > 0.9) {
+        s.mode = "jump";
+        s.modeTime = 0;
+      }
+    } else {
+      s.modeTime += dt;
+      s.boost =
+        s.modeTime < 1.3
+          ? Math.min(1, s.modeTime / 0.5)
+          : Math.max(0, 1 - (s.modeTime - 1.3) / 0.5);
+      if (s.modeTime > 1.9) {
+        s.mode = "fly";
+        s.flyTime = 0;
+        s.boost = 0;
+        cursor.current = null;
+      }
+    }
+
+    /* --- steering --- */
+    let targetX = MAP_HOME.x * w + Math.sin(t * 0.5) * 10;
+    let targetY = MAP_HOME.y * h + Math.sin(t * 0.8 + 2) * 6;
+    if (s.mode !== "fly") {
+      targetX = MAP_HOME.x * w;
+      targetY = MAP_HOME.y * h;
+    } else if (fresh && cursor.current) {
+      targetX = cursor.current.x;
+      targetY = cursor.current.y;
+    }
+
+    if (!reduced) {
+      const maxSpeed = s.mode === "fly" && fresh ? 95 : 55;
+      const dx = targetX - s.x;
+      const dy = targetY - s.y;
+      const dist = Math.hypot(dx, dy) || 1;
+      const speedTarget = maxSpeed * Math.min(1, dist / 70);
+      const blend = Math.min(1, dt * 3);
+      s.vx += ((dx / dist) * speedTarget - s.vx) * blend;
+      s.vy += ((dy / dist) * speedTarget - s.vy) * blend;
+      s.x = Math.max(10, Math.min(w - 10, s.x + s.vx * dt));
+      s.y = Math.max(12, Math.min(h - 12, s.y + s.vy * dt));
+
+      let desired = s.heading;
+      if (s.mode !== "fly") desired = -90;
+      else if (Math.hypot(s.vx, s.vy) > 6) {
+        desired = (Math.atan2(s.vy, s.vx) * 180) / Math.PI;
+      }
+      let diff = ((desired - s.heading + 540) % 360) - 180;
+      s.heading += diff * Math.min(1, dt * 6);
+    }
+
+    const jitter = s.mode === "align" ? Math.min(1.6, s.modeTime * 2) : 0;
+    const jitterX = (Math.random() - 0.5) * 2 * jitter;
+    const jitterY = (Math.random() - 0.5) * 2 * jitter;
+    const lift = s.mode === "jump" ? s.boost * 8 : 0;
+    ship.style.transform = `translate(${s.x + jitterX}px, ${s.y + jitterY - lift}px) translate(-50%, -50%) rotate(${s.heading + 90}deg)`;
+
+    /* --- procedural field --- */
+    if (!reduced) mapScroll += dt * (1 + s.boost * 45);
     const dpr = Math.min(window.devicePixelRatio || 1, 3);
-    const width = Math.round(bounds.width * dpr);
-    const height = Math.round(bounds.height * dpr);
+    const width = Math.round(w * dpr);
+    const height = Math.round(h * dpr);
     if (canvas.width !== width || canvas.height !== height) {
       canvas.width = width;
       canvas.height = height;
     }
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    const w = bounds.width;
-    const h = bounds.height;
-    const t = reduced ? 0 : performance.now() / 1000;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
 
     for (const layer of MAP_LAYERS) {
-      ctx.fillStyle = `rgba(232,234,240,${layer.alpha})`;
+      const streak = s.boost * layer.speed * 900;
       for (let index = 0; index < layer.count; index += 1) {
         const x = hash01(layer.seed + index * 71.7) * w;
-        const y = ((hash01(layer.seed + index * 133.3 + 1) + t * layer.speed) % 1) * h;
-        ctx.beginPath();
-        ctx.arc(x, y, layer.size, 0, Math.PI * 2);
-        ctx.fill();
+        const y =
+          ((hash01(layer.seed + index * 133.3 + 1) + mapScroll * layer.speed) % 1) * h;
+        if (streak > 2) {
+          ctx.strokeStyle = `rgba(232,234,240,${Math.min(0.9, layer.alpha + s.boost * 0.25)})`;
+          ctx.lineWidth = layer.size;
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+          ctx.lineTo(x, y - streak);
+          ctx.stroke();
+        } else {
+          ctx.fillStyle = `rgba(232,234,240,${layer.alpha})`;
+          ctx.beginPath();
+          ctx.arc(x, y, layer.size, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
     }
 
-    // A ringed planet drifts through every PLANET_PERIOD_S seconds.
-    const epoch = Math.floor(t / PLANET_PERIOD_S);
-    const phase = (t / PLANET_PERIOD_S) % 1;
+    // A ringed planet drifts through on the shared scroll clock.
+    const epoch = Math.floor(mapScroll / PLANET_PERIOD_S);
+    const phase = (mapScroll / PLANET_PERIOD_S) % 1;
     const px = (0.18 + hash01(epoch * 7.31) * 0.64) * w;
     const py = (phase * 1.5 - 0.25) * h;
     const pr = 7 + hash01(epoch * 3.17) * 9;
-    if (py > -pr * 3 && py < h + pr * 3) {
+    if (py > -pr * 3 && py < h + pr * 3 && s.boost < 0.4) {
       ctx.lineWidth = 1.1;
       ctx.fillStyle = "rgba(235,238,244,0.05)";
       ctx.strokeStyle = "rgba(235,238,244,0.55)";
@@ -622,10 +751,27 @@ function StarMapApp() {
       ctx.ellipse(px, py, pr * 1.75, pr * 0.5, -0.3, 0, Math.PI * 2);
       ctx.stroke();
     }
+
+    if (s.boost > 0) {
+      ctx.fillStyle = `rgba(240,244,255,${s.boost * 0.05})`;
+      ctx.fillRect(0, 0, w, h);
+    }
   });
 
   return (
-    <div className="relative min-h-0 flex-1 overflow-hidden">
+    <div
+      ref={containerRef}
+      className="relative min-h-0 flex-1 cursor-crosshair overflow-hidden"
+      onPointerMove={(event) => {
+        const bounds = containerRef.current?.getBoundingClientRect();
+        if (!bounds) return;
+        cursor.current = {
+          x: event.clientX - bounds.left,
+          y: event.clientY - bounds.top,
+          at: performance.now(),
+        };
+      }}
+    >
       <svg
         className="absolute inset-0 size-full"
         viewBox="0 0 100 100"
@@ -640,10 +786,9 @@ function StarMapApp() {
         />
       </svg>
       <canvas ref={canvasRef} className="absolute inset-0 size-full" />
-      <motion.div
-        className="absolute left-1/2 top-[56%] -translate-x-1/2 -translate-y-1/2"
-        animate={{ y: [0, -3, 0], x: [0, 2, 0, -2, 0] }}
-        transition={{ duration: 7, repeat: Infinity, ease: "easeInOut" }}
+      <div
+        ref={shipRef}
+        className="absolute left-0 top-0 will-change-transform"
         aria-hidden="true"
       >
         <svg width="14" height="18" viewBox="0 0 14 18">
@@ -655,7 +800,7 @@ function StarMapApp() {
             strokeLinejoin="round"
           />
         </svg>
-      </motion.div>
+      </div>
       <p className="absolute bottom-2 left-2.5 font-mono text-[8px] tracking-wider text-white/30">
         YOU ARE HERE
       </p>
@@ -783,61 +928,66 @@ const chatScript = [
   { self: true, text: "always" },
 ];
 
+const chatSpring = {
+  type: "spring",
+  visualDuration: 0.35,
+  bounce: 0.15,
+} as const;
+
 function ChatApp() {
   const tick = useTicker(1100);
   const delivered = Math.floor(tick / 2);
   const typing = tick % 2 === 1;
   const next = chatScript[delivered % chatScript.length];
 
+  // Keep extra history above the clip so drop-off never shifts the layout.
   const visible = [];
-  for (let index = Math.max(0, delivered - 3); index < delivered; index += 1) {
+  for (let index = Math.max(0, delivered - 5); index < delivered; index += 1) {
     visible.push({ key: index, ...chatScript[index % chatScript.length] });
   }
 
   return (
     <div className="flex flex-1 flex-col justify-end gap-1.5 overflow-hidden p-2.5 text-[10px] leading-tight">
-      <AnimatePresence initial={false}>
-        {visible.map((message) => (
-          <motion.p
-            layout
-            key={message.key}
-            initial={{ opacity: 0, y: 10, scale: 0.9 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, transition: { duration: 0.12 } }}
-            transition={{ type: "spring", visualDuration: 0.3, bounce: 0.2 }}
-            className={`max-w-[85%] rounded-lg px-2 py-1 ${
-              message.self
-                ? "self-end rounded-br-sm bg-white/[0.15] text-white/75"
-                : "self-start rounded-bl-sm bg-white/[0.07] text-white/55"
-            }`}
-          >
-            {message.text}
-          </motion.p>
-        ))}
-        {typing && (
-          <motion.div
-            layout
-            key={`typing-${delivered}`}
-            initial={{ opacity: 0, y: 10, scale: 0.9 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, transition: { duration: 0.1 } }}
-            transition={{ type: "spring", visualDuration: 0.3, bounce: 0.2 }}
-            className={`flex gap-[3px] rounded-lg px-2 py-1.5 ${
-              next.self
-                ? "self-end rounded-br-sm bg-white/[0.15]"
-                : "self-start rounded-bl-sm bg-white/[0.07]"
-            }`}
-          >
-            {[0, 1, 2].map((dot) => (
-              <span
-                key={dot}
-                className="size-1 animate-pulse rounded-full bg-white/50"
-                style={{ animationDelay: `${dot * 0.2}s` }}
-              />
-            ))}
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {visible.map((message) => (
+        <motion.p
+          layout
+          layoutId={`chat-${message.key}`}
+          key={message.key}
+          initial={{ opacity: 0, y: 8, scale: 0.95 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={{ ...chatSpring, opacity: { duration: 0.25 } }}
+          className={`max-w-[85%] rounded-lg px-2 py-1 ${
+            message.self
+              ? "self-end rounded-br-sm bg-white/[0.15] text-white/75"
+              : "self-start rounded-bl-sm bg-white/[0.07] text-white/55"
+          }`}
+        >
+          {message.text}
+        </motion.p>
+      ))}
+      {typing && (
+        <motion.div
+          layout
+          layoutId={`chat-${delivered}`}
+          key={`typing-${delivered}`}
+          initial={{ opacity: 0, y: 8, scale: 0.9 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={{ ...chatSpring, opacity: { duration: 0.2 } }}
+          className={`flex gap-[3px] rounded-lg px-2 py-1.5 ${
+            next.self
+              ? "self-end rounded-br-sm bg-white/[0.15]"
+              : "self-start rounded-bl-sm bg-white/[0.07]"
+          }`}
+        >
+          {[0, 1, 2].map((dot) => (
+            <span
+              key={dot}
+              className="size-1 animate-pulse rounded-full bg-white/50"
+              style={{ animationDelay: `${dot * 0.2}s` }}
+            />
+          ))}
+        </motion.div>
+      )}
     </div>
   );
 }
