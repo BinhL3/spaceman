@@ -5,12 +5,7 @@ import {
   useReducedMotion,
   type Variants,
 } from "motion/react";
-import {
-  useEffect,
-  useRef,
-  useState,
-  type CSSProperties,
-} from "react";
+import { useEffect, useRef, useState } from "react";
 
 const DOWNLOAD_URL =
   "https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.1-macos-arm64.zip";
@@ -62,9 +57,7 @@ export function App() {
 
   return (
     <main className="relative flex min-h-dvh flex-col items-center justify-center gap-10 overflow-hidden bg-[#0b0c0e] px-6 py-16 text-[#f2f2f0] antialiased">
-      <div aria-hidden="true" className="pointer-events-none absolute inset-0">
-        <StarLayer twinkle />
-      </div>
+      <Starfield />
 
       <header className="relative flex flex-col items-center gap-5">
         <img src="/mark.svg" alt="" className="size-14 rounded-[14px] shadow-lg" />
@@ -91,6 +84,120 @@ export function App() {
   );
 }
 
+/* ------------------------------------------------------------------ */
+/* Warp starfield: one shared 3D star state drawn to every registered  */
+/* canvas (page background + the refracted copy inside the glass).     */
+/* ------------------------------------------------------------------ */
+
+type WarpStar = { x: number; y: number; z: number; r: number };
+
+const WARP_STARS: WarpStar[] = Array.from({ length: 260 }, () => {
+  const z = 0.12 + Math.random() * 0.88;
+  return {
+    x: (Math.random() * 2 - 1) * z,
+    y: (Math.random() * 2 - 1) * z,
+    z,
+    r: 0.4 + Math.random() * 0.9,
+  };
+});
+
+const WARP_SPEED = 0.035;
+const starCanvases = new Set<HTMLCanvasElement>();
+
+function registerStarCanvas(canvas: HTMLCanvasElement) {
+  starCanvases.add(canvas);
+  return () => {
+    starCanvases.delete(canvas);
+  };
+}
+
+function advanceWarp(dt: number) {
+  for (const star of WARP_STARS) {
+    star.z -= dt * WARP_SPEED;
+    if (star.z <= 0.05 || Math.abs(star.x / star.z) > 1.2 || Math.abs(star.y / star.z) > 1.2) {
+      star.x = Math.random() * 2 - 1;
+      star.y = Math.random() * 2 - 1;
+      star.z = 1;
+      star.r = 0.4 + Math.random() * 0.9;
+    }
+  }
+}
+
+function drawWarp() {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  for (const canvas of starCanvases) {
+    const bounds = canvas.getBoundingClientRect();
+    if (bounds.width === 0 || bounds.height === 0) continue;
+    const width = Math.round(bounds.width * dpr);
+    const height = Math.round(bounds.height * dpr);
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    const ctx = canvas.getContext("2d");
+    if (!ctx) continue;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, bounds.width, bounds.height);
+    const cx = vw / 2 - bounds.left;
+    const cy = vh / 2 - bounds.top;
+    for (const star of WARP_STARS) {
+      const k = 1 / star.z;
+      const px = cx + star.x * (vw / 2) * k * 0.9;
+      const py = cy + star.y * (vh / 2) * k * 0.9;
+      const depth = 1 - star.z;
+      const size = star.r * (0.4 + depth * 1.7);
+      const alpha = Math.min(1, depth * 1.5) * 0.7 + 0.06;
+      ctx.beginPath();
+      ctx.arc(px, py, size, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(218,228,255,${alpha})`;
+      ctx.fill();
+    }
+  }
+}
+
+function Starfield() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const reduced = useReducedMotion();
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    return registerStarCanvas(canvas);
+  }, []);
+
+  useAnimationFrame((_, delta) => {
+    if (!reduced) advanceWarp(Math.min(delta, 64) / 1000);
+    drawWarp();
+  });
+
+  return (
+    <div aria-hidden="true" className="pointer-events-none absolute inset-0">
+      <div className="nebula absolute inset-0" />
+      <canvas ref={canvasRef} className="absolute inset-0 size-full" />
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Wall-clock ticker: app state derives from performance.now(), so     */
+/* every app resumes exactly where it left off after workspace slides. */
+/* ------------------------------------------------------------------ */
+
+function useTicker(stepMs: number) {
+  const [, force] = useState(0);
+  useEffect(() => {
+    const interval = window.setInterval(() => force((value) => value + 1), stepMs);
+    return () => window.clearInterval(interval);
+  }, [stepMs]);
+  return Math.floor(performance.now() / stepMs);
+}
+
+/* ------------------------------------------------------------------ */
+/* Workspace demo frame with liquid-glass refraction                   */
+/* ------------------------------------------------------------------ */
+
 const panelVariants: Variants = {
   enter: (direction: number) => ({ x: `${direction * 106}%` }),
   center: { x: "0%" },
@@ -109,8 +216,15 @@ function WorkspaceDemo({
   onSelect: (workspace: number) => void;
 }) {
   const frameRef = useRef<HTMLDivElement>(null);
+  const copyCanvasRef = useRef<HTMLCanvasElement>(null);
   const [frame, setFrame] = useState<Frame | null>(null);
   const [mapUri, setMapUri] = useState<string | null>(null);
+
+  useEffect(() => {
+    const canvas = copyCanvasRef.current;
+    if (!canvas) return;
+    return registerStarCanvas(canvas);
+  }, []);
 
   useEffect(() => {
     const element = frameRef.current;
@@ -140,12 +254,12 @@ function WorkspaceDemo({
   }, []);
 
   useEffect(() => {
-    if (frame) setMapUri(buildDisplacementMap(frame));
+    if (frame) setMapUri(buildDisplacementMap(frame.w, frame.h));
   }, [frame]);
 
   return (
     <div className="relative flex w-full max-w-[520px] flex-col items-center gap-4">
-      {frame && mapUri && <LiquidGlassFilter href={mapUri} width={frame.vw} height={frame.vh} />}
+      {frame && mapUri && <LiquidGlassFilter href={mapUri} width={frame.w} height={frame.h} />}
       <div
         aria-hidden="true"
         className="pointer-events-none absolute -inset-10 top-[-2.5rem] bg-[radial-gradient(ellipse,rgba(120,145,255,0.14),transparent_70%)] blur-2xl"
@@ -154,21 +268,26 @@ function WorkspaceDemo({
         ref={frameRef}
         className="relative aspect-[16/10] w-full overflow-hidden rounded-2xl border border-white/[0.14] bg-[#0e1119] shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(255,255,255,0.04),0_16px_48px_rgba(0,0,0,0.5),0_0_70px_rgba(125,145,255,0.14)]"
       >
-        {frame && mapUri && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0"
+          style={
+            mapUri
+              ? { filter: "url(#liquid-glass) blur(0.75px) saturate(170%) brightness(1.25)" }
+              : undefined
+          }
+        >
           <div
-            aria-hidden="true"
-            className="pointer-events-none absolute"
+            className="nebula absolute"
             style={{
-              left: -frame.x,
-              top: -frame.y,
-              width: frame.vw,
-              height: frame.vh,
-              filter: "url(#liquid-glass) blur(0.75px) saturate(170%) brightness(1.25)",
+              left: frame ? -frame.x : 0,
+              top: frame ? -frame.y : 0,
+              width: frame?.vw ?? "100%",
+              height: frame?.vh ?? "100%",
             }}
-          >
-            <StarLayer twinkle={false} />
-          </div>
-        )}
+          />
+          <canvas ref={copyCanvasRef} className="absolute inset-0 size-full" />
+        </div>
         <div
           aria-hidden="true"
           className="pointer-events-none absolute inset-0 bg-[#7288ff]/[0.05]"
@@ -230,38 +349,33 @@ function WorkspaceDemo({
 }
 
 /**
- * Viewport-sized displacement map PNG. Neutral gray everywhere except a lens
- * band baked at the frame's position: red encodes horizontal displacement,
- * green vertical, softly ramping back to neutral toward the frame's center.
+ * Frame-sized displacement map: red encodes horizontal displacement, green
+ * vertical, with a soft neutral center so only a lens band at the edge warps.
  */
-function buildDisplacementMap({ x, y, w, h, vw, vh }: Frame): string {
+function buildDisplacementMap(w: number, h: number): string {
   const canvas = document.createElement("canvas");
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  canvas.width = vw * dpr;
-  canvas.height = vh * dpr;
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
   const ctx = canvas.getContext("2d");
   if (!ctx) return "";
   ctx.scale(dpr, dpr);
 
-  ctx.fillStyle = "rgb(128,128,0)";
-  ctx.fillRect(0, 0, vw, vh);
-
   ctx.fillStyle = "rgb(0,0,0)";
-  ctx.fillRect(x, y, w, h);
+  ctx.fillRect(0, 0, w, h);
   ctx.globalCompositeOperation = "lighter";
-  const gradientX = ctx.createLinearGradient(x, 0, x + w, 0);
+  const gradientX = ctx.createLinearGradient(0, 0, w, 0);
   gradientX.addColorStop(0, "rgb(0,0,0)");
   gradientX.addColorStop(1, "rgb(255,0,0)");
   ctx.fillStyle = gradientX;
-  ctx.fillRect(x, y, w, h);
-  const gradientY = ctx.createLinearGradient(0, y, 0, y + h);
+  ctx.fillRect(0, 0, w, h);
+  const gradientY = ctx.createLinearGradient(0, 0, 0, h);
   gradientY.addColorStop(0, "rgb(0,0,0)");
   gradientY.addColorStop(1, "rgb(0,255,0)");
   ctx.fillStyle = gradientY;
-  ctx.fillRect(x, y, w, h);
+  ctx.fillRect(0, 0, w, h);
   ctx.globalCompositeOperation = "source-over";
 
-  // Soft ramp from the lens band back to neutral, then a solid neutral center.
   const bandStart = 8;
   const bandEnd = 36;
   const steps = 16;
@@ -270,12 +384,12 @@ function buildDisplacementMap({ x, y, w, h, vw, vh }: Frame): string {
     const inset = bandStart + ((bandEnd - bandStart) * step) / (steps - 1);
     ctx.globalAlpha = 0.28;
     ctx.beginPath();
-    ctx.roundRect(x + inset, y + inset, w - inset * 2, h - inset * 2, 12);
+    ctx.roundRect(inset, inset, w - inset * 2, h - inset * 2, 12);
     ctx.fill();
   }
   ctx.globalAlpha = 1;
   ctx.beginPath();
-  ctx.roundRect(x + bandEnd, y + bandEnd, w - bandEnd * 2, h - bandEnd * 2, 10);
+  ctx.roundRect(bandEnd, bandEnd, w - bandEnd * 2, h - bandEnd * 2, 10);
   ctx.fill();
 
   return canvas.toDataURL("image/png");
@@ -323,6 +437,10 @@ function LiquidGlassFilter({
   );
 }
 
+/* ------------------------------------------------------------------ */
+/* Fake windows                                                        */
+/* ------------------------------------------------------------------ */
+
 const appNames: Record<string, string> = {
   a: "Star Map",
   b: "Mission Control",
@@ -334,7 +452,7 @@ const appNames: Record<string, string> = {
 function FakeWindow({ id, rect }: { id: string; rect: Rect }) {
   return (
     <div
-      className="absolute flex flex-col overflow-hidden rounded-md bg-[#14161b]/90 shadow-[inset_0_1px_0_rgba(255,255,255,0.07),0_4px_16px_rgba(0,0,0,0.35)]"
+      className="absolute flex flex-col overflow-hidden rounded-lg border border-white/[0.16] bg-gradient-to-b from-[#1a1d25]/95 to-[#14161c]/95 shadow-[0_0_0_0.5px_rgba(0,0,0,0.6),inset_0_0.5px_0_rgba(255,255,255,0.14),0_10px_30px_rgba(0,0,0,0.5)]"
       style={{
         left: `${rect.x}%`,
         top: `${rect.y}%`,
@@ -342,11 +460,15 @@ function FakeWindow({ id, rect }: { id: string; rect: Rect }) {
         height: `${rect.h}%`,
       }}
     >
-      <div className="flex h-6 shrink-0 items-center gap-1.5 border-b border-white/[0.05] px-2.5">
-        <span className="size-[7px] rounded-full bg-[#ff5f57]/60" />
-        <span className="size-[7px] rounded-full bg-[#febc2e]/60" />
-        <span className="size-[7px] rounded-full bg-[#28c840]/60" />
-        <span className="ml-1.5 text-[10px] font-medium text-white/30">{appNames[id]}</span>
+      <div className="relative flex h-[26px] shrink-0 items-center border-b border-black/40 bg-white/[0.045] px-2.5 shadow-[inset_0_-0.5px_0_rgba(255,255,255,0.05)]">
+        <div className="flex gap-1.5">
+          <span className="size-[8px] rounded-full bg-[#ff5f57] shadow-[inset_0_0_1px_rgba(0,0,0,0.4)]" />
+          <span className="size-[8px] rounded-full bg-[#febc2e] shadow-[inset_0_0_1px_rgba(0,0,0,0.4)]" />
+          <span className="size-[8px] rounded-full bg-[#28c840] shadow-[inset_0_0_1px_rgba(0,0,0,0.4)]" />
+        </div>
+        <span className="pointer-events-none absolute inset-x-0 truncate px-14 text-center text-[10px] font-medium text-white/40">
+          {appNames[id]}
+        </span>
       </div>
       <AppBody id={id} />
     </div>
@@ -421,10 +543,12 @@ function StarMapApp() {
     return () => observer.disconnect();
   }, []);
 
-  useAnimationFrame((time) => {
+  useAnimationFrame(() => {
     const rocket = rocketRef.current;
     if (!rocket) return;
-    const phase = reduced ? 0.5 : (time % ROCKET_PERIOD_MS) / ROCKET_PERIOD_MS;
+    const phase = reduced
+      ? 0.5
+      : (performance.now() % ROCKET_PERIOD_MS) / ROCKET_PERIOD_MS;
     const t = easeInOutCubic(phase);
     const point = routePoint(t);
     const tangent = routeTangent(t);
@@ -535,12 +659,7 @@ const termDurations = termScript.map((item) => item.cmd.length + CMD_PAUSE + OUT
 const termTotal = termDurations.reduce((sum, ticks) => sum + ticks, 0);
 
 function TerminalApp() {
-  const [tick, setTick] = useState(0);
-
-  useEffect(() => {
-    const interval = window.setInterval(() => setTick((value) => value + 1), 70);
-    return () => window.clearInterval(interval);
-  }, []);
+  const tick = useTicker(70);
 
   let remaining = tick % termTotal;
   let index = 0;
@@ -579,20 +698,14 @@ const songs = [
   { title: "Rocket Man", artist: "Elton John" },
   { title: "Starman", artist: "David Bowie" },
 ];
-const SONG_SECONDS = 12;
+const SONG_MS = 12000;
 
 function MusicApp() {
-  const [song, setSong] = useState(0);
-
-  useEffect(() => {
-    const interval = window.setInterval(
-      () => setSong((value) => value + 1),
-      SONG_SECONDS * 1000,
-    );
-    return () => window.clearInterval(interval);
-  }, []);
-
-  const track = songs[song % songs.length];
+  const tick = useTicker(250);
+  const nowMs = tick * 250;
+  const songIndex = Math.floor(nowMs / SONG_MS);
+  const track = songs[songIndex % songs.length];
+  const progress = ((nowMs % SONG_MS) / SONG_MS) * 100;
 
   return (
     <div className="flex flex-1 items-center gap-3 overflow-hidden p-3">
@@ -606,7 +719,7 @@ function MusicApp() {
       </div>
       <div className="min-w-0 flex-1 space-y-1">
         <motion.div
-          key={song}
+          key={songIndex}
           initial={{ opacity: 0, y: 4 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.3 }}
@@ -616,12 +729,9 @@ function MusicApp() {
         </motion.div>
         <div className="mt-1.5 flex items-center gap-2">
           <div className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-white/10">
-            <motion.div
-              key={song}
-              className="h-full rounded-full bg-white/40"
-              initial={{ width: "0%" }}
-              animate={{ width: "100%" }}
-              transition={{ duration: SONG_SECONDS, ease: "linear" }}
+            <div
+              className="h-full rounded-full bg-white/40 transition-[width] duration-300 ease-linear"
+              style={{ width: `${progress}%` }}
             />
           </div>
           <div className="flex h-3 shrink-0 items-end gap-[2px]" aria-hidden="true">
@@ -655,13 +765,7 @@ const chatScript = [
 ];
 
 function ChatApp() {
-  const [tick, setTick] = useState(4);
-
-  useEffect(() => {
-    const interval = window.setInterval(() => setTick((value) => value + 1), 1100);
-    return () => window.clearInterval(interval);
-  }, []);
-
+  const tick = useTicker(1100);
   const delivered = Math.floor(tick / 2);
   const typing = tick % 2 === 1;
   const next = chatScript[delivered % chatScript.length];
@@ -720,15 +824,8 @@ function ChatApp() {
 }
 
 function StatusApp() {
-  const [snacks, setSnacks] = useState(12);
-
-  useEffect(() => {
-    const interval = window.setInterval(
-      () => setSnacks((value) => (value <= 0 ? 99 : value - 1)),
-      1500,
-    );
-    return () => window.clearInterval(interval);
-  }, []);
+  const tick = useTicker(1500);
+  const snacks = 99 - (tick % 100);
 
   const gauges = [
     ["OXYGEN", 98, "bg-[#7dd3a8]/60"],
@@ -752,61 +849,6 @@ function StatusApp() {
             />
           </div>
         </div>
-      ))}
-    </div>
-  );
-}
-
-type Star = {
-  id: number;
-  x: number;
-  y: number;
-  size: number;
-  opacity: number;
-  duration: number;
-  delay: number;
-};
-
-const STARS: Star[] = (() => {
-  let seed = 20260805;
-  const random = () => {
-    seed = (seed * 16807) % 2147483647;
-    return seed / 2147483647;
-  };
-  return Array.from({ length: 220 }, (_, index) => ({
-    id: index,
-    x: random() * 100,
-    y: random() * 100,
-    size: random() < 0.8 ? 1 : 2,
-    opacity: 0.15 + random() * 0.5,
-    duration: 3 + random() * 6,
-    delay: random() * 9,
-  }));
-})();
-
-function StarLayer({ twinkle }: { twinkle: boolean }) {
-  return (
-    <div className="absolute inset-0 overflow-hidden">
-      <div className="nebula absolute inset-0" />
-      {STARS.map((star) => (
-        <span
-          key={star.id}
-          className={`absolute rounded-full bg-white ${twinkle ? "star" : ""}`}
-          style={
-            {
-              left: `${star.x}%`,
-              top: `${star.y}%`,
-              width: star.size,
-              height: star.size,
-              opacity: star.opacity,
-              boxShadow:
-                star.size > 1 ? "0 0 4px rgba(200,212,255,0.6)" : undefined,
-              "--star-opacity": star.opacity,
-              animationDuration: twinkle ? `${star.duration}s` : undefined,
-              animationDelay: twinkle ? `-${star.delay}s` : undefined,
-            } as CSSProperties
-          }
-        />
       ))}
     </div>
   );
