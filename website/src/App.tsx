@@ -1,11 +1,12 @@
 import {
   AnimatePresence,
+  LayoutGroup,
   motion,
   useAnimationFrame,
   useReducedMotion,
   type Variants,
 } from "motion/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 const DOWNLOAD_URL =
   "https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.1-macos-arm64.zip";
@@ -572,6 +573,8 @@ const HYPERSPACE_AFTER_S = 6;
 
 /** Shared scroll clock so the field never resets across mounts. */
 let mapScroll = 0;
+/** Guards against double-advancing when two map instances overlap mid-slide. */
+let mapScrollStamp = 0;
 
 type ShipSim = {
   initialized: boolean;
@@ -697,7 +700,10 @@ function StarMapApp() {
     ship.style.transform = `translate(${s.x + jitterX}px, ${s.y + jitterY - lift}px) translate(-50%, -50%) rotate(${s.heading + 90}deg)`;
 
     /* --- procedural field --- */
-    if (!reduced) mapScroll += dt * (1 + s.boost * 45);
+    if (!reduced && now - mapScrollStamp > 4) {
+      mapScroll += dt * (1 + s.boost * 45);
+      mapScrollStamp = now;
+    }
     const dpr = Math.min(window.devicePixelRatio || 1, 3);
     const width = Math.round(w * dpr);
     const height = Math.round(h * dpr);
@@ -789,6 +795,7 @@ function StarMapApp() {
       <div
         ref={shipRef}
         className="absolute left-0 top-0 will-change-transform"
+        style={{ transform: "translate(-9999px, -9999px)" }}
         aria-hidden="true"
       >
         <svg width="14" height="18" viewBox="0 0 14 18">
@@ -935,10 +942,17 @@ const chatSpring = {
 } as const;
 
 function ChatApp() {
+  const groupId = useId();
   const tick = useTicker(1100);
   const delivered = Math.floor(tick / 2);
   const typing = tick % 2 === 1;
   const next = chatScript[delivered % chatScript.length];
+
+  // Messages that already existed when this instance mounted render settled;
+  // only genuinely new arrivals animate in.
+  const mountDelivered = useRef<number | null>(null);
+  if (mountDelivered.current === null) mountDelivered.current = delivered;
+  const isNew = (key: number) => key >= (mountDelivered.current ?? 0);
 
   // Keep extra history above the clip so drop-off never shifts the layout.
   const visible = [];
@@ -947,48 +961,54 @@ function ChatApp() {
   }
 
   return (
-    <div className="flex flex-1 flex-col justify-end gap-1.5 overflow-hidden p-2.5 text-[10px] leading-tight">
-      {visible.map((message) => (
-        <motion.p
-          layout
-          layoutId={`chat-${message.key}`}
-          key={message.key}
-          initial={{ opacity: 0, y: 8, scale: 0.95 }}
-          animate={{ opacity: 1, y: 0, scale: 1 }}
-          transition={{ ...chatSpring, opacity: { duration: 0.25 } }}
-          className={`max-w-[85%] rounded-lg px-2 py-1 ${
-            message.self
-              ? "self-end rounded-br-sm bg-white/[0.15] text-white/75"
-              : "self-start rounded-bl-sm bg-white/[0.07] text-white/55"
-          }`}
-        >
-          {message.text}
-        </motion.p>
-      ))}
-      {typing && (
-        <motion.div
-          layout
-          layoutId={`chat-${delivered}`}
-          key={`typing-${delivered}`}
-          initial={{ opacity: 0, y: 8, scale: 0.9 }}
-          animate={{ opacity: 1, y: 0, scale: 1 }}
-          transition={{ ...chatSpring, opacity: { duration: 0.2 } }}
-          className={`flex gap-[3px] rounded-lg px-2 py-1.5 ${
-            next.self
-              ? "self-end rounded-br-sm bg-white/[0.15]"
-              : "self-start rounded-bl-sm bg-white/[0.07]"
-          }`}
-        >
-          {[0, 1, 2].map((dot) => (
-            <span
-              key={dot}
-              className="size-1 animate-pulse rounded-full bg-white/50"
-              style={{ animationDelay: `${dot * 0.2}s` }}
-            />
-          ))}
-        </motion.div>
-      )}
-    </div>
+    <LayoutGroup id={groupId}>
+      <div className="flex flex-1 flex-col justify-end gap-1.5 overflow-hidden p-2.5 text-[10px] leading-tight">
+        {visible.map((message) => (
+          <motion.p
+            layout
+            layoutId={`chat-${message.key}`}
+            key={message.key}
+            initial={
+              isNew(message.key) ? { opacity: 0, y: 8, scale: 0.95 } : false
+            }
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ ...chatSpring, opacity: { duration: 0.25 } }}
+            className={`max-w-[85%] rounded-lg px-2 py-1 ${
+              message.self
+                ? "self-end rounded-br-sm bg-white/[0.15] text-white/75"
+                : "self-start rounded-bl-sm bg-white/[0.07] text-white/55"
+            }`}
+          >
+            {message.text}
+          </motion.p>
+        ))}
+        {typing && (
+          <motion.div
+            layout
+            layoutId={`chat-${delivered}`}
+            key={`typing-${delivered}`}
+            initial={
+              isNew(delivered) ? { opacity: 0, y: 8, scale: 0.9 } : false
+            }
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ ...chatSpring, opacity: { duration: 0.2 } }}
+            className={`flex gap-[3px] rounded-lg px-2 py-1.5 ${
+              next.self
+                ? "self-end rounded-br-sm bg-white/[0.15]"
+                : "self-start rounded-bl-sm bg-white/[0.07]"
+            }`}
+          >
+            {[0, 1, 2].map((dot) => (
+              <span
+                key={dot}
+                className="size-1 animate-pulse rounded-full bg-white/50"
+                style={{ animationDelay: `${dot * 0.2}s` }}
+              />
+            ))}
+          </motion.div>
+        )}
+      </div>
+    </LayoutGroup>
   );
 }
 
