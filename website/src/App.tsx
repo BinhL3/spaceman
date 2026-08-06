@@ -543,13 +543,6 @@ function FakeWindow({ id, rect }: { id: string; rect: Rect }) {
   );
 }
 
-const chartStars = [
-  [12, 18], [28, 8], [44, 22], [62, 12], [80, 20], [90, 42],
-  [18, 42], [36, 55], [8, 68], [52, 72], [74, 60], [88, 82],
-  [24, 84], [60, 88], [40, 38], [70, 78], [15, 30], [55, 40],
-  [83, 68], [33, 25], [47, 60], [92, 10], [5, 50], [65, 50],
-] as const;
-
 function AppBody({ id }: { id: string }) {
   if (id === "a") return <StarMapApp />;
   if (id === "b") return <TerminalApp />;
@@ -559,87 +552,80 @@ function AppBody({ id }: { id: string }) {
 }
 
 /**
- * The star map route is one cubic bezier in percentage space; the SVG path,
- * waypoint dots, and per-frame rocket position all derive from it exactly.
+ * Top-down procedural scanner: the ship holds position while parallax star
+ * layers stream past. Everything derives from wall-clock time, so the motion
+ * is constant and survives workspace switches.
  */
-const ROUTE = {
-  p0: { x: 12, y: 86 },
-  p1: { x: 35, y: 78 },
-  p2: { x: 40, y: 45 },
-  p3: { x: 66, y: 28 },
-};
-const ROUTE_PATH = `M ${ROUTE.p0.x} ${ROUTE.p0.y} C ${ROUTE.p1.x} ${ROUTE.p1.y}, ${ROUTE.p2.x} ${ROUTE.p2.y}, ${ROUTE.p3.x} ${ROUTE.p3.y}`;
-
-function routePoint(t: number) {
-  const u = 1 - t;
-  const { p0, p1, p2, p3 } = ROUTE;
-  return {
-    x: u ** 3 * p0.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t ** 3 * p3.x,
-    y: u ** 3 * p0.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t ** 3 * p3.y,
-  };
+function hash01(n: number) {
+  const s = Math.sin(n * 127.1) * 43758.5453;
+  return s - Math.floor(s);
 }
 
-function routeTangent(t: number) {
-  const u = 1 - t;
-  const { p0, p1, p2, p3 } = ROUTE;
-  return {
-    x: 3 * u * u * (p1.x - p0.x) + 6 * u * t * (p2.x - p1.x) + 3 * t * t * (p3.x - p2.x),
-    y: 3 * u * u * (p1.y - p0.y) + 6 * u * t * (p2.y - p1.y) + 3 * t * t * (p3.y - p2.y),
-  };
-}
-
-function easeInOutCubic(t: number) {
-  return t < 0.5 ? 4 * t ** 3 : 1 - (-2 * t + 2) ** 3 / 2;
-}
-
-const ROCKET_PERIOD_MS = 9000;
+const MAP_LAYERS = [
+  { count: 26, speed: 0.016, size: 0.7, alpha: 0.28, seed: 11 },
+  { count: 16, speed: 0.038, size: 1.1, alpha: 0.5, seed: 57 },
+  { count: 8, speed: 0.08, size: 1.5, alpha: 0.75, seed: 91 },
+];
+const PLANET_PERIOD_S = 16;
 
 function StarMapApp() {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const rocketRef = useRef<HTMLSpanElement>(null);
-  const dimensions = useRef({ w: 1, h: 1 });
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const reduced = useReducedMotion();
 
-  useEffect(() => {
-    const element = containerRef.current;
-    if (!element) return;
-    const observer = new ResizeObserver(([entry]) => {
-      const { width, height } = entry.contentRect;
-      if (width > 0 && height > 0) dimensions.current = { w: width, h: height };
-    });
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
-
   useAnimationFrame(() => {
-    const rocket = rocketRef.current;
-    if (!rocket) return;
-    const phase = reduced
-      ? 0.5
-      : (performance.now() % ROCKET_PERIOD_MS) / ROCKET_PERIOD_MS;
-    const t = easeInOutCubic(phase);
-    const point = routePoint(t);
-    const tangent = routeTangent(t);
-    const { w, h } = dimensions.current;
-    const heading = (Math.atan2(tangent.y * h, tangent.x * w) * 180) / Math.PI;
-    const opacity = reduced
-      ? 1
-      : Math.max(0, Math.min(1, phase / 0.06, (1 - phase) / 0.06));
-    rocket.style.left = `${point.x}%`;
-    rocket.style.top = `${point.y}%`;
-    rocket.style.opacity = String(opacity);
-    rocket.style.transform = `translate(-50%, -50%) rotate(${heading + 90}deg)`;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const bounds = canvas.getBoundingClientRect();
+    if (bounds.width === 0 || bounds.height === 0) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const width = Math.round(bounds.width * dpr);
+    const height = Math.round(bounds.height * dpr);
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const w = bounds.width;
+    const h = bounds.height;
+    const t = reduced ? 0 : performance.now() / 1000;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    for (const layer of MAP_LAYERS) {
+      ctx.fillStyle = `rgba(232,234,240,${layer.alpha})`;
+      for (let index = 0; index < layer.count; index += 1) {
+        const x = hash01(layer.seed + index * 71.7) * w;
+        const y = ((hash01(layer.seed + index * 133.3 + 1) + t * layer.speed) % 1) * h;
+        ctx.beginPath();
+        ctx.arc(x, y, layer.size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // A ringed planet drifts through every PLANET_PERIOD_S seconds.
+    const epoch = Math.floor(t / PLANET_PERIOD_S);
+    const phase = (t / PLANET_PERIOD_S) % 1;
+    const px = (0.18 + hash01(epoch * 7.31) * 0.64) * w;
+    const py = (phase * 1.5 - 0.25) * h;
+    const pr = 7 + hash01(epoch * 3.17) * 9;
+    if (py > -pr * 3 && py < h + pr * 3) {
+      ctx.lineWidth = 1.1;
+      ctx.fillStyle = "rgba(235,238,244,0.05)";
+      ctx.strokeStyle = "rgba(235,238,244,0.55)";
+      ctx.beginPath();
+      ctx.arc(px, py, pr, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.strokeStyle = "rgba(235,238,244,0.28)";
+      ctx.beginPath();
+      ctx.ellipse(px, py, pr * 1.75, pr * 0.5, -0.3, 0, Math.PI * 2);
+      ctx.stroke();
+    }
   });
 
   return (
-    <div ref={containerRef} className="relative min-h-0 flex-1 overflow-hidden">
-      {chartStars.map(([sx, sy], index) => (
-        <span
-          key={index}
-          className="absolute size-px rounded-full bg-white/40"
-          style={{ left: `${sx}%`, top: `${sy}%` }}
-        />
-      ))}
+    <div className="relative min-h-0 flex-1 overflow-hidden">
       <svg
         className="absolute inset-0 size-full"
         viewBox="0 0 100 100"
@@ -652,57 +638,25 @@ function StarMapApp() {
           strokeWidth="0.5"
           vectorEffect="non-scaling-stroke"
         />
-        <path
-          className="route-dash"
-          d={ROUTE_PATH}
-          fill="none"
-          stroke="rgba(190,198,220,0.5)"
-          strokeWidth="1"
-          strokeDasharray="4 4"
-          vectorEffect="non-scaling-stroke"
-        />
       </svg>
-      {[0.38, 0.7].map((t, index) => {
-        const point = routePoint(t);
-        return (
-          <motion.span
-            key={t}
-            className="absolute size-1 rounded-full bg-white/60"
-            style={{
-              left: `${point.x}%`,
-              top: `${point.y}%`,
-              translateX: "-50%",
-              translateY: "-50%",
-            }}
-            animate={{ opacity: [0.4, 0.9, 0.4] }}
-            transition={{
-              duration: 2.4,
-              repeat: Infinity,
-              delay: index * 1.2,
-              ease: "easeInOut",
-            }}
-          />
-        );
-      })}
-      <span
-        ref={rocketRef}
-        className="absolute will-change-transform"
-        style={{ left: "12%", top: "86%", opacity: 0 }}
+      <canvas ref={canvasRef} className="absolute inset-0 size-full" />
+      <motion.div
+        className="absolute left-1/2 top-[56%] -translate-x-1/2 -translate-y-1/2"
+        animate={{ y: [0, -3, 0], x: [0, 2, 0, -2, 0] }}
+        transition={{ duration: 7, repeat: Infinity, ease: "easeInOut" }}
         aria-hidden="true"
       >
-        <svg width="10" height="12" viewBox="0 0 10 12">
-          <path d="M5 0 L9 12 L5 9.5 L1 12 Z" fill="rgba(240,242,248,0.9)" />
+        <svg width="14" height="18" viewBox="0 0 14 18">
+          <path
+            d="M7 1 L12.5 16 L7 12.6 L1.5 16 Z"
+            fill="none"
+            stroke="rgba(240,242,248,0.9)"
+            strokeWidth="1.2"
+            strokeLinejoin="round"
+          />
         </svg>
-      </span>
-      <div className="absolute left-[60%] top-[12%] size-8">
-        <motion.div
-          className="size-8 rounded-full bg-[radial-gradient(circle_at_35%_30%,rgba(214,220,235,0.75),rgba(140,148,175,0.5)_55%,rgba(72,78,98,0.45)_85%)] shadow-[inset_-3px_-3px_6px_rgba(0,0,0,0.45)]"
-          animate={{ scale: [1, 1.05, 1] }}
-          transition={{ duration: 3.4, repeat: Infinity, ease: "easeInOut" }}
-        />
-        <div className="absolute left-1/2 top-1/2 h-3.5 w-12 -translate-x-1/2 -translate-y-1/2 -rotate-[18deg] rounded-[50%] border border-white/25" />
-      </div>
-      <p className="absolute left-[8%] top-[89%] font-mono text-[8px] tracking-wider text-white/30">
+      </motion.div>
+      <p className="absolute bottom-2 left-2.5 font-mono text-[8px] tracking-wider text-white/30">
         YOU ARE HERE
       </p>
       <p className="absolute bottom-2 right-2.5 font-mono text-[9px] text-white/25">
@@ -713,10 +667,10 @@ function StarMapApp() {
 }
 
 const termScript = [
-  { cmd: "spaceman ctl warp 9", out: "warp drive engaged" },
+  { cmd: "spaceman ctl focus right", out: "focused: Terminal" },
+  { cmd: "spaceman ctl move-to 4", out: "window → workspace 4" },
   { cmd: "open pod-bay-doors", out: "I'm afraid I can't do that" },
-  { cmd: "spaceman ctl focus mars", out: "focused: Mars (display 4)" },
-  { cmd: "sudo make-me-a-sandwich", out: "replicating..." },
+  { cmd: "spaceman ctl balance", out: "windows balanced" },
 ];
 const CMD_PAUSE = 8;
 const OUT_PAUSE = 20;
@@ -759,9 +713,9 @@ function TerminalApp() {
 }
 
 const songs = [
-  { title: "Space Oddity", artist: "David Bowie" },
-  { title: "Rocket Man", artist: "Elton John" },
-  { title: "Starman", artist: "David Bowie" },
+  { title: "An Ending (Ascent)", artist: "Brian Eno" },
+  { title: "Olson", artist: "Boards of Canada" },
+  { title: "Avril 14th", artist: "Aphex Twin" },
 ];
 const SONG_MS = 12000;
 
@@ -821,12 +775,12 @@ function MusicApp() {
 }
 
 const chatScript = [
-  { self: false, text: "take me to your leader" },
-  { self: true, text: "can't. tiling windows" },
-  { self: false, text: "respect" },
-  { self: false, text: "is that liquid glass?" },
-  { self: true, text: "obviously" },
-  { self: false, text: "humanity has peaked" },
+  { self: false, text: "approaching kepler-442b" },
+  { self: true, text: "eta?" },
+  { self: false, text: "eventually" },
+  { self: true, text: "cool" },
+  { self: false, text: "windows still tiled?" },
+  { self: true, text: "always" },
 ];
 
 function ChatApp() {

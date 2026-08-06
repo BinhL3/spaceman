@@ -36,22 +36,6 @@ a {
     radial-gradient(520px 520px at 18% 82%, rgba(225, 230, 235, 0.03), transparent 70%);
 }
 
-.route-dash {
-  animation: route-march 2.6s linear infinite;
-}
-
-@keyframes route-march {
-  to {
-    stroke-dashoffset: -8;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .route-dash {
-    animation: none;
-  }
-}
-
 .terminal-cursor {
   animation: blink 1.1s steps(1, end) infinite;
 }
