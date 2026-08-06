@@ -1,5 +1,5 @@
-import { motion } from "motion/react";
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { AnimatePresence, motion, type Variants } from "motion/react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 
 const DOWNLOAD_URL =
   "https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.1-macos-arm64.zip";
@@ -22,22 +22,17 @@ const layouts: Array<Record<string, Rect>> = [
   },
 ];
 
-const windowIds = [...new Set(layouts.flatMap((layout) => Object.keys(layout)))];
-
-function firstRect(id: string): Rect {
-  for (const layout of layouts) {
-    const rect = layout[id];
-    if (rect) return rect;
-  }
-  throw new Error(`No rect for window ${id}`);
-}
-
 export function App() {
-  const [workspace, setWorkspace] = useState(0);
+  const [[workspace, direction], setState] = useState<[number, number]>([0, 1]);
+
+  const select = (next: number) =>
+    setState(([current]) =>
+      next === current ? [current, 1] : [next, next > current ? 1 : -1],
+    );
 
   useEffect(() => {
     const interval = window.setInterval(() => {
-      setWorkspace((current) => (current + 1) % layouts.length);
+      setState(([current]) => [(current + 1) % layouts.length, 1]);
     }, 3200);
     return () => window.clearInterval(interval);
   }, [workspace]);
@@ -47,7 +42,7 @@ export function App() {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       const digit = Number(event.key);
       if (Number.isInteger(digit) && digit >= 1 && digit <= layouts.length) {
-        setWorkspace(digit - 1);
+        select(digit - 1);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -68,7 +63,7 @@ export function App() {
         </div>
       </header>
 
-      <WorkspaceDemo workspace={workspace} onSelect={setWorkspace} />
+      <WorkspaceDemo workspace={workspace} direction={direction} onSelect={select} />
 
       <footer className="relative flex flex-col items-center gap-3">
         <a
@@ -83,43 +78,53 @@ export function App() {
   );
 }
 
+const panelVariants: Variants = {
+  enter: (direction: number) => ({ x: `${direction * 106}%` }),
+  center: { x: "0%" },
+  exit: (direction: number) => ({ x: `${direction * -106}%` }),
+};
+
 function WorkspaceDemo({
   workspace,
+  direction,
   onSelect,
 }: {
   workspace: number;
+  direction: number;
   onSelect: (workspace: number) => void;
 }) {
-  const lastRects = useRef(new Map(windowIds.map((id) => [id, firstRect(id)])));
-
   return (
     <div className="relative flex w-full max-w-[520px] flex-col items-center gap-4">
-      <div className="relative aspect-[16/10] w-full overflow-hidden rounded-xl border border-white/10 bg-[#101114]/90 shadow-[0_20px_60px_rgba(0,0,0,0.45)] backdrop-blur-sm">
-        {windowIds.map((id) => {
-          const rect = layouts[workspace][id];
-          if (rect) lastRects.current.set(id, rect);
-          const shown = rect ?? lastRects.current.get(id)!;
-          return (
-            <motion.div
-              key={id}
-              initial={false}
-              animate={{
-                left: `${shown.x}%`,
-                top: `${shown.y}%`,
-                width: `${shown.w}%`,
-                height: `${shown.h}%`,
-                opacity: rect ? 1 : 0,
-                scale: rect ? 1 : 0.94,
-              }}
-              transition={{
-                default: { type: "spring", visualDuration: 0.55, bounce: 0.16 },
-                opacity: { duration: 0.3, ease: "easeOut" },
-              }}
-              style={{ zIndex: rect ? 1 : 0 }}
-              className="absolute rounded-md bg-white/[0.07]"
-            />
-          );
-        })}
+      <div className="relative aspect-[16/10] w-full overflow-hidden rounded-2xl border border-white/[0.12] bg-white/[0.04] shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(255,255,255,0.04),0_16px_48px_rgba(0,0,0,0.5)] backdrop-blur-2xl">
+        <AnimatePresence initial={false} custom={direction}>
+          <motion.div
+            key={workspace}
+            custom={direction}
+            variants={panelVariants}
+            initial="enter"
+            animate="center"
+            exit="exit"
+            transition={{ type: "spring", visualDuration: 0.3, bounce: 0.05 }}
+            className="absolute inset-0"
+          >
+            {Object.entries(layouts[workspace]).map(([id, rect]) => (
+              <div
+                key={id}
+                className="absolute rounded-md bg-white/[0.07] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
+                style={{
+                  left: `${rect.x}%`,
+                  top: `${rect.y}%`,
+                  width: `${rect.w}%`,
+                  height: `${rect.h}%`,
+                }}
+              />
+            ))}
+          </motion.div>
+        </AnimatePresence>
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 bg-[linear-gradient(115deg,rgba(255,255,255,0.05),transparent_40%)]"
+        />
       </div>
 
       <div className="flex items-center gap-1" role="tablist" aria-label="Workspaces">
@@ -131,7 +136,7 @@ function WorkspaceDemo({
             aria-selected={index === workspace}
             aria-label={`Workspace ${index + 1}`}
             onClick={() => onSelect(index)}
-            className="relative grid size-8 place-items-center rounded-md font-mono text-[13px] tabular-nums transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8ea0ff]"
+            className="relative grid size-8 place-items-center rounded-md font-mono text-[13px] tabular-nums focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8ea0ff]"
           >
             {index === workspace && (
               <motion.span
@@ -140,11 +145,13 @@ function WorkspaceDemo({
                 transition={{ type: "spring", visualDuration: 0.3, bounce: 0.1 }}
               />
             )}
-            <span
-              className={`relative ${index === workspace ? "text-white" : "text-[#54555c]"}`}
+            <motion.span
+              animate={{ opacity: index === workspace ? 1 : 0.35 }}
+              transition={{ duration: 0.25, ease: "easeOut" }}
+              className="relative text-white"
             >
               {index + 1}
-            </span>
+            </motion.span>
           </button>
         ))}
       </div>
