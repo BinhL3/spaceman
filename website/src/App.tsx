@@ -61,8 +61,10 @@ export function App() {
 
       <header className="relative flex flex-col items-center gap-5">
         <img src="/mark.svg" alt="" className="size-14 rounded-[14px] shadow-lg" />
-        <div className="flex flex-col items-center gap-2 text-center">
-          <h1 className="text-2xl font-medium tracking-tight">Spaceman</h1>
+        <div className="flex flex-col items-center gap-3 text-center">
+          <h1>
+            <Wordmark />
+          </h1>
           <p className="text-base text-[#87888e]">
             Another fucking tiling window manager for macOS.
           </p>
@@ -84,6 +86,64 @@ export function App() {
   );
 }
 
+/**
+ * Hand-drawn monoline wordmark: thin geometric caps with a crossbar-less A.
+ * Glyphs live on an 80-unit cap height; strokes stay unfilled monolines.
+ */
+const GLYPHS: Record<string, { width: number; d: string }> = {
+  S: {
+    width: 52,
+    d: "M47 13 C44 4 36 0 26 0 C13 0 5 6 5 16 C5 26 12 31 26 34 C41 37 49 43 49 55 C49 70 40 80 26 80 C14 80 6 75 3 67",
+  },
+  P: {
+    width: 55,
+    d: "M7 80 L7 0 L31 0 C44 0 51 8 51 21 C51 34 44 42 31 42 L7 42",
+  },
+  A: { width: 60, d: "M4 80 L30 0 L56 80" },
+  C: {
+    width: 54,
+    d: "M49 14 C45 4 37 0 27 0 C11 0 5 13 5 40 C5 67 11 80 27 80 C37 80 45 76 49 66",
+  },
+  E: { width: 49, d: "M45 0 L9 0 L9 80 L45 80 M9 40 L35 40" },
+  M: { width: 60, d: "M6 80 L6 0 L30 44 L54 0 L54 80" },
+  N: { width: 56, d: "M7 80 L7 0 L49 80 L49 0" },
+};
+
+const WORDMARK_GAP = 24;
+
+function Wordmark() {
+  let x = 0;
+  const placed = "SPACEMAN".split("").map((letter, index) => {
+    const glyph = GLYPHS[letter];
+    const entry = { key: `${letter}-${index}`, glyph, x };
+    x += glyph.width + WORDMARK_GAP;
+    return entry;
+  });
+  const total = x - WORDMARK_GAP;
+
+  return (
+    <svg
+      viewBox={`-4 -5 ${total + 8} 90`}
+      className="h-6"
+      role="img"
+      aria-label="Spaceman"
+    >
+      {placed.map((entry) => (
+        <path
+          key={entry.key}
+          d={entry.glyph.d}
+          transform={`translate(${entry.x},0)`}
+          fill="none"
+          stroke="rgba(255,255,255,0.92)"
+          strokeWidth="5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      ))}
+    </svg>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Warp starfield: one shared 3D star state drawn to every registered  */
 /* canvas (page background + the refracted copy inside the glass).     */
@@ -91,7 +151,7 @@ export function App() {
 
 type WarpStar = { x: number; y: number; z: number; r: number };
 
-const WARP_STARS: WarpStar[] = Array.from({ length: 260 }, () => {
+const WARP_STARS: WarpStar[] = Array.from({ length: 110 }, () => {
   const z = 0.12 + Math.random() * 0.88;
   return {
     x: (Math.random() * 2 - 1) * z,
@@ -126,7 +186,7 @@ function advanceWarp(dt: number) {
 function drawWarp() {
   const vw = window.innerWidth;
   const vh = window.innerHeight;
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
   for (const canvas of starCanvases) {
     const bounds = canvas.getBoundingClientRect();
     if (bounds.width === 0 || bounds.height === 0) continue;
@@ -147,12 +207,25 @@ function drawWarp() {
       const px = cx + star.x * (vw / 2) * k * 0.9;
       const py = cy + star.y * (vh / 2) * k * 0.9;
       const depth = 1 - star.z;
-      const size = star.r * (0.4 + depth * 1.7);
-      const alpha = Math.min(1, depth * 1.5) * 0.7 + 0.06;
-      ctx.beginPath();
-      ctx.arc(px, py, size, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(218,228,255,${alpha})`;
-      ctx.fill();
+      const size = star.r * (0.3 + depth * 1.3);
+      const alpha = Math.min(1, depth * 1.5) * 0.65 + 0.05;
+      if (size > 0.9) {
+        // Bright stars get a soft bloom instead of a hard-edged disc.
+        const bloom = size * 3;
+        const glow = ctx.createRadialGradient(px, py, 0, px, py, bloom);
+        glow.addColorStop(0, `rgba(226,234,255,${alpha})`);
+        glow.addColorStop(0.4, `rgba(205,218,255,${alpha * 0.3})`);
+        glow.addColorStop(1, "rgba(205,218,255,0)");
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.arc(px, py, bloom, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.beginPath();
+        ctx.arc(px, py, size, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(218,228,255,${alpha * 0.8})`;
+        ctx.fill();
+      }
     }
   }
 }
