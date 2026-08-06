@@ -59,6 +59,22 @@ a {
   }
 }
 
+.route-dash {
+  animation: route-march 2.6s linear infinite;
+}
+
+@keyframes route-march {
+  to {
+    stroke-dashoffset: -8;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .route-dash {
+    animation: none;
+  }
+}
+
 .terminal-cursor {
   animation: blink 1.1s steps(1, end) infinite;
 }

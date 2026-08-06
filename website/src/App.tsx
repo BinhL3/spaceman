@@ -1,4 +1,10 @@
-import { AnimatePresence, motion, type Variants } from "motion/react";
+import {
+  AnimatePresence,
+  motion,
+  useAnimationFrame,
+  useReducedMotion,
+  type Variants,
+} from "motion/react";
 import {
   useEffect,
   useRef,
@@ -362,15 +368,79 @@ function AppBody({ id }: { id: string }) {
   return <StatusApp />;
 }
 
-/** Cubic bezier samples along the star map route for the rocket's journey. */
-const routeKeyframes = {
-  left: ["10%", "24.5%", "35.9%", "47.8%", "64%"],
-  top: ["83%", "72.9%", "57.4%", "40.1%", "25%"],
+/**
+ * The star map route is one cubic bezier in percentage space; the SVG path,
+ * waypoint dots, and per-frame rocket position all derive from it exactly.
+ */
+const ROUTE = {
+  p0: { x: 12, y: 86 },
+  p1: { x: 35, y: 78 },
+  p2: { x: 40, y: 45 },
+  p3: { x: 66, y: 28 },
 };
+const ROUTE_PATH = `M ${ROUTE.p0.x} ${ROUTE.p0.y} C ${ROUTE.p1.x} ${ROUTE.p1.y}, ${ROUTE.p2.x} ${ROUTE.p2.y}, ${ROUTE.p3.x} ${ROUTE.p3.y}`;
+
+function routePoint(t: number) {
+  const u = 1 - t;
+  const { p0, p1, p2, p3 } = ROUTE;
+  return {
+    x: u ** 3 * p0.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t ** 3 * p3.x,
+    y: u ** 3 * p0.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t ** 3 * p3.y,
+  };
+}
+
+function routeTangent(t: number) {
+  const u = 1 - t;
+  const { p0, p1, p2, p3 } = ROUTE;
+  return {
+    x: 3 * u * u * (p1.x - p0.x) + 6 * u * t * (p2.x - p1.x) + 3 * t * t * (p3.x - p2.x),
+    y: 3 * u * u * (p1.y - p0.y) + 6 * u * t * (p2.y - p1.y) + 3 * t * t * (p3.y - p2.y),
+  };
+}
+
+function easeInOutCubic(t: number) {
+  return t < 0.5 ? 4 * t ** 3 : 1 - (-2 * t + 2) ** 3 / 2;
+}
+
+const ROCKET_PERIOD_MS = 9000;
 
 function StarMapApp() {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const rocketRef = useRef<HTMLSpanElement>(null);
+  const dimensions = useRef({ w: 1, h: 1 });
+  const reduced = useReducedMotion();
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) return;
+    const observer = new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect;
+      if (width > 0 && height > 0) dimensions.current = { w: width, h: height };
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useAnimationFrame((time) => {
+    const rocket = rocketRef.current;
+    if (!rocket) return;
+    const phase = reduced ? 0.5 : (time % ROCKET_PERIOD_MS) / ROCKET_PERIOD_MS;
+    const t = easeInOutCubic(phase);
+    const point = routePoint(t);
+    const tangent = routeTangent(t);
+    const { w, h } = dimensions.current;
+    const heading = (Math.atan2(tangent.y * h, tangent.x * w) * 180) / Math.PI;
+    const opacity = reduced
+      ? 1
+      : Math.max(0, Math.min(1, phase / 0.06, (1 - phase) / 0.06));
+    rocket.style.left = `${point.x}%`;
+    rocket.style.top = `${point.y}%`;
+    rocket.style.opacity = String(opacity);
+    rocket.style.transform = `translate(-50%, -50%) rotate(${heading + 45}deg)`;
+  });
+
   return (
-    <div className="relative min-h-0 flex-1 overflow-hidden">
+    <div ref={containerRef} className="relative min-h-0 flex-1 overflow-hidden">
       {chartStars.map(([sx, sy], index) => (
         <span
           key={index}
@@ -391,31 +461,48 @@ function StarMapApp() {
           vectorEffect="non-scaling-stroke"
         />
         <path
-          d="M 12 86 C 35 78, 40 45, 66 28"
+          className="route-dash"
+          d={ROUTE_PATH}
           fill="none"
           stroke="rgba(142,160,255,0.7)"
           strokeWidth="1.2"
           strokeDasharray="4 4"
           vectorEffect="non-scaling-stroke"
         />
-        <circle cx="37.9" cy="60.4" r="1.2" fill="rgba(142,160,255,0.8)" />
-        <circle cx="49.8" cy="43.1" r="1.2" fill="rgba(142,160,255,0.8)" />
       </svg>
-      <motion.span
-        className="absolute text-sm"
+      {[0.38, 0.7].map((t, index) => {
+        const point = routePoint(t);
+        return (
+          <motion.span
+            key={t}
+            className="absolute size-[5px] rounded-full bg-[#8ea0ff]/80"
+            style={{
+              left: `${point.x}%`,
+              top: `${point.y}%`,
+              translateX: "-50%",
+              translateY: "-50%",
+            }}
+            animate={{ scale: [1, 1.5, 1], opacity: [0.7, 1, 0.7] }}
+            transition={{
+              duration: 2.4,
+              repeat: Infinity,
+              delay: index * 1.2,
+              ease: "easeInOut",
+            }}
+          />
+        );
+      })}
+      <span
+        ref={rocketRef}
+        className="absolute text-sm will-change-transform"
+        style={{ left: "12%", top: "86%", opacity: 0 }}
         aria-hidden="true"
-        animate={{
-          left: routeKeyframes.left,
-          top: routeKeyframes.top,
-          opacity: [0, 1, 1, 1, 0],
-        }}
-        transition={{ duration: 7, times: [0, 0.2, 0.5, 0.8, 1], repeat: Infinity, repeatDelay: 0.8, ease: "linear" }}
       >
         🚀
-      </motion.span>
+      </span>
       <div className="absolute left-[60%] top-[12%] size-8">
         <motion.div
-          className="size-8 rounded-full bg-gradient-to-br from-[#f0b46a]/70 via-[#c084fc]/50 to-[#8ea0ff]/40"
+          className="size-8 rounded-full bg-[radial-gradient(circle_at_35%_30%,rgba(255,220,180,0.9),rgba(192,132,252,0.6)_45%,rgba(90,100,210,0.5)_80%)] shadow-[inset_-3px_-3px_6px_rgba(0,0,0,0.45),0_0_14px_rgba(192,132,252,0.3)]"
           animate={{ scale: [1, 1.07, 1] }}
           transition={{ duration: 3.4, repeat: Infinity, ease: "easeInOut" }}
         />
@@ -426,7 +513,7 @@ function StarMapApp() {
           transition={{ duration: 24, repeat: Infinity, ease: "linear" }}
         />
       </div>
-      <p className="absolute left-[8%] top-[88%] font-mono text-[8px] tracking-wider text-[#8ea0ff]/50">
+      <p className="absolute left-[8%] top-[89%] font-mono text-[8px] tracking-wider text-[#8ea0ff]/50">
         YOU ARE HERE
       </p>
       <p className="absolute bottom-2 right-2.5 font-mono text-[9px] text-white/30">
