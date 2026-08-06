@@ -45,6 +45,18 @@ experimental; read [Known limitations](docs/limitations.md) before installing it
 The matching [SHA-256 checksum](https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.1-macos-arm64.zip.sha256)
 is published alongside the archive. Later preview updates are signed and delivered through Sparkle.
 
+### Agent-Assisted Setup
+
+A coding agent (Claude Code, Cursor, Codex, OpenCode, and others) can walk through this setup with
+the [spaceman-setup](skills/spaceman-setup/SKILL.md) skill:
+
+```sh
+npx skills add kitlangton/spaceman
+```
+
+The skill encodes the safe install order, Accessibility steps, verification, configuration, and the
+recovery rules below.
+
 ## Install From Source
 
 Source builds are distinct from the notarized preview artifact and require your own `Developer ID
