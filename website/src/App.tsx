@@ -76,7 +76,7 @@ export function App() {
       <footer className="relative flex flex-col items-center gap-3">
         <a
           href={DOWNLOAD_URL}
-          className="rounded-full bg-[#f0f0ee] px-6 py-2.5 text-sm font-medium text-[#101114] transition-opacity duration-150 hover:opacity-85 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8ea0ff]"
+          className="rounded-full bg-[#f0f0ee] px-6 py-2.5 text-sm font-medium text-[#101114] transition-opacity duration-150 hover:opacity-85 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#7dd3a8]"
         >
           Download
         </a>
@@ -209,13 +209,13 @@ function drawWarp() {
       const depth = 1 - star.z;
       const size = star.r * (0.3 + depth * 1.3);
       const alpha = Math.min(1, depth * 1.5) * 0.65 + 0.05;
-      if (size > 0.9) {
-        // Bright stars get a soft bloom instead of a hard-edged disc.
-        const bloom = size * 3;
+      if (size > 1.1) {
+        // Brightest stars get a slight softening, not a halo.
+        const bloom = size * 1.8;
         const glow = ctx.createRadialGradient(px, py, 0, px, py, bloom);
-        glow.addColorStop(0, `rgba(226,234,255,${alpha})`);
-        glow.addColorStop(0.4, `rgba(205,218,255,${alpha * 0.3})`);
-        glow.addColorStop(1, "rgba(205,218,255,0)");
+        glow.addColorStop(0, `rgba(236,238,244,${alpha * 0.9})`);
+        glow.addColorStop(0.6, `rgba(236,238,244,${alpha * 0.2})`);
+        glow.addColorStop(1, "rgba(236,238,244,0)");
         ctx.fillStyle = glow;
         ctx.beginPath();
         ctx.arc(px, py, bloom, 0, Math.PI * 2);
@@ -223,7 +223,7 @@ function drawWarp() {
       } else {
         ctx.beginPath();
         ctx.arc(px, py, size, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(218,228,255,${alpha * 0.8})`;
+        ctx.fillStyle = `rgba(232,234,240,${alpha * 0.75})`;
         ctx.fill();
       }
     }
@@ -335,18 +335,18 @@ function WorkspaceDemo({
       {frame && mapUri && <LiquidGlassFilter href={mapUri} width={frame.w} height={frame.h} />}
       <div
         aria-hidden="true"
-        className="pointer-events-none absolute -inset-10 top-[-2.5rem] bg-[radial-gradient(ellipse,rgba(120,145,255,0.14),transparent_70%)] blur-2xl"
+        className="pointer-events-none absolute -inset-10 top-[-2.5rem] bg-[radial-gradient(ellipse,rgba(235,238,242,0.05),transparent_70%)] blur-2xl"
       />
       <div
         ref={frameRef}
-        className="relative aspect-[16/10] w-full overflow-hidden rounded-2xl border border-white/[0.14] bg-[#0e1119] shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(255,255,255,0.04),0_16px_48px_rgba(0,0,0,0.5),0_0_70px_rgba(125,145,255,0.14)]"
+        className="relative aspect-[16/10] w-full overflow-hidden rounded-2xl border border-white/[0.14] bg-[#0e0f12] shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(255,255,255,0.04),0_16px_48px_rgba(0,0,0,0.5),0_0_60px_rgba(235,238,242,0.05)]"
       >
         <div
           aria-hidden="true"
           className="pointer-events-none absolute inset-0"
           style={
             mapUri
-              ? { filter: "url(#liquid-glass) blur(0.75px) saturate(170%) brightness(1.25)" }
+              ? { filter: "url(#liquid-glass) blur(0.75px) brightness(1.2)" }
               : undefined
           }
         >
@@ -361,11 +361,6 @@ function WorkspaceDemo({
           />
           <canvas ref={copyCanvasRef} className="absolute inset-0 size-full" />
         </div>
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-0 bg-[#7288ff]/[0.05]"
-        />
-
         <AnimatePresence initial={false} custom={direction}>
           <motion.div
             key={workspace}
@@ -398,7 +393,7 @@ function WorkspaceDemo({
             aria-selected={index === workspace}
             aria-label={`Workspace ${index + 1}`}
             onClick={() => onSelect(index)}
-            className="relative grid size-8 place-items-center rounded-md font-mono text-[13px] tabular-nums focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8ea0ff]"
+            className="relative grid size-8 place-items-center rounded-md font-mono text-[13px] tabular-nums focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#7dd3a8]"
           >
             {index === workspace && (
               <motion.span
@@ -535,9 +530,9 @@ function FakeWindow({ id, rect }: { id: string; rect: Rect }) {
     >
       <div className="relative flex h-[26px] shrink-0 items-center border-b border-black/40 bg-white/[0.045] px-2.5 shadow-[inset_0_-0.5px_0_rgba(255,255,255,0.05)]">
         <div className="flex gap-1.5">
-          <span className="size-[8px] rounded-full bg-[#ff5f57] shadow-[inset_0_0_1px_rgba(0,0,0,0.4)]" />
-          <span className="size-[8px] rounded-full bg-[#febc2e] shadow-[inset_0_0_1px_rgba(0,0,0,0.4)]" />
-          <span className="size-[8px] rounded-full bg-[#28c840] shadow-[inset_0_0_1px_rgba(0,0,0,0.4)]" />
+          <span className="size-[8px] rounded-full bg-white/20 shadow-[inset_0_0_1px_rgba(0,0,0,0.4)]" />
+          <span className="size-[8px] rounded-full bg-white/20 shadow-[inset_0_0_1px_rgba(0,0,0,0.4)]" />
+          <span className="size-[8px] rounded-full bg-white/20 shadow-[inset_0_0_1px_rgba(0,0,0,0.4)]" />
         </div>
         <span className="pointer-events-none absolute inset-x-0 truncate px-14 text-center text-[10px] font-medium text-white/40">
           {appNames[id]}
@@ -633,7 +628,7 @@ function StarMapApp() {
     rocket.style.left = `${point.x}%`;
     rocket.style.top = `${point.y}%`;
     rocket.style.opacity = String(opacity);
-    rocket.style.transform = `translate(-50%, -50%) rotate(${heading + 45}deg)`;
+    rocket.style.transform = `translate(-50%, -50%) rotate(${heading + 90}deg)`;
   });
 
   return (
@@ -661,8 +656,8 @@ function StarMapApp() {
           className="route-dash"
           d={ROUTE_PATH}
           fill="none"
-          stroke="rgba(142,160,255,0.7)"
-          strokeWidth="1.2"
+          stroke="rgba(190,198,220,0.5)"
+          strokeWidth="1"
           strokeDasharray="4 4"
           vectorEffect="non-scaling-stroke"
         />
@@ -672,14 +667,14 @@ function StarMapApp() {
         return (
           <motion.span
             key={t}
-            className="absolute size-[5px] rounded-full bg-[#8ea0ff]/80"
+            className="absolute size-1 rounded-full bg-white/60"
             style={{
               left: `${point.x}%`,
               top: `${point.y}%`,
               translateX: "-50%",
               translateY: "-50%",
             }}
-            animate={{ scale: [1, 1.5, 1], opacity: [0.7, 1, 0.7] }}
+            animate={{ opacity: [0.4, 0.9, 0.4] }}
             transition={{
               duration: 2.4,
               repeat: Infinity,
@@ -691,40 +686,37 @@ function StarMapApp() {
       })}
       <span
         ref={rocketRef}
-        className="absolute text-sm will-change-transform"
+        className="absolute will-change-transform"
         style={{ left: "12%", top: "86%", opacity: 0 }}
         aria-hidden="true"
       >
-        🚀
+        <svg width="10" height="12" viewBox="0 0 10 12">
+          <path d="M5 0 L9 12 L5 9.5 L1 12 Z" fill="rgba(240,242,248,0.9)" />
+        </svg>
       </span>
       <div className="absolute left-[60%] top-[12%] size-8">
         <motion.div
-          className="size-8 rounded-full bg-[radial-gradient(circle_at_35%_30%,rgba(255,220,180,0.9),rgba(192,132,252,0.6)_45%,rgba(90,100,210,0.5)_80%)] shadow-[inset_-3px_-3px_6px_rgba(0,0,0,0.45),0_0_14px_rgba(192,132,252,0.3)]"
-          animate={{ scale: [1, 1.07, 1] }}
+          className="size-8 rounded-full bg-[radial-gradient(circle_at_35%_30%,rgba(214,220,235,0.75),rgba(140,148,175,0.5)_55%,rgba(72,78,98,0.45)_85%)] shadow-[inset_-3px_-3px_6px_rgba(0,0,0,0.45)]"
+          animate={{ scale: [1, 1.05, 1] }}
           transition={{ duration: 3.4, repeat: Infinity, ease: "easeInOut" }}
         />
-        <div className="absolute left-1/2 top-1/2 h-3.5 w-12 -translate-x-1/2 -translate-y-1/2 -rotate-[18deg] rounded-[50%] border border-[#f0b46a]/50" />
-        <motion.div
-          className="absolute -inset-2 rounded-full border border-dashed border-[#8ea0ff]/40"
-          animate={{ rotate: 360 }}
-          transition={{ duration: 24, repeat: Infinity, ease: "linear" }}
-        />
+        <div className="absolute left-1/2 top-1/2 h-3.5 w-12 -translate-x-1/2 -translate-y-1/2 -rotate-[18deg] rounded-[50%] border border-white/25" />
       </div>
-      <p className="absolute left-[8%] top-[89%] font-mono text-[8px] tracking-wider text-[#8ea0ff]/50">
+      <p className="absolute left-[8%] top-[89%] font-mono text-[8px] tracking-wider text-white/30">
         YOU ARE HERE
       </p>
-      <p className="absolute bottom-2 right-2.5 font-mono text-[9px] text-white/30">
-        4.2 ly to Kepler-442b · ETA: eventually
+      <p className="absolute bottom-2 right-2.5 font-mono text-[9px] text-white/25">
+        4.2 ly to Kepler-442b
       </p>
     </div>
   );
 }
 
 const termScript = [
-  { cmd: "spaceman ctl warp 9", out: "warp drive engaged 🚀" },
+  { cmd: "spaceman ctl warp 9", out: "warp drive engaged" },
   { cmd: "open pod-bay-doors", out: "I'm afraid I can't do that" },
   { cmd: "spaceman ctl focus mars", out: "focused: Mars (display 4)" },
-  { cmd: "sudo make-me-a-sandwich", out: "🥪 replicating..." },
+  { cmd: "sudo make-me-a-sandwich", out: "replicating..." },
 ];
 const CMD_PAUSE = 8;
 const OUT_PAUSE = 20;
@@ -784,11 +776,11 @@ function MusicApp() {
     <div className="flex flex-1 items-center gap-3 overflow-hidden p-3">
       <div className="relative size-12 shrink-0">
         <motion.div
-          className="size-12 rounded-full bg-gradient-to-br from-[#f0b46a]/70 via-[#c084fc]/50 to-[#8ea0ff]/50"
+          className="size-12 rounded-full bg-[radial-gradient(circle_at_35%_30%,rgba(214,220,235,0.7),rgba(140,148,175,0.45)_55%,rgba(72,78,98,0.4)_85%)]"
           animate={{ rotate: 360 }}
           transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
         />
-        <div className="absolute left-1/2 top-1/2 h-5 w-[70px] -translate-x-1/2 -translate-y-1/2 -rotate-[20deg] rounded-[50%] border-2 border-[#f0b46a]/40" />
+        <div className="absolute left-1/2 top-1/2 h-5 w-[70px] -translate-x-1/2 -translate-y-1/2 -rotate-[20deg] rounded-[50%] border border-white/20" />
       </div>
       <div className="min-w-0 flex-1 space-y-1">
         <motion.div
@@ -811,7 +803,7 @@ function MusicApp() {
             {[0.5, 0.9, 0.65, 1, 0.75].map((peak, bar) => (
               <motion.span
                 key={bar}
-                className="w-[2px] origin-bottom rounded-sm bg-[#8ea0ff]/60"
+                className="w-[2px] origin-bottom rounded-sm bg-white/40"
                 style={{ height: 12 }}
                 animate={{ scaleY: [0.25, peak, 0.4, peak * 0.8, 0.25] }}
                 transition={{
@@ -829,12 +821,12 @@ function MusicApp() {
 }
 
 const chatScript = [
-  { self: false, text: "take me to your leader 👽" },
-  { self: true, text: "can't. tiling windows 🧑‍🚀" },
-  { self: false, text: "respect 👽" },
-  { self: false, text: "is that liquid glass? 👽" },
-  { self: true, text: "obviously 🧑‍🚀" },
-  { self: false, text: "humanity has peaked 👽" },
+  { self: false, text: "take me to your leader" },
+  { self: true, text: "can't. tiling windows" },
+  { self: false, text: "respect" },
+  { self: false, text: "is that liquid glass?" },
+  { self: true, text: "obviously" },
+  { self: false, text: "humanity has peaked" },
 ];
 
 function ChatApp() {
@@ -861,8 +853,8 @@ function ChatApp() {
             transition={{ type: "spring", visualDuration: 0.3, bounce: 0.2 }}
             className={`max-w-[85%] rounded-lg px-2 py-1 ${
               message.self
-                ? "self-end rounded-br-sm bg-[#4a7dff]/40 text-white/70"
-                : "self-start rounded-bl-sm bg-white/[0.08] text-white/55"
+                ? "self-end rounded-br-sm bg-white/[0.15] text-white/75"
+                : "self-start rounded-bl-sm bg-white/[0.07] text-white/55"
             }`}
           >
             {message.text}
@@ -878,8 +870,8 @@ function ChatApp() {
             transition={{ type: "spring", visualDuration: 0.3, bounce: 0.2 }}
             className={`flex gap-[3px] rounded-lg px-2 py-1.5 ${
               next.self
-                ? "self-end rounded-br-sm bg-[#4a7dff]/40"
-                : "self-start rounded-bl-sm bg-white/[0.08]"
+                ? "self-end rounded-br-sm bg-white/[0.15]"
+                : "self-start rounded-bl-sm bg-white/[0.07]"
             }`}
           >
             {[0, 1, 2].map((dot) => (
@@ -901,10 +893,10 @@ function StatusApp() {
   const snacks = 99 - (tick % 100);
 
   const gauges = [
-    ["OXYGEN", 98, "bg-[#7dd3a8]/60"],
-    ["FUEL", 61, "bg-[#f0b46a]/60"],
-    ["GRAVITY", 100, "bg-[#8ea0ff]/60"],
-    ["SNACKS", snacks, snacks < 15 ? "bg-[#ff5f57]/70 animate-pulse" : "bg-[#ff5f57]/70"],
+    ["OXYGEN", 98, "bg-white/35"],
+    ["FUEL", 61, "bg-white/35"],
+    ["GRAVITY", 100, "bg-white/35"],
+    ["SNACKS", snacks, snacks < 15 ? "bg-white/50 animate-pulse" : "bg-white/35"],
   ] as const;
 
   return (
