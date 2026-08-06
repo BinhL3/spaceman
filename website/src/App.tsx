@@ -25,7 +25,7 @@ const layouts: Array<Record<string, Rect>> = [
   },
   {
     e: { x: 2.5, y: 4, w: 46.75, h: 92 },
-    a: { x: 51.25, y: 4, w: 46.75, h: 92 },
+    f: { x: 51.25, y: 4, w: 46.75, h: 92 },
   },
 ];
 
@@ -516,6 +516,7 @@ const appNames: Record<string, string> = {
   c: "Space Tunes",
   d: "Alien Chat",
   e: "Ship Status",
+  f: "Radar",
 };
 
 function FakeWindow({ id, rect }: { id: string; rect: Rect }) {
@@ -549,7 +550,102 @@ function AppBody({ id }: { id: string }) {
   if (id === "b") return <TerminalApp />;
   if (id === "c") return <MusicApp />;
   if (id === "d") return <ChatApp />;
+  if (id === "f") return <RadarApp />;
   return <StatusApp />;
+}
+
+const RADAR_PERIOD_S = 4;
+const RADAR_EPOCH_S = 16;
+
+function RadarApp() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const reduced = useReducedMotion();
+
+  useAnimationFrame(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const bounds = canvas.getBoundingClientRect();
+    if (bounds.width === 0 || bounds.height === 0) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const width = Math.round(bounds.width * dpr);
+    const height = Math.round(bounds.height * dpr);
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const w = bounds.width;
+    const h = bounds.height;
+    const cx = w / 2;
+    const cy = h / 2;
+    const radius = Math.min(w, h) * 0.38;
+    const t = reduced ? 0 : performance.now() / 1000;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    // Rings and cross hairs
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(255,255,255,0.08)";
+    for (const fraction of [1 / 3, 2 / 3, 1]) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius * fraction, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = "rgba(255,255,255,0.05)";
+    ctx.beginPath();
+    ctx.moveTo(cx - radius, cy);
+    ctx.lineTo(cx + radius, cy);
+    ctx.moveTo(cx, cy - radius);
+    ctx.lineTo(cx, cy + radius);
+    ctx.stroke();
+
+    // Sweep with decaying trail
+    const sweep = (t / RADAR_PERIOD_S) * Math.PI * 2;
+    for (let segment = 27; segment >= 0; segment -= 1) {
+      const angle = sweep - segment * 0.035;
+      const alpha = 0.22 * (1 - segment / 28);
+      ctx.strokeStyle = `rgba(232,238,244,${alpha})`;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius);
+      ctx.stroke();
+    }
+
+    // Contacts light up as the sweep passes, then fade
+    const epoch = Math.floor(t / RADAR_EPOCH_S);
+    for (let index = 0; index < 5; index += 1) {
+      const angle = hash01(epoch * 13.7 + index * 3.1) * Math.PI * 2;
+      const distance = (0.25 + hash01(epoch * 7.9 + index * 5.3) * 0.68) * radius;
+      const tau = Math.PI * 2;
+      const delta = (((sweep - angle) % tau) + tau) % tau;
+      const alpha = Math.max(0, 1 - delta / (Math.PI * 1.2));
+      if (alpha > 0.02) {
+        ctx.fillStyle = `rgba(236,240,246,${alpha * 0.9})`;
+        ctx.beginPath();
+        ctx.arc(
+          cx + Math.cos(angle) * distance,
+          cy + Math.sin(angle) * distance,
+          1.2 + alpha * 1.3,
+          0,
+          Math.PI * 2,
+        );
+        ctx.fill();
+      }
+    }
+  });
+
+  return (
+    <div className="relative min-h-0 flex-1 overflow-hidden">
+      <canvas ref={canvasRef} className="absolute inset-0 size-full" />
+      <p className="absolute bottom-2 left-2.5 font-mono text-[8px] tracking-wider text-white/30">
+        SCANNING
+      </p>
+      <p className="absolute bottom-2 right-2.5 font-mono text-[9px] text-white/25">
+        no threats
+      </p>
+    </div>
+  );
 }
 
 /**
