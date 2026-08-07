@@ -86,25 +86,40 @@ impl HotkeyPlan {
     }
 
     fn from_layout(enabled: &[WorkspaceId], layout: &LayoutSnapshot) -> Result<Self, String> {
-        let mut registrations = Vec::with_capacity(33);
+        let mut registrations = Vec::with_capacity(33 + enabled.len() * 2);
+        let claimed_letters = enabled
+            .iter()
+            .filter_map(|workspace| workspace.letter().map(|letter| letter.to_ascii_lowercase()))
+            .collect::<Vec<_>>();
         for workspace in WorkspaceId::all().filter(|workspace| enabled.contains(workspace)) {
-            let number = u32::from(workspace.number());
-            let key = layout
-                .resolve(LogicalKey::Semantic(SemanticKey::Workspace(
-                    workspace.number(),
-                )))
-                .map_err(|error| error.to_string())?;
+            let (key, switch_id, move_id) = match (workspace.number(), workspace.letter()) {
+                (Some(number), _) => (
+                    LogicalKey::Semantic(SemanticKey::Workspace(number)),
+                    u32::from(number),
+                    u32::from(number) + 10,
+                ),
+                (_, Some(letter)) => {
+                    let offset = u32::from(letter as u8 - b'A');
+                    (
+                        LogicalKey::Character(letter.to_ascii_lowercase()),
+                        200 + offset,
+                        300 + offset,
+                    )
+                }
+                _ => unreachable!("workspace ID is always valid"),
+            };
+            let key = layout.resolve(key).map_err(|error| error.to_string())?;
             registrations.push(registration(
                 key,
                 OPTION_KEY,
-                number,
-                format!("switch workspace {number}"),
+                switch_id,
+                format!("switch workspace {workspace}"),
             ));
             registrations.push(registration(
                 key,
                 OPTION_KEY | SHIFT_KEY,
-                number + 10,
-                format!("move window to workspace {number}"),
+                move_id,
+                format!("move window to workspace {workspace}"),
             ));
         }
         for (character, id, direction) in [
@@ -113,6 +128,9 @@ impl HotkeyPlan {
             ('k', 106, "up"),
             ('l', 107, "right"),
         ] {
+            if claimed_letters.contains(&character) {
+                continue;
+            }
             let key = layout
                 .resolve(LogicalKey::Character(character))
                 .map_err(|error| error.to_string())?;
@@ -146,6 +164,10 @@ impl HotkeyPlan {
             (LogicalKey::Character('-'), OPTION_KEY, 110, "shrink layout"),
             (LogicalKey::Character('='), OPTION_KEY, 111, "grow layout"),
         ] {
+            if matches!(key, LogicalKey::Character(character) if claimed_letters.contains(&character))
+            {
+                continue;
+            }
             let key = layout.resolve(key).map_err(|error| error.to_string())?;
             registrations.push(registration(key, modifiers, id, description.into()));
         }
@@ -340,12 +362,19 @@ fn decode_action(id: u32) -> Option<Action> {
 }
 
 fn decode_workspace_action(id: u32) -> Option<Action> {
-    let (move_window, number) = match id {
-        1..=10 => (false, id),
-        11..=20 => (true, id - 10),
+    let (move_window, workspace) = match id {
+        1..=10 => (false, WorkspaceId::new(u8::try_from(id).ok()?).ok()?),
+        11..=20 => (true, WorkspaceId::new(u8::try_from(id - 10).ok()?).ok()?),
+        200..=225 => (
+            false,
+            WorkspaceId::named(char::from(b'A' + u8::try_from(id - 200).ok()?)).ok()?,
+        ),
+        300..=325 => (
+            true,
+            WorkspaceId::named(char::from(b'A' + u8::try_from(id - 300).ok()?)).ok()?,
+        ),
         _ => return None,
     };
-    let workspace = WorkspaceId::new(u8::try_from(number).ok()?).ok()?;
     Some(if move_window {
         Action::MoveFocused(workspace)
     } else {
@@ -377,7 +406,7 @@ mod tests {
     fn decodes_switch_and_move_hotkeys_including_zero_key() {
         assert!(matches!(
             decode_action(1),
-            Some(Action::SwitchWorkspace(id)) if id.number() == 1
+            Some(Action::SwitchWorkspace(id)) if id.number() == Some(1)
         ));
         assert!(matches!(decode_action(103), Some(Action::ToggleMaximize)));
         assert!(matches!(decode_action(108), Some(Action::ToggleLayout)));
@@ -411,20 +440,53 @@ mod tests {
         ));
         assert!(matches!(
             decode_action(10),
-            Some(Action::SwitchWorkspace(id)) if id.number() == 10
+            Some(Action::SwitchWorkspace(id)) if id.number() == Some(10)
         ));
         assert!(matches!(
             decode_action(20),
-            Some(Action::MoveFocused(id)) if id.number() == 10
+            Some(Action::MoveFocused(id)) if id.number() == Some(10)
         ));
     }
 
     #[test]
     fn full_plan_contains_all_thirty_three_registrations() {
-        let enabled = WorkspaceId::all().collect::<Vec<_>>();
+        let enabled = WorkspaceId::numbered().collect::<Vec<_>>();
         let plan = HotkeyPlan::from_layout(&enabled, &layout()).unwrap();
         assert_eq!(plan.registrations.len(), 33);
         assert!(plan.registrations.capacity() >= 33);
+    }
+
+    #[test]
+    fn named_workspace_claims_its_letter_shortcuts() {
+        let mut enabled = WorkspaceId::numbered().collect::<Vec<_>>();
+        enabled.push(WorkspaceId::named('H').unwrap());
+        let plan = HotkeyPlan::from_layout(&enabled, &layout()).unwrap();
+        assert!(
+            plan.registrations
+                .iter()
+                .any(|registration| registration.id == 207)
+        );
+        assert!(
+            plan.registrations
+                .iter()
+                .any(|registration| registration.id == 307)
+        );
+        assert!(
+            !plan
+                .registrations
+                .iter()
+                .any(|registration| registration.id == 104)
+        );
+        assert!(
+            !plan
+                .registrations
+                .iter()
+                .any(|registration| registration.id == 114)
+        );
+        assert!(matches!(
+            decode_action(207),
+            Some(Action::SwitchWorkspace(workspace)) if workspace == WorkspaceId::named('H').unwrap()
+        ));
     }
 
     #[test]

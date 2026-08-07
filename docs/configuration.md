@@ -36,6 +36,11 @@ bundle_id = "com.tinyspeck.slackmacgap"
 action = "route"
 workspace = 2                         # required for route; forbidden for float and ignore
 
+[[rules]]
+bundle_id = "ai.opencode.desktop"
+action = "route"
+workspace = "D"                       # named workspace A through Z
+
 [[workspaces]]
 workspace = 9                         # integer 1 through 10; unique in this list
 monitor = "main"                      # non-empty selector
@@ -46,8 +51,9 @@ Rules run in file order and the first matching rule wins. An unmatched window is
 
 - `float` excludes the window from tiling and resizing, preserves its native frame, and keeps it with
   the logical workspace where it was first observed.
-- `route` assigns a newly inserted logical window to workspace 1 through 10. It does not repeatedly
-  route existing slots, including a Ghostty native-tab physical replacement.
+- `route` assigns a newly inserted logical window to workspace 1 through 10 or a configured named
+  workspace A through Z. It does not repeatedly route existing slots, including a Ghostty native-tab
+  physical replacement.
 - `ignore` leaves the window entirely alone: never tiled, never owned by a workspace, never moved or
   parked. Use it for applications that insist on positioning their own windows. A previously managed
   window is released the next time it is observed on screen.
@@ -71,6 +77,11 @@ spaceman displays
 A missing `secondary`, UUID, or name falls back to the main display. Spaceman retains the preferred
 assignment as its own active lane; reconnecting that display makes its assigned active workspace
 visible again.
+
+Named workspaces are opt-in: reference a letter in a route or `[[workspaces]]` entry to enable it.
+They default to `main`. An enabled letter registers `Option+letter` to switch and
+`Option+Shift+letter` to move the focused window there. The named workspace shortcut takes
+precedence over a built-in letter shortcut when they overlap.
 
 ## Process Scope
 

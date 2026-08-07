@@ -70,7 +70,7 @@ struct Controller {
     launch_at_login: Retained<NSMenuItem>,
     status_title: String,
     workspace_title: String,
-    workspace_layouts: Vec<(u8, Vec<crate::Rect>)>,
+    workspace_layouts: Vec<(String, Vec<crate::Rect>)>,
 }
 
 thread_local! {
@@ -211,7 +211,7 @@ pub fn set_workspace_numbers(workspaces: &[u8]) {
     });
 }
 
-pub fn set_workspace_layouts(layouts: &[(u8, Vec<crate::Rect>)]) {
+pub fn set_workspace_layouts(layouts: &[(String, Vec<crate::Rect>)]) {
     CONTROLLER.with(|controller| {
         let mut controller = controller.borrow_mut();
         if let Some(controller) = controller.as_mut()
@@ -226,10 +226,10 @@ pub fn set_workspace_layouts(layouts: &[(u8, Vec<crate::Rect>)]) {
     });
 }
 
-fn workspace_layout_image(layouts: &[(u8, Vec<crate::Rect>)]) -> Retained<NSImage> {
+fn workspace_layout_image(layouts: &[(String, Vec<crate::Rect>)]) -> Retained<NSImage> {
     let labels = layouts
         .iter()
-        .map(|(workspace, _)| NSString::from_str(&workspace.to_string()))
+        .map(|(workspace, _)| NSString::from_str(workspace))
         .collect::<Vec<_>>();
     let label_widths = labels
         .iter()
@@ -250,7 +250,7 @@ fn workspace_layout_image(layouts: &[(u8, Vec<crate::Rect>)]) -> Retained<NSImag
 }
 
 fn draw_workspace_layouts(
-    layouts: &[(u8, Vec<crate::Rect>)],
+    layouts: &[(String, Vec<crate::Rect>)],
     labels: &[Retained<NSString>],
     label_widths: &[f64],
 ) {

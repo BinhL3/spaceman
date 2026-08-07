@@ -157,7 +157,7 @@ fn print_usage(executable: &str) {
     eprintln!("       {executable} displays");
     #[cfg(target_os = "macos")]
     eprintln!(
-        "       {executable} ctl <status|debug|switch N|back-and-forth|move N|move-app ID N|focus DIR|move-direction DIR|layout|resize shrink|resize grow|balance|pause|resume|retile|restart|quit>"
+        "       {executable} ctl <status|debug|switch WORKSPACE|back-and-forth|move WORKSPACE|move-app ID WORKSPACE|focus DIR|move-direction DIR|layout|resize shrink|resize grow|balance|pause|resume|retile|restart|quit>"
     );
     #[cfg(target_os = "macos")]
     eprintln!("       {executable} hud");

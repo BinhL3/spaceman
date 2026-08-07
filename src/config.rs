@@ -48,13 +48,13 @@ struct RawWindowRule {
     bundle_id: Option<String>,
     title: Option<String>,
     action: String,
-    workspace: Option<u8>,
+    workspace: Option<WorkspaceId>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawWorkspace {
-    workspace: u8,
+    workspace: WorkspaceId,
     monitor: String,
 }
 
@@ -80,9 +80,7 @@ impl Config {
             let action = match (rule.action.as_str(), rule.workspace) {
                 ("float", None) => WindowDisposition::Floating,
                 ("ignore", None) => WindowDisposition::Ignored,
-                ("route", Some(workspace)) => {
-                    WindowDisposition::Route(WorkspaceId::new(workspace)?)
-                }
+                ("route", Some(workspace)) => WindowDisposition::Route(workspace),
                 ("float", Some(_)) => return Err("float rule cannot specify workspace".into()),
                 ("ignore", Some(_)) => return Err("ignore rule cannot specify workspace".into()),
                 ("route", None) => return Err("route rule requires workspace".into()),
@@ -98,18 +96,15 @@ impl Config {
         }
         let mut workspace_monitors = Vec::with_capacity(raw.workspaces.len());
         for workspace in raw.workspaces {
-            let id = WorkspaceId::new(workspace.workspace)?;
+            let id = workspace.workspace;
             if workspace.monitor.trim().is_empty() {
-                return Err(format!("workspace {} monitor cannot be empty", id.number()));
+                return Err(format!("workspace {id} monitor cannot be empty"));
             }
             if workspace_monitors
                 .iter()
                 .any(|(existing, _)| *existing == id)
             {
-                return Err(format!(
-                    "workspace {} is configured more than once",
-                    id.number()
-                ));
+                return Err(format!("workspace {} is configured more than once", id));
             }
             workspace_monitors.push((id, workspace.monitor));
         }
@@ -143,9 +138,23 @@ impl Config {
     }
 
     pub fn configure_workspaces(&self, workspaces: &mut Workspaces) {
+        for workspace in self.named_workspaces() {
+            workspaces.enable(workspace);
+        }
         for (workspace, monitor) in self.workspace_monitors() {
             workspaces.set_assignment(workspace, DisplaySelector::parse(monitor));
         }
+    }
+
+    pub fn named_workspaces(&self) -> impl Iterator<Item = WorkspaceId> + '_ {
+        self.workspace_monitors
+            .iter()
+            .map(|(workspace, _)| *workspace)
+            .chain(self.rules.iter().filter_map(|rule| match rule.action {
+                WindowDisposition::Route(workspace) => Some(workspace),
+                _ => None,
+            }))
+            .filter(|workspace| workspace.letter().is_some())
     }
 }
 
@@ -242,6 +251,40 @@ workspace = 7
                 "version = 1\n[[rules]]\nbundle_id = 'x'\naction = 'route'\nworkspace = 11"
             )
             .is_err()
+        );
+        assert!(
+            Config::parse(
+                "version = 1\n[[rules]]\nbundle_id = 'x'\naction = 'route'\nworkspace = 'AA'"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn accepts_named_workspace_routes_and_assignments() {
+        let config = Config::parse(
+            r#"
+version = 1
+[[rules]]
+bundle_id = "ai.opencode.desktop"
+action = "route"
+workspace = "D"
+[[workspaces]]
+workspace = "D"
+monitor = "main"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.disposition("ai.opencode.desktop", &window(None)),
+            WindowDisposition::Route(WorkspaceId::named('D').unwrap())
+        );
+        assert_eq!(
+            config.named_workspaces().collect::<Vec<_>>(),
+            vec![
+                WorkspaceId::named('D').unwrap(),
+                WorkspaceId::named('D').unwrap()
+            ]
         );
     }
 

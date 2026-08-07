@@ -246,7 +246,7 @@ const fn exit_restore_plan(_intent: ExitIntent, worker_busy: bool) -> RestorePla
 
 struct CycleStatus {
     active: Vec<WorkspaceId>,
-    layouts: Vec<(u8, Vec<crate::Rect>)>,
+    layouts: Vec<(String, Vec<crate::Rect>)>,
     failed: usize,
 }
 
@@ -533,9 +533,19 @@ pub fn run() -> Result<(), String> {
         recover_startup_metadata(Config::load(), load_workspace_state());
     let mut configured_workspaces = Workspaces::default();
     config.configure_workspaces(&mut configured_workspaces);
-    let hotkey_workspaces = WorkspaceId::all()
+    let mut hotkey_workspaces = WorkspaceId::numbered()
+        .chain(config.named_workspaces())
+        .chain(
+            workspace_state
+                .as_ref()
+                .into_iter()
+                .flat_map(crate::workspace::WorkspaceState::named_workspaces_in_use),
+        )
         .filter(|workspace| scope.manages_selector(configured_workspaces.assignment(*workspace)))
-        .collect();
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    hotkey_workspaces.sort();
     let (commands, worker_commands) = channel();
     let (worker_results, results) = channel();
     let (actions_sender, actions) = channel();
@@ -814,10 +824,7 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                     },
                     "busy": worker_busy,
                     "last_error": last_error.as_deref(),
-                    "active_workspaces": active_workspaces
-                        .iter()
-                        .map(|workspace| workspace.number())
-                        .collect::<Vec<_>>(),
+                    "active_workspaces": active_workspaces,
                 })
                 .to_string()),
                 ControlCommand::Debug => latest_debug
@@ -828,7 +835,7 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                     }),
                 ControlCommand::Switch(workspace) if automatic => actions_sender
                     .send(Action::SwitchWorkspace(workspace))
-                    .map(|()| format!("switch to workspace {} queued", workspace.number()))
+                    .map(|()| format!("switch to workspace {workspace} queued"))
                     .map_err(|_| "Spaceman agent is stopping".into()),
                 ControlCommand::WorkspaceBackAndForth if automatic => actions_sender
                     .send(Action::WorkspaceBackAndForth)
@@ -836,11 +843,11 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                     .map_err(|_| "Spaceman agent is stopping".into()),
                 ControlCommand::Move(workspace) if automatic => actions_sender
                     .send(Action::MoveFocused(workspace))
-                    .map(|()| format!("move to workspace {} queued", workspace.number()))
+                    .map(|()| format!("move to workspace {workspace} queued"))
                     .map_err(|_| "Spaceman agent is stopping".into()),
                 ControlCommand::MoveApp(ref bundle_id, workspace) if automatic => actions_sender
                     .send(Action::MoveApp(bundle_id.clone(), workspace))
-                    .map(|()| format!("move app to workspace {} queued", workspace.number()))
+                    .map(|()| format!("move app to workspace {workspace} queued"))
                     .map_err(|_| "Spaceman agent is stopping".into()),
                 ControlCommand::Focus(direction) if automatic => actions_sender
                     .send(Action::Focus(direction))
@@ -1645,9 +1652,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     .or_else(|| {
                         candidates()
                             .filter(|(selector, _)| selector_available(selector, outputs))
-                            .min_by_key(|(_, workspace)| workspace.number())
+                            .min_by_key(|(_, workspace)| *workspace)
                     })
-                    .or_else(|| candidates().min_by_key(|(_, workspace)| workspace.number()))?;
+                    .or_else(|| candidates().min_by_key(|(_, workspace)| *workspace))?;
                 Some(ResolvedWorkspace {
                     workspace: selected.1,
                     selector: selected.0.clone(),
@@ -1852,11 +1859,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     || disposition == WindowDisposition::Ignored
                 {
                     if let Some(owner) = self.workspaces.workspace_of_any(&window.id) {
-                        log_event!(
-                            "release {:?} from workspace {}: ignored",
-                            window.id,
-                            owner.number()
-                        );
+                        log_event!("release {:?} from workspace {}: ignored", window.id, owner);
                         self.forget_window(owner, &window.id);
                     }
                     affinities.insert(window.id.clone(), FrozenWindowAffinity::Ignored);
@@ -1878,7 +1881,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                             log_event!(
                                 "adopt floating {:?} -> workspace {}",
                                 window.id,
-                                resolved.workspace.number()
+                                resolved.workspace
                             );
                             self.workspaces
                                 .own_floating(window.id.clone(), resolved.workspace);
@@ -1893,7 +1896,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                             {
                                 return Err(format!(
                                     "window rule routes to unmanaged workspace {}",
-                                    target.number()
+                                    target
                                 ));
                             }
                             FrozenWindowAffinity::ExplicitRoute(target)
@@ -2001,7 +2004,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             log_event!(
                 "heal: re-home floating {:?} -> workspace {}",
                 window,
-                target.number()
+                target
             );
             self.workspaces.own_floating(window.clone(), target);
         } else if let Some(source) = self.workspaces.move_window(window, target) {
@@ -2009,8 +2012,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             log_event!(
                 "heal: re-home tiled {:?} workspace {} -> {}",
                 window,
-                source.number(),
-                target.number()
+                source,
+                target
             );
         }
     }
@@ -2204,11 +2207,14 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
         self.synchronize_foreground(&outputs);
+        if !self.workspaces.is_enabled(workspace) {
+            return Err(format!("Workspace {workspace} is not configured"));
+        }
         let selector = self.workspaces.assignment(workspace).clone();
         if !self.scope.manages_selector(&selector) {
             return Err(format!(
                 "Workspace {} is outside the managed display scope",
-                workspace.number()
+                workspace
             ));
         }
         let output = output_for(&self.workspaces, workspace, &outputs);
@@ -2226,8 +2232,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let incoming = self.workspaces.windows(workspace);
         log_event!(
             "switch: workspace {} -> {} (outgoing {}, incoming {})",
-            previous.number(),
-            workspace.number(),
+            previous,
+            workspace,
             outgoing.len(),
             incoming.len()
         );
@@ -2266,7 +2272,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     self.rollback_switch(Vec::new(), &restored, output, &outputs);
                     return Err(format!(
                         "Workspace {} could not restore all of its windows",
-                        workspace.number()
+                        workspace
                     ));
                 }
             }
@@ -2274,14 +2280,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         self.wait_for_reveal(&incoming, cancelled);
         let layout = self.layout_workspace(workspace, output, cancelled);
         if layout.blocked {
-            log_event!(
-                "switch rollback: workspace {} layout blocked",
-                workspace.number()
-            );
+            log_event!("switch rollback: workspace {} layout blocked", workspace);
             self.rollback_switch(Vec::new(), &incoming, output, &outputs);
             return Err(format!(
                 "Workspace {} stayed inactive because its windows could not be laid out",
-                workspace.number()
+                workspace
             ));
         }
         let mut parked_outgoing = Vec::new();
@@ -2305,7 +2308,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     self.rollback_switch(parked_outgoing, &incoming, output, &outputs);
                     return Err(format!(
                         "Workspace {} stayed active because a window could not be parked",
-                        previous.number()
+                        previous
                     ));
                 }
             }
@@ -2322,7 +2325,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         self.persist_workspace_state_if_changed()?;
         log_event!(
             "switch complete: workspace {} in {}ms",
-            workspace.number(),
+            workspace,
             switch_started.elapsed().as_millis()
         );
         Ok(self.status(layout.applied, layout.failed, &outputs))
@@ -2479,11 +2482,14 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
         self.synchronize_foreground(&outputs);
+        if !self.workspaces.is_enabled(target) {
+            return Err(format!("Workspace {target} is not configured"));
+        }
         let target_selector = self.workspaces.assignment(target).clone();
         if !self.scope.manages_selector(&target_selector) {
             return Err(format!(
                 "Workspace {} is outside the managed display scope",
-                target.number()
+                target
             ));
         }
         let source = match self.workspaces.workspace_of(&window) {
@@ -3119,7 +3125,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             log_event!(
                 "park inactive: {:?} (workspace {}) from {:?}",
                 window,
-                workspace.number(),
+                workspace,
                 frame
             );
             match self.backend.set_position(&window, target) {
@@ -3461,7 +3467,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 .iter()
                 .map(|workspace| {
                     (
-                        workspace.number(),
+                        workspace.to_string(),
                         self.workspaces.engine(*workspace).preview(crate::Rect {
                             x: 0,
                             y: 0,
@@ -4195,7 +4201,7 @@ mod tests {
         assert_eq!(
             visible
                 .iter()
-                .map(|resolved| resolved.workspace.number())
+                .filter_map(|resolved| resolved.workspace.number())
                 .collect::<Vec<_>>(),
             vec![1, 6, 9]
         );
@@ -4213,7 +4219,7 @@ mod tests {
         assert_eq!(
             visible
                 .iter()
-                .map(|resolved| resolved.workspace.number())
+                .filter_map(|resolved| resolved.workspace.number())
                 .collect::<Vec<_>>(),
             vec![1, 6]
         );
@@ -4234,7 +4240,7 @@ mod tests {
             runtime
                 .visible_workspaces(&outputs())
                 .iter()
-                .map(|resolved| resolved.workspace.number())
+                .filter_map(|resolved| resolved.workspace.number())
                 .collect::<Vec<_>>(),
             vec![9, 6]
         );
@@ -4246,7 +4252,7 @@ mod tests {
             runtime
                 .visible_workspaces(&three_outputs())
                 .iter()
-                .map(|resolved| resolved.workspace.number())
+                .filter_map(|resolved| resolved.workspace.number())
                 .collect::<Vec<_>>(),
             vec![1, 6, 9]
         );
@@ -6037,6 +6043,21 @@ mod tests {
         // The incoming workspace is fully formed beneath the outgoing windows
         // before anything is hidden, so the desktop never shows.
         assert!(reveal < layout && layout < hide);
+    }
+
+    #[test]
+    fn switching_to_an_unconfigured_named_workspace_is_rejected() {
+        let mut runtime = runtime(FakeBackend::default());
+
+        let Err(error) = runtime.switch(
+            WorkspaceId::named('Z').unwrap(),
+            outputs(),
+            &AtomicBool::new(false),
+        ) else {
+            panic!("unconfigured workspace unexpectedly switched");
+        };
+
+        assert_eq!(error, "Workspace Z is not configured");
     }
 
     #[test]

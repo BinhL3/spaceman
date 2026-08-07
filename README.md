@@ -15,8 +15,8 @@ the evidence is unambiguous.
 Spaceman currently:
 
 - starts automatic tiling when its global hotkeys are available;
-- provides ten logical workspaces, with 1-5 on the main display and 6-10 on the secondary display by
-  default;
+- provides ten default numbered workspaces plus opt-in named workspaces A-Z, with 1-5 on the main
+  display and 6-10 on the secondary display by default;
 - assigns workspaces to `main`, `secondary`, a display UUID, or an exact display name, falling back
   to the main display when a preferred display disconnects;
 - persists active workspaces, nested split layouts, tile order and weights, and parked-window recovery
@@ -112,6 +112,8 @@ Core controls:
 | `Option+H/J/K/L` | Focus left/down/up/right |
 | `Option+Shift+H/J/K/L` | Move the focused tile left/down/up/right |
 | `Option+/` | Toggle the active layout's root split axis |
+| `Option+A` ... `Option+Z` | Switch to a configured named workspace |
+| `Option+Shift+A` ... `Option+Shift+Z` | Move the focused window to a configured named workspace |
 | `Option+-`, `Option+=` | Shrink/grow the focused tile by 50 pixels |
 | `Option+Shift+F` | Toggle maximize without native fullscreen |
 

@@ -204,21 +204,18 @@ fn parse_line(line: &str) -> Result<Command, String> {
 }
 
 fn parse_workspace(value: &str) -> Result<WorkspaceId, String> {
-    value
-        .parse::<u8>()
-        .map_err(|_| format!("invalid workspace {value:?}"))
-        .and_then(WorkspaceId::new)
+    WorkspaceId::parse(value)
 }
 
 fn encode(command: &Command) -> String {
     match command {
         Command::Status => "status".into(),
         Command::Debug => "debug".into(),
-        Command::Switch(workspace) => format!("switch {}", workspace.number()),
+        Command::Switch(workspace) => format!("switch {workspace}"),
         Command::WorkspaceBackAndForth => "back-and-forth".into(),
-        Command::Move(workspace) => format!("move {}", workspace.number()),
+        Command::Move(workspace) => format!("move {workspace}"),
         Command::MoveApp(bundle_id, workspace) => {
-            format!("move-app {bundle_id} {}", workspace.number())
+            format!("move-app {bundle_id} {workspace}")
         }
         Command::Focus(direction) => format!("focus {direction}"),
         Command::MoveDirection(direction) => format!("move-direction {direction}"),
@@ -251,6 +248,10 @@ mod tests {
             Command::Switch(WorkspaceId::new(10).unwrap())
         );
         assert!(parse_line("move 11").is_err());
+        assert_eq!(
+            parse_line("switch D").unwrap(),
+            Command::Switch(WorkspaceId::named('D').unwrap())
+        );
         assert_eq!(
             parse_line("move-app com.example.App 3").unwrap(),
             Command::MoveApp("com.example.App".into(), WorkspaceId::new(3).unwrap())

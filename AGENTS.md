@@ -14,7 +14,8 @@ This file is the current engineering contract. README and `docs/` describe curre
   monitor, and native handle cache.
 - `src/observation.rs`, `src/model.rs`, `src/reconcile.rs`: immutable observations, stable logical slots,
   and conservative physical-window reconciliation.
-- `src/workspace.rs`, `src/runtime.rs`, `src/layout_tree.rs`, `src/navigation.rs`: ten workspaces,
+- `src/workspace.rs`, `src/runtime.rs`, `src/layout_tree.rs`, `src/navigation.rs`: ten default numbered
+  workspaces, opt-in named workspaces A-Z,
   ownership, nested weighted layouts, directional operations, and persistence representation.
 - `src/config.rs`: strict version-1 TOML parsing and first-match window disposition.
 - `src/control.rs`, `src/main.rs`: mode-`0600` local Unix control protocol, CLI, dry-run/live probes,
@@ -28,8 +29,8 @@ This file is the current engineering contract. README and `docs/` describe curre
 - Native-tab replacement preserves slot, order, weight, nested layout, workspace, and maximize intent.
 - Incomplete, timed-out, or ambiguous observations never prove absence. Preserve state and retry.
 - One accepted observation produces one coherent model revision; native writes converge toward it.
-- Rules are ordered and first-match. Do not silently introduce planned named app spaces or an
-  orthogonal rule schema into current config.
+- Rules are ordered and first-match. Named workspaces use the same workspace identity and ordered
+  route schema as numbered workspaces; do not introduce an orthogonal app-space schema.
 - Automatic tiling starts when hotkeys are available. Documentation must not claim a paused startup.
 
 ## Recovery And Persistence Invariants

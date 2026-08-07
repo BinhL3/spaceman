@@ -10,6 +10,8 @@ collision or unsupported layout leaves tiling paused and reports `Hotkeys unavai
 | Add `Shift` to a workspace key | Move the focused window there without switching |
 | `Option+Tab` | Toggle the focused display's current/previous workspace |
 | `Option+H/J/K/L` | Focus the nearest tile left/down/up/right, including across displays |
+| `Option+A` ... `Option+Z` | Switch to that configured named workspace |
+| Add `Shift` to a named workspace key | Move the focused window there without switching |
 | `Option+Shift+H/J/K/L` | Move the focused tile in that direction |
 | `Option+/` | Toggle the active workspace layout's root horizontal/vertical axis |
 | `Option+-` / `Option+=` | Shrink/grow the focused tile by 50 pixels at its immediate split |

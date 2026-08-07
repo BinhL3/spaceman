@@ -23,8 +23,19 @@ bundle_id = "com.tinyspeck.slackmacgap"
 action = "route"
 workspace = 2
 
+# Named workspaces A-Z are opt-in. Configuring one registers Option+letter to
+# switch and Option+Shift+letter to move the focused window there.
+[[rules]]
+bundle_id = "ai.opencode.desktop"
+action = "route"
+workspace = "D"
+
 # Workspace assignments are optional. monitor accepts "main", "secondary", a
 # display UUID, or an exact display name from `spaceman displays`.
 [[workspaces]]
 workspace = 9
+monitor = "main"
+
+[[workspaces]]
+workspace = "D"
 monitor = "main"

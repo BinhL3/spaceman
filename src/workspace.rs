@@ -1,36 +1,78 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    str::FromStr,
+};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{Engine, PhysicalWindowId};
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct WorkspaceId(u8);
 
 impl WorkspaceId {
-    pub const COUNT: usize = 10;
+    pub const NUMBERED_COUNT: usize = 10;
+    pub const COUNT: usize = Self::NUMBERED_COUNT + 26;
     pub const ONE: Self = Self(1);
     pub const SIX: Self = Self(6);
 
     pub fn new(value: u8) -> Result<Self, String> {
-        (1..=Self::COUNT as u8)
+        (1..=Self::NUMBERED_COUNT as u8)
             .contains(&value)
             .then_some(Self(value))
-            .ok_or_else(|| {
-                format!(
-                    "workspace must be between 1 and {}, got {value}",
-                    Self::COUNT
-                )
-            })
+            .ok_or_else(|| format!("workspace must be 1 through 10 or A through Z, got {value}"))
+    }
+
+    pub fn named(letter: char) -> Result<Self, String> {
+        let letter = letter.to_ascii_uppercase();
+        letter
+            .is_ascii_uppercase()
+            .then_some(Self(11 + (letter as u8 - b'A')))
+            .ok_or_else(|| format!("workspace must be 1 through 10 or A through Z, got {letter:?}"))
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        value.parse::<u8>().ok().map(Self::new).unwrap_or_else(|| {
+            let mut characters = value.chars();
+            match (characters.next(), characters.next()) {
+                (Some(letter), None) => Self::named(letter),
+                _ => Err(format!(
+                    "workspace must be 1 through 10 or A through Z, got {value:?}"
+                )),
+            }
+        })
     }
 
     #[must_use]
-    pub const fn number(self) -> u8 {
-        self.0
+    pub const fn number(self) -> Option<u8> {
+        if self.0 <= Self::NUMBERED_COUNT as u8 {
+            Some(self.0)
+        } else {
+            None
+        }
+    }
+
+    #[must_use]
+    pub const fn letter(self) -> Option<char> {
+        if self.0 > Self::NUMBERED_COUNT as u8 {
+            Some((b'A' + self.0 - 11) as char)
+        } else {
+            None
+        }
     }
 
     pub fn all() -> impl Iterator<Item = Self> {
         (1..=Self::COUNT).map(|index| Self(u8::try_from(index).expect("workspace count fits u8")))
+    }
+
+    pub fn numbered() -> impl Iterator<Item = Self> {
+        (1..=Self::NUMBERED_COUNT)
+            .map(|index| Self(u8::try_from(index).expect("workspace count fits u8")))
+    }
+
+    pub(crate) fn from_index(index: usize) -> Self {
+        Self(u8::try_from(index + 1).expect("workspace index fits u8"))
     }
 
     #[must_use]
@@ -39,10 +81,46 @@ impl WorkspaceId {
     }
 }
 
+impl fmt::Display for WorkspaceId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.number(), self.letter()) {
+            (Some(number), _) => write!(formatter, "{number}"),
+            (_, Some(letter)) => write!(formatter, "{letter}"),
+            _ => unreachable!("workspace ID is always valid"),
+        }
+    }
+}
+
+impl FromStr for WorkspaceId {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+impl Serialize for WorkspaceId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.number() {
+            Some(number) => serializer.serialize_u8(number),
+            None => serializer.serialize_char(self.letter().expect("named workspace has a letter")),
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for WorkspaceId {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = u8::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Value {
+            Number(u8),
+            Name(String),
+        }
+        match Value::deserialize(deserializer)? {
+            Value::Number(value) => Self::new(value),
+            Value::Name(value) => Self::parse(&value),
+        }
+        .map_err(serde::de::Error::custom)
     }
 }
 
@@ -79,7 +157,7 @@ impl WorkspaceState {
             || self.layouts.len() > WorkspaceId::COUNT
             || self.axes.len() > WorkspaceId::COUNT
         {
-            return Err("workspace state contains more than 10 workspaces".into());
+            return Err("workspace state contains more than 36 workspaces".into());
         }
         for (index, slots) in self.slots.iter().enumerate() {
             let next_slot_id = slots
@@ -125,6 +203,24 @@ impl WorkspaceState {
         }
         Ok(())
     }
+
+    pub(crate) fn named_workspaces_in_use(&self) -> HashSet<WorkspaceId> {
+        let mut used = self
+            .active
+            .iter()
+            .chain(&self.previous)
+            .map(|(_, workspace)| *workspace)
+            .chain(self.floating.iter().map(|(_, workspace)| *workspace))
+            .filter(|workspace| workspace.letter().is_some())
+            .collect::<HashSet<_>>();
+        for (index, slots) in self.slots.iter().enumerate() {
+            let workspace = WorkspaceId::from_index(index);
+            if workspace.letter().is_some() && !slots.is_empty() {
+                used.insert(workspace);
+            }
+        }
+        used
+    }
 }
 
 impl DisplaySelector {
@@ -155,6 +251,7 @@ pub struct Workspaces {
     active: HashMap<DisplaySelector, WorkspaceId>,
     previous: HashMap<DisplaySelector, WorkspaceId>,
     floating_owners: HashMap<PhysicalWindowId, WorkspaceId>,
+    enabled: HashSet<WorkspaceId>,
 }
 
 impl Default for Workspaces {
@@ -163,7 +260,7 @@ impl Default for Workspaces {
             engines: std::array::from_fn(|_| Engine::default()),
             owners: HashMap::new(),
             assignments: std::array::from_fn(|index| {
-                if index < 5 {
+                if !(5..WorkspaceId::NUMBERED_COUNT).contains(&index) {
                     DisplaySelector::Main
                 } else {
                     DisplaySelector::Secondary
@@ -175,6 +272,7 @@ impl Default for Workspaces {
             ]),
             previous: HashMap::new(),
             floating_owners: HashMap::new(),
+            enabled: WorkspaceId::numbered().collect(),
         }
     }
 }
@@ -220,6 +318,7 @@ impl Workspaces {
     }
 
     pub(crate) fn restore(&mut self, state: WorkspaceState) {
+        self.enabled.extend(state.named_workspaces_in_use());
         let WorkspaceState {
             active,
             previous,
@@ -229,8 +328,7 @@ impl Workspaces {
             floating,
         } = state;
         for (index, slots) in slots.into_iter().take(WorkspaceId::COUNT).enumerate() {
-            let workspace = WorkspaceId::new(u8::try_from(index + 1).expect("workspace fits u8"))
-                .expect("persisted workspace index is valid");
+            let workspace = WorkspaceId::from_index(index);
             for slot in slots {
                 self.engine_mut(workspace).insert_slot(slot);
             }
@@ -292,6 +390,7 @@ impl Workspaces {
     }
 
     pub fn set_assignment(&mut self, workspace: WorkspaceId, display: DisplaySelector) {
+        self.enable(workspace);
         let previous = self.assignments[workspace.index()].clone();
         if previous == display {
             return;
@@ -299,14 +398,23 @@ impl Workspaces {
         self.assignments[workspace.index()] = display.clone();
         self.active.entry(display).or_insert(workspace);
         if self.active.get(&previous) == Some(&workspace) {
-            if let Some(replacement) =
-                WorkspaceId::all().find(|candidate| self.assignment(*candidate) == &previous)
-            {
+            if let Some(replacement) = WorkspaceId::all().find(|candidate| {
+                self.is_enabled(*candidate) && self.assignment(*candidate) == &previous
+            }) {
                 self.active.insert(previous, replacement);
             } else {
                 self.active.remove(&previous);
             }
         }
+    }
+
+    pub fn enable(&mut self, workspace: WorkspaceId) {
+        self.enabled.insert(workspace);
+    }
+
+    #[must_use]
+    pub fn is_enabled(&self, workspace: WorkspaceId) -> bool {
+        self.enabled.contains(&workspace)
     }
 
     pub fn switch(&mut self, workspace: WorkspaceId) -> WorkspaceId {
@@ -372,7 +480,7 @@ impl Workspaces {
                     .iter()
                     .any(|slot| slot.bound_window() == Some(window))
             })
-            .and_then(|index| WorkspaceId::new(u8::try_from(index + 1).ok()?).ok())
+            .map(WorkspaceId::from_index)
     }
 
     #[must_use]
@@ -425,13 +533,15 @@ impl Workspaces {
     #[must_use]
     pub fn workspace_for_app(&self, app: &crate::AppInstanceId) -> Option<WorkspaceId> {
         let mut matches = WorkspaceId::all().filter(|workspace| {
-            self.engine(*workspace)
-                .model()
-                .workspace
-                .slots
-                .iter()
-                .filter_map(crate::Slot::bound_window)
-                .any(|window| &window.app == app)
+            self.is_enabled(*workspace)
+                && self
+                    .engine(*workspace)
+                    .model()
+                    .workspace
+                    .slots
+                    .iter()
+                    .filter_map(crate::Slot::bound_window)
+                    .any(|window| &window.app == app)
         });
         let workspace = matches.next()?;
         matches.next().is_none().then_some(workspace)
@@ -462,7 +572,7 @@ impl Workspaces {
         visible: &HashSet<WorkspaceId>,
     ) -> Vec<(WorkspaceId, PhysicalWindowId)> {
         WorkspaceId::all()
-            .filter(|workspace| !visible.contains(workspace))
+            .filter(|workspace| self.is_enabled(*workspace) && !visible.contains(workspace))
             .flat_map(|workspace| {
                 self.windows(workspace)
                     .into_iter()
@@ -493,6 +603,10 @@ mod tests {
         assert!(WorkspaceId::new(0).is_err());
         assert!(WorkspaceId::new(11).is_err());
         assert_eq!(
+            WorkspaceId::parse("d").unwrap(),
+            WorkspaceId::named('D').unwrap()
+        );
+        assert_eq!(
             Workspaces::default().assignment(WorkspaceId::new(5).unwrap()),
             &DisplaySelector::Main
         );
@@ -500,14 +614,53 @@ mod tests {
             Workspaces::default().assignment(WorkspaceId::new(6).unwrap()),
             &DisplaySelector::Secondary
         );
+        assert!(!Workspaces::default().is_enabled(WorkspaceId::named('D').unwrap()));
+    }
+
+    #[test]
+    fn workspace_identity_serializes_numbers_compatibly_and_names_as_letters() {
+        assert_eq!(
+            serde_json::to_value(WorkspaceId::ONE).unwrap(),
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            serde_json::to_value(WorkspaceId::named('D').unwrap()).unwrap(),
+            serde_json::json!("D")
+        );
+        assert_eq!(
+            serde_json::from_value::<WorkspaceId>(serde_json::json!("D")).unwrap(),
+            WorkspaceId::named('D').unwrap()
+        );
     }
 
     #[test]
     fn switching_one_display_preserves_the_other() {
         let mut workspaces = Workspaces::default();
         workspaces.switch(WorkspaceId::new(3).unwrap());
-        assert_eq!(workspaces.active(DisplayRole::Main).number(), 3);
-        assert_eq!(workspaces.active(DisplayRole::Secondary).number(), 6);
+        assert_eq!(workspaces.active(DisplayRole::Main).number(), Some(3));
+        assert_eq!(workspaces.active(DisplayRole::Secondary).number(), Some(6));
+    }
+
+    #[test]
+    fn switching_to_a_named_workspace_preserves_the_other_display() {
+        let mut workspaces = Workspaces::default();
+        let named = WorkspaceId::named('D').unwrap();
+        workspaces.enable(named);
+
+        workspaces.switch(named);
+
+        assert_eq!(workspaces.active(DisplayRole::Main), named);
+        assert_eq!(workspaces.active(DisplayRole::Secondary), WorkspaceId::SIX);
+    }
+
+    #[test]
+    fn unconfigured_named_workspaces_are_not_display_fallbacks() {
+        let mut workspaces = Workspaces::default();
+        for workspace in WorkspaceId::numbered().take(5) {
+            workspaces.set_assignment(workspace, DisplaySelector::Secondary);
+        }
+
+        assert_eq!(workspaces.active_for(&DisplaySelector::Main), None);
     }
 
     #[test]
@@ -591,6 +744,31 @@ mod tests {
             vec![first.clone(), second]
         );
         assert_eq!(restored.workspace_of(&first), Some(WorkspaceId::ONE));
+    }
+
+    #[test]
+    fn persisted_state_round_trips_a_named_workspace() {
+        let named = WorkspaceId::named('D').unwrap();
+        let owned = window(40);
+        let mut workspaces = Workspaces::default();
+        workspaces.enable(named);
+        workspaces.engine_mut(named).insert_slot(Slot {
+            id: SlotId(1),
+            weight: 1,
+            binding: BindingState::Bound(owned.clone()),
+        });
+        workspaces.refresh_ownership(named);
+        workspaces.switch(named);
+
+        let encoded = serde_json::to_value(workspaces.state()).unwrap();
+        let state: WorkspaceState = serde_json::from_value(encoded).unwrap();
+        state.validate().unwrap();
+        let mut restored = Workspaces::default();
+        restored.restore(state);
+
+        assert_eq!(restored.active(DisplayRole::Main), named);
+        assert_eq!(restored.workspace_of(&owned), Some(named));
+        assert!(restored.is_enabled(named));
     }
 
     #[test]
