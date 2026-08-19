@@ -647,11 +647,15 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
         controls,
         _control_server,
     } = app;
-    let (mut _hotkeys, hotkey_error) = match HotkeyPlan::current(&hotkey_workspaces)
-        .and_then(|plan| Hotkeys::install(actions_sender.clone(), plan))
-    {
-        Ok(hotkeys) => (Some(hotkeys), None),
-        Err(error) => (None, Some(format!("Hotkeys unavailable: {error}"))),
+    let (mut _hotkeys, hotkey_error) = if macos::accessibility_trusted() {
+        match HotkeyPlan::current(&hotkey_workspaces)
+            .and_then(|plan| Hotkeys::install(actions_sender.clone(), plan))
+        {
+            Ok(hotkeys) => (Some(hotkeys), None),
+            Err(error) => (None, Some(format!("Hotkeys unavailable: {error}"))),
+        }
+    } else {
+        (None, Some("Accessibility permission is required".into()))
     };
     let mut automatic = _hotkeys.is_some();
     let mut worker_busy = false;
@@ -936,6 +940,11 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                     status_item::set_status("Restoring windows...");
                 }
                 Action::ToggleAutomatic => {
+                    if !macos::accessibility_trusted() {
+                        last_error = Some("Accessibility permission is required".into());
+                        status_item::set_status("Paused · Accessibility required");
+                        continue;
+                    }
                     match HotkeyPlan::current(&hotkey_workspaces)
                         .and_then(|plan| Hotkeys::install(actions_sender.clone(), plan))
                     {
@@ -1566,7 +1575,6 @@ struct WorkspaceRuntime<B = MacWorkspaceBackend> {
     config: Config,
     foreground_lanes: HashMap<String, DisplaySelector>,
     suppressed_focus: Option<crate::PhysicalWindowId>,
-    maximized: [Option<crate::PhysicalWindowId>; WorkspaceId::COUNT],
     persisted_workspace_state: crate::workspace::WorkspaceState,
 }
 
@@ -1628,7 +1636,6 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             config,
             foreground_lanes: HashMap::new(),
             suppressed_focus: None,
-            maximized: std::array::from_fn(|_| None),
             persisted_workspace_state,
         }
     }
@@ -2025,9 +2032,6 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         target: WorkspaceId,
         window: &crate::PhysicalWindowId,
     ) {
-        if self.maximized[source.index()].as_ref() == Some(window) {
-            self.maximized[source.index()] = None;
-        }
         self.constrained[source.index()].remove(window);
         self.constrained[target.index()].remove(window);
     }
@@ -2157,12 +2161,24 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .collect();
         self.constrained[workspace.index()].retain(|window, _| bound.contains(window));
         let observed_frames = live::observed_frames(&scoped_observation);
-        let mut placements = if routes.is_empty() {
-            live::applicable_placements_with_frames(&reconciliation, &settings, &observed_frames)
+        let filter_unchanged = routes.is_empty();
+        let mut placements = if filter_unchanged {
+            reconciliation.placements.clone()
         } else {
             self.workspaces.engine(workspace).placements(&settings)
         };
         self.apply_maximize(workspace, &mut placements, output);
+        if filter_unchanged {
+            placements.retain(|placement| {
+                placement
+                    .window
+                    .as_ref()
+                    .and_then(|window| observed_frames.get(window))
+                    .is_some_and(|frame| {
+                        !frame.approximately_equals(placement.frame, settings.frame_tolerance)
+                    })
+            });
+        }
         placements.retain(|placement| {
             let Some(window) = placement.window.as_ref() else {
                 return false;
@@ -2225,7 +2241,21 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .find(|resolved| resolved.display_id == display_id)
             .map_or(workspace, |resolved| resolved.workspace);
         if previous == workspace {
-            return self.cycle(outputs, cancelled);
+            let focused = self.backend.focused_window();
+            let windows = self.workspaces.windows(workspace);
+            let workspace_focus = self
+                .workspaces
+                .preferred_focus(workspace)
+                .filter(|window| windows.contains(window))
+                .or_else(|| windows.first().cloned());
+            if let Some(window) = workspace_focus {
+                self.suppressed_focus = (!self.backend.focus_window(&window))
+                    .then_some(focused)
+                    .flatten();
+            } else {
+                self.suppressed_focus = focused;
+            }
+            return Ok(self.status(0, 0, &outputs));
         }
         let switch_started = Instant::now();
         let outgoing = self.workspaces.windows(previous);
@@ -2241,6 +2271,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .backend
             .focused_window()
             .filter(|focused| outgoing.contains(focused));
+        if let Some(focused) = outgoing_focus.as_ref() {
+            self.workspaces.remember_focus(previous, focused);
+        }
         // Reveal incoming windows first: position writes do not raise, so they
         // arrive and get laid out beneath the outgoing windows. Hiding the
         // outgoing workspace afterwards exposes a fully formed workspace and
@@ -2315,8 +2348,13 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         }
         self.workspaces.switch(workspace);
         self.foreground_lanes.insert(display_id, selector);
-        if let Some(window) = incoming.first() {
-            self.suppressed_focus = (!self.backend.focus_window(window))
+        let incoming_focus = self
+            .workspaces
+            .preferred_focus(workspace)
+            .filter(|window| incoming.contains(window))
+            .or_else(|| incoming.first().cloned());
+        if let Some(window) = incoming_focus {
+            self.suppressed_focus = (!self.backend.focus_window(&window))
                 .then_some(outgoing_focus)
                 .flatten();
         } else {
@@ -2786,7 +2824,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 .workspaces
                 .engine(resolved.workspace)
                 .placements(&Settings::for_output(resolved.output));
-            if let Some(maximized) = self.maximized[resolved.workspace.index()].as_ref() {
+            if let Some(maximized) = self.workspaces.maximized_window(resolved.workspace) {
                 placements.retain(|placement| placement.window.as_ref() == Some(maximized));
                 if let Some(placement) = placements.first_mut() {
                     placement.frame = resolved.output;
@@ -2984,17 +3022,16 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if !self.is_visible(workspace, &outputs) {
             return Err("Focused window is not on an active workspace".into());
         }
-        let maximized = &mut self.maximized[workspace.index()];
-        if maximized.as_ref() == Some(&window) {
-            *maximized = None;
-        } else {
-            *maximized = Some(window);
+        self.workspaces.remember_focus(workspace, &window);
+        if !self.workspaces.toggle_maximize(workspace, &window) {
+            return Err("Focused window is not managed by Spaceman".into());
         }
         let layout = self.layout_workspace(
             workspace,
             output_for(&self.workspaces, workspace, &outputs),
             cancelled,
         );
+        self.persist_workspace_state_if_changed()?;
         Ok(self.status(layout.applied, layout.failed, &outputs))
     }
 
@@ -3248,9 +3285,6 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         self.workspaces.forget_window(workspace, window);
         self.workspaces.forget_floating(window);
         self.constrained[workspace.index()].remove(window);
-        if self.maximized[workspace.index()].as_ref() == Some(window) {
-            self.maximized[workspace.index()] = None;
-        }
         self.recently_parked.remove(window);
         self.recent_heals.remove(window);
         self.repark_attempts.remove(window);
@@ -3262,18 +3296,20 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         placements: &mut Vec<crate::Placement>,
         output: crate::Rect,
     ) {
-        let Some(maximized) = self.maximized[workspace.index()].as_ref() else {
+        let Some(maximized) = self.workspaces.maximized_window(workspace).cloned() else {
             return;
         };
         let Some(mut placement) = placements
             .iter()
-            .find(|placement| placement.window.as_ref() == Some(maximized))
+            .find(|placement| placement.window.as_ref() == Some(&maximized))
             .cloned()
         else {
-            self.maximized[workspace.index()] = None;
             return;
         };
         placement.frame = output;
+        self.workspaces
+            .engine_mut(workspace)
+            .record_placement_target(placement.slot, output);
         placements.clear();
         placements.push(placement);
     }
@@ -5309,12 +5345,13 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_native_tab_replacement_is_not_rerouted() {
+    fn ghostty_native_tab_replacement_preserves_workspace_and_maximize() {
         let previous = window(10);
         let replacement = window(11);
         let normal = frame(50);
         let mut backend = FakeBackend {
             observation: Some(observation_for("com.mitchellh.ghostty", &previous, normal)),
+            focused: Some(previous.clone()),
             ..FakeBackend::default()
         };
         backend.frames.insert(previous.clone(), normal);
@@ -5326,7 +5363,16 @@ mod tests {
         bind(&mut runtime, WorkspaceId::ONE, &previous);
         runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
         runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+        runtime
+            .toggle_maximize(outputs(), &AtomicBool::new(false))
+            .unwrap();
         let accepted = runtime.backend.frames[&previous];
+        runtime.backend.observation = Some(observation_for(
+            "com.mitchellh.ghostty",
+            &previous,
+            accepted,
+        ));
+        runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
         runtime.backend.frames.remove(&previous);
         runtime.backend.frames.insert(replacement.clone(), accepted);
         runtime.backend.observation = Some(observation_for(
@@ -5341,6 +5387,11 @@ mod tests {
             runtime.workspaces.workspace_of(&replacement),
             Some(WorkspaceId::ONE)
         );
+        assert_eq!(
+            runtime.workspaces.maximized_window(WorkspaceId::ONE),
+            Some(&replacement)
+        );
+        assert_eq!(runtime.backend.frames[&replacement], outputs().main().frame);
         assert!(!runtime.parked.contains_key(&replacement));
     }
 
@@ -6043,6 +6094,107 @@ mod tests {
         // The incoming workspace is fully formed beneath the outgoing windows
         // before anything is hidden, so the desktop never shows.
         assert!(reveal < layout && layout < hide);
+    }
+
+    #[test]
+    fn switching_away_and_back_preserves_maximize() {
+        let first = window(10);
+        let maximized = window(20);
+        let incoming = window(30);
+        let outputs = outputs();
+        let displays = outputs.frames().collect::<Vec<_>>();
+        let incoming_normal = frame(100);
+        let incoming_parked =
+            crate::geometry::parked_frame(outputs.main().frame, &displays, incoming_normal);
+        let mut backend = FakeBackend {
+            focused: Some(maximized.clone()),
+            ..FakeBackend::default()
+        };
+        backend.frames.insert(first.clone(), frame(50));
+        backend.frames.insert(maximized.clone(), frame(500));
+        backend.frames.insert(incoming.clone(), incoming_parked);
+        let mut parked = HashMap::new();
+        parked.insert(incoming.clone(), incoming_normal);
+        let mut runtime = WorkspaceRuntime::with_backend(ManagementScope::Both, backend, parked);
+        bind(&mut runtime, WorkspaceId::ONE, &first);
+        bind(&mut runtime, WorkspaceId::ONE, &maximized);
+        let target = WorkspaceId::new(2).unwrap();
+        bind(&mut runtime, target, &incoming);
+        let cancelled = AtomicBool::new(false);
+
+        runtime
+            .toggle_maximize(outputs.clone(), &cancelled)
+            .unwrap();
+        runtime.switch(target, outputs.clone(), &cancelled).unwrap();
+        runtime
+            .switch(WorkspaceId::ONE, outputs.clone(), &cancelled)
+            .unwrap();
+
+        assert_eq!(
+            runtime.workspaces.maximized_window(WorkspaceId::ONE),
+            Some(&maximized)
+        );
+        assert_eq!(runtime.backend.frames[&maximized], outputs.main().frame);
+        assert_eq!(runtime.backend.focused, Some(maximized));
+    }
+
+    #[test]
+    fn switching_away_and_back_restores_last_focused_window() {
+        let first = window(10);
+        let focused = window(20);
+        let incoming = window(30);
+        let outputs = outputs();
+        let displays = outputs.frames().collect::<Vec<_>>();
+        let incoming_normal = frame(100);
+        let incoming_parked =
+            crate::geometry::parked_frame(outputs.main().frame, &displays, incoming_normal);
+        let mut backend = FakeBackend {
+            focused: Some(focused.clone()),
+            ..FakeBackend::default()
+        };
+        backend.frames.insert(first.clone(), frame(50));
+        backend.frames.insert(focused.clone(), frame(500));
+        backend.frames.insert(incoming.clone(), incoming_parked);
+        let mut parked = HashMap::new();
+        parked.insert(incoming.clone(), incoming_normal);
+        let mut runtime = WorkspaceRuntime::with_backend(ManagementScope::Both, backend, parked);
+        bind(&mut runtime, WorkspaceId::ONE, &first);
+        bind(&mut runtime, WorkspaceId::ONE, &focused);
+        let target = WorkspaceId::new(2).unwrap();
+        bind(&mut runtime, target, &incoming);
+        let cancelled = AtomicBool::new(false);
+
+        runtime.switch(target, outputs.clone(), &cancelled).unwrap();
+        runtime
+            .switch(WorkspaceId::ONE, outputs, &cancelled)
+            .unwrap();
+
+        assert_eq!(runtime.backend.focused, Some(focused));
+    }
+
+    #[test]
+    fn selecting_an_active_workspace_focuses_its_window() {
+        let target = window(10);
+        let other_display = window(20);
+        let mut backend = FakeBackend {
+            focused: Some(other_display.clone()),
+            ..FakeBackend::default()
+        };
+        backend.frames.insert(target.clone(), frame(50));
+        backend.frames.insert(other_display.clone(), frame(1050));
+        let mut runtime = runtime(backend);
+        bind(&mut runtime, WorkspaceId::ONE, &target);
+        bind(&mut runtime, WorkspaceId::SIX, &other_display);
+
+        runtime
+            .switch(WorkspaceId::ONE, outputs(), &AtomicBool::new(false))
+            .unwrap();
+
+        assert_eq!(runtime.backend.focused, Some(target.clone()));
+        assert!(matches!(
+            runtime.backend.calls.last(),
+            Some(BackendCall::Focus(window)) if window == &target
+        ));
     }
 
     #[test]

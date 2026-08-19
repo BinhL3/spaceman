@@ -104,6 +104,10 @@ impl Engine {
         placements_for(&self.layout, &self.model, settings.output)
     }
 
+    pub(crate) fn record_placement_target(&mut self, slot: crate::SlotId, frame: crate::Rect) {
+        self.evidence.previous_placements.insert(slot, frame);
+    }
+
     pub(crate) fn toggle_axis(&mut self) {
         self.layout.toggle_root_axis();
         self.model.workspace.axis = self.layout.root_axis();
@@ -270,7 +274,7 @@ impl Engine {
         self.invalidate();
     }
 
-    fn slot_for_window(&self, window: &PhysicalWindowId) -> Option<crate::SlotId> {
+    pub(crate) fn slot_for_window(&self, window: &PhysicalWindowId) -> Option<crate::SlotId> {
         self.model
             .workspace
             .slots

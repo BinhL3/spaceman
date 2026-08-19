@@ -1,6 +1,6 @@
 # Known Limitations
 
-Spaceman is private, experimental software, not a proven public release.
+Spaceman is an experimental public preview, not a broadly qualified release.
 
 - The downloadable preview is currently arm64-only; x86_64 and universal packaging are not validated.
 - The declared macOS 14 minimum lacks a documented validation matrix across supported macOS releases.
@@ -10,7 +10,7 @@ Spaceman is private, experimental software, not a proven public release.
   workspace-owned. Nonstandard or immovable panels remain global.
 - Native-tab identity has no perfect public identifier. Ambiguous transitions intentionally defer
   replacement and may need another cycle.
-- Configuration supports ordered exact-match `float`/`route` rules and display assignment only. It
+- Configuration supports ordered exact-match `float`/`route`/`ignore` rules and display assignment. It
   does not support named app spaces, regex title matching, or the planned orthogonal rule schema.
 - Configuration is loaded only at process startup. `ctl restart` exits safely but does not relaunch.
 - `secondary` selects the first non-main display; display ordering and duplicate names may surprise.

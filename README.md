@@ -14,7 +14,7 @@ the evidence is unambiguous.
 
 Spaceman currently:
 
-- starts automatic tiling when its global hotkeys are available;
+- starts automatic tiling when Accessibility permission and its global hotkeys are available;
 - provides ten default numbered workspaces plus opt-in named workspaces A-Z, with 1-5 on the main
   display and 6-10 on the secondary display by default;
 - assigns workspaces to `main`, `secondary`, a display UUID, or an exact display name, falling back
@@ -38,12 +38,15 @@ The current preview is a Developer ID-signed, notarized arm64 build for Apple si
 experimental; read [Known limitations](docs/limitations.md) before installing it.
 
 1. Disable every other window manager. For AeroSpace: `aerospace enable off`.
-2. Download [Spaceman 0.1.1 for Apple silicon](https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.1-macos-arm64.zip).
-3. Unzip it, move `Spaceman.app` to `~/Applications`, and open it.
-4. Complete the Accessibility setup shown by Spaceman.
+2. Download [Spaceman 0.1.1 for Apple silicon](https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.1-macos-arm64.zip)
+   and its [SHA-256 checksum](https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.1-macos-arm64.zip.sha256).
+3. In the download directory, run `shasum -a 256 -c Spaceman-v0.1.1-macos-arm64.zip.sha256`.
+4. Unzip it, move `Spaceman.app` to `/Applications`, and open it.
+5. Complete the Accessibility setup shown by Spaceman.
 
-The matching [SHA-256 checksum](https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.1-macos-arm64.zip.sha256)
-is published alongside the archive. Later preview updates are signed and delivered through Sparkle.
+Later preview updates are signed and delivered through Sparkle. Use Spaceman Settings for upgrades. If
+a manual replacement is necessary, pause and quit the running version and confirm that every parked
+window has returned before replacing its bundle.
 
 ### Agent-Assisted Setup
 
@@ -71,7 +74,7 @@ From an existing repository checkout, first disable every other window manager, 
 ```
 
 Set `SPACEMAN_CODESIGN_IDENTITY` if auto-detection does not choose the desired identity. The script
-builds and signs `target/Spaceman.app`, installs it at `~/Applications/Spaceman.app`, links the CLI to
+builds and signs `target/Spaceman.app`, installs it at `/Applications/Spaceman.app`, links the CLI to
 `~/.local/bin/spaceman`, and opens the app.
 
 Ensure `~/.local/bin` is on `PATH`. For zsh:
@@ -87,15 +90,16 @@ maintainer workflow.
 ## First Open
 
 1. Disable every other window manager. For AeroSpace: `aerospace enable off`.
-2. Open Spaceman: `open "$HOME/Applications/Spaceman.app"`.
+2. Open Spaceman: `open "/Applications/Spaceman.app"`.
 3. Spaceman opens Settings when Accessibility access is missing. Choose `Grant Access`, then enable
    Spaceman under **System Settings > Privacy & Security > Accessibility**.
 4. Optionally enable `Launch at Login` in Spaceman Settings.
 5. Confirm operation with `spaceman ctl status`.
 
-When hotkeys register successfully, Spaceman starts automatic tiling; it does not intentionally start
-paused. Without Accessibility permission, the menu reports the permission error and tiling cannot
-manage windows. The menu actions are `Disable Tiling` (or `Enable Tiling` while paused),
+When Accessibility permission is granted and hotkeys register successfully, Spaceman starts automatic
+tiling; it does not otherwise start paused intentionally. Without Accessibility permission, the menu
+reports the permission error and tiling remains paused. The menu actions are `Disable Tiling` (or
+`Enable Tiling` while paused),
 `Launch at Login`, `Settings...`, and `Quit Spaceman`. Settings shows Accessibility, launch-at-login,
 and signed software-update controls. If macOS requires approval, the login item action opens **System
 Settings > General > Login Items & Extensions**.
@@ -108,12 +112,12 @@ Core controls:
 | --- | --- |
 | `Option+1` ... `Option+9`, `Option+0` | Switch to workspace 1 ... 10 |
 | `Option+Shift+1` ... `Option+Shift+0` | Move the focused window to workspace 1 ... 10 |
+| `Option+A` ... `Option+Z` | Switch to a configured named workspace |
+| `Option+Shift+A` ... `Option+Shift+Z` | Move the focused window to a configured named workspace |
 | `Option+Tab` | Return to the previous workspace on the focused display |
 | `Option+H/J/K/L` | Focus left/down/up/right |
 | `Option+Shift+H/J/K/L` | Move the focused tile left/down/up/right |
 | `Option+/` | Toggle the active layout's root split axis |
-| `Option+A` ... `Option+Z` | Switch to a configured named workspace |
-| `Option+Shift+A` ... `Option+Shift+Z` | Move the focused window to a configured named workspace |
 | `Option+-`, `Option+=` | Shrink/grow the focused tile by 50 pixels |
 | `Option+Shift+F` | Toggle maximize without native fullscreen |
 
@@ -166,9 +170,10 @@ Follow [Recovery](docs/recovery.md) for stuck or crashed processes and safe unin
 
 ## Status
 
-Private and experimental. Core behavior and automated tests exist, but release readiness is not
-proven. Notarization/stapling, downloadable artifacts, architecture and minimum-OS validation, a
-clean-machine test, and release presentation remain blockers.
+Public experimental preview. The arm64 artifact is signed, notarized, stapled, checksummed, and served
+through a signed Sparkle feed. Broad release readiness is not proven: minimum-OS runtime validation,
+clean-machine install/upgrade/recovery/uninstall qualification, wider architecture support, and a
+concise product demo remain outstanding.
 
 ## License
 

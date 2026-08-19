@@ -5,6 +5,7 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 baseline_window_ids="$(mktemp)"
 baseline_workspaces="$(mktemp)"
 test_config="$(mktemp)"
+test_state="$(mktemp -d)"
 agent_pid=""
 test_pid=""
 window_id=""
@@ -84,7 +85,7 @@ on run arguments
   tell application id (item 1 of arguments) to activate
 end run
 APPLESCRIPT
-  rm -f "$baseline_window_ids" "$baseline_workspaces" "$test_config"
+  rm -rf "$baseline_window_ids" "$baseline_workspaces" "$test_config" "$test_state"
 }
 trap cleanup EXIT
 
@@ -150,19 +151,8 @@ aerospace move-node-to-workspace --window-id "$window_id" spaceman-workspace-tes
 aerospace workspace spaceman-workspace-test >/dev/null
 aerospace enable off >/dev/null
 
-SPACEMAN_CONFIG="$test_config" SPACEMAN_MANAGED_DISPLAY=secondary "$root/target/Spaceman.app/Contents/MacOS/spaceman-agent" &
+SPACEMAN_CONFIG="$test_config" SPACEMAN_APPLICATION_SUPPORT="$test_state" SPACEMAN_MANAGED_DISPLAY=secondary "$root/target/Spaceman.app/Contents/MacOS/spaceman-agent" &
 agent_pid=$!
-sleep 2
-osascript - "$agent_pid" <<'APPLESCRIPT' >/dev/null
-on run arguments
-  set target_pid to (item 1 of arguments) as integer
-  tell application "System Events" to tell first application process whose unix id is target_pid
-    click UI element 1 of UI element 1
-    delay 0.2
-    click menu item "Automatic Tiling" of menu 1 of UI element 1 of UI element 1
-  end tell
-end run
-APPLESCRIPT
 sleep 2
 
 window_minimized() {
@@ -296,7 +286,7 @@ wait_for_workspace 7 || { echo "FAIL: workspace 7 did not reactivate after rapid
 wait_for_position equal "$normal_position" || { echo "FAIL: workspace 7 did not restore after rapid switching" >&2; exit 1; }
 assert_not_minimized "rapid workspace restoration"
 
-# A hard kill must leave enough durable state for the next paused launch to recover the window.
+# A hard kill must leave enough durable state for the next launch to recover the window.
 osascript -e 'tell application "System Events" to key code 22 using option down'
 wait_for_position different "$normal_position" || { echo "FAIL: crash test could not move workspace 7 offscreen" >&2; exit 1; }
 assert_not_minimized "crash-test parking"
@@ -305,12 +295,14 @@ wait "$agent_pid" 2>/dev/null || true
 agent_pid=""
 [[ "$(window_position)" != "$normal_position" ]] || { echo "FAIL: hard kill unexpectedly restored the parked window" >&2; exit 1; }
 assert_not_minimized "hard kill"
-state_file="$HOME/Library/Application Support/Spaceman/parked-windows.json"
+state_file="$test_state/parked-windows.json"
 [[ -s "$state_file" && "$(jq length "$state_file")" -eq 1 ]] || { echo "FAIL: parked window was not persisted before hard kill" >&2; exit 1; }
 
-SPACEMAN_CONFIG="$test_config" SPACEMAN_MANAGED_DISPLAY=secondary "$root/target/Spaceman.app/Contents/MacOS/spaceman-agent" &
+SPACEMAN_CONFIG="$test_config" SPACEMAN_APPLICATION_SUPPORT="$test_state" SPACEMAN_MANAGED_DISPLAY=secondary "$root/target/Spaceman.app/Contents/MacOS/spaceman-agent" &
 agent_pid=$!
-wait_for_position equal "$normal_position" || { echo "FAIL: paused startup did not recover the parked window" >&2; exit 1; }
+sleep 2
+SPACEMAN_APPLICATION_SUPPORT="$test_state" "$root/target/Spaceman.app/Contents/MacOS/spaceman" ctl pause >/dev/null
+wait_for_position equal "$normal_position" || { echo "FAIL: startup recovery did not restore the parked window after pause" >&2; exit 1; }
 assert_not_minimized "crash recovery"
 for _ in $(seq 1 30); do
   [[ -s "$state_file" && "$(jq length "$state_file")" -eq 0 ]] && break

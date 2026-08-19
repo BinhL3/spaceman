@@ -11,8 +11,10 @@ Spaceman's release path is direct distribution outside the Mac App Store. Releas
 Developer ID signing and Apple's notarization service so Gatekeeper can verify them. App Store
 Connect upload and TestFlight tooling are not part of this release path.
 
-Create the default notarization credential once. `notarytool` prompts securely for an app-specific
-password and stores the validated credential in Keychain; no secret enters the repository:
+Release preparation requires Xcode command-line tools, Rust 1.95.0, a Developer ID Application
+identity, Sparkle's Ed25519 key in Keychain, and the notarization profile below. Publication also
+requires an authenticated `wrangler` CLI. `notarytool` prompts securely for an app-specific password
+and stores the validated credential in Keychain; no secret enters the repository:
 
 ```sh
 xcrun notarytool store-credentials spaceman-notary \
@@ -20,12 +22,12 @@ xcrun notarytool store-credentials spaceman-notary \
   --team-id "YOUR_TEAM_ID"
 ```
 
-Add release notes at `docs/releases/<version>.md`, commit and push a clean release revision, then
-prepare the exact artifact:
+Update the package version in `Cargo.toml`/`Cargo.lock`, `CFBundleShortVersionString`, the monotonically
+increasing `CFBundleVersion`, release notes, and versioned download references in README, the setup
+skill, and website. Commit and push a clean release revision, then prepare the exact artifact:
 
 ```sh
-SPACEMAN_FIRST_RELEASE=1 ./scripts/release-app.sh # initial release only
-./scripts/release-app.sh                         # subsequent releases
+./scripts/release-app.sh
 ```
 
 The script auto-detects the first `Developer ID Application` identity and uses the
@@ -36,12 +38,12 @@ checksums, and signs a local Sparkle appcast. Artifacts are written to `dist/` b
 After testing the prepared archive, publish it and its appcast:
 
 ```sh
-SPACEMAN_FIRST_RELEASE=1 ./scripts/release-app.sh publish # initial release only
-./scripts/release-app.sh publish                         # subsequent releases
+./scripts/release-app.sh publish
 ```
 
-Publishing uploads the immutable versioned ZIP, checksum, and latest alias before replacing
-`appcast.xml`. The script downloads and compares each public object before publishing the feed, then
+Publishing uploads the versioned ZIP, checksum, and latest alias before replacing `appcast.xml`.
+Published version names must never be reused. The script downloads and compares each public object
+before publishing the feed, then
 compares the public feed byte-for-byte. This artifact-first/feed-last order prevents clients from
 seeing an update whose download is not available. The bucket is `spaceman-releases`; the public URL
 is the `SUFeedURL` baked into `Info.plist`. A missing feed is accepted only when
@@ -62,10 +64,8 @@ codesign --verify --deep --strict target/Spaceman.app
 
 Do not publish `target/Spaceman.app` as a release based only on those commands.
 
-## Release Blockers
+## Remaining Qualification Gaps
 
-- Notarize the final distributable with Apple and staple the ticket where the artifact format allows.
-- Produce a downloadable artifact with an integrity checksum and documented install path.
 - Decide and validate supported architectures, including universal packaging if promised.
 - Validate the declared minimum macOS version and a current macOS version.
 - Test first install, Accessibility onboarding, launch-at-login registration and relaunch, shortcuts,
@@ -73,8 +73,8 @@ Do not publish `target/Spaceman.app` as a release based only on those commands.
 - Add and verify a concise product demo.
 - Recheck the private `_AXUIElementGetWindow` risk and state clearly that the Mac App Store is not
   supported.
-- Review `SECURITY.md`, `CONTRIBUTING.md`, license, version, changelog/release notes, and repository
-  visibility before a public release.
+- Review `SECURITY.md`, `CONTRIBUTING.md`, license, version, changelog/release notes, and support policy
+  before broadening the public preview.
 
 ## Release Rules
 

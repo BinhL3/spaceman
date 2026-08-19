@@ -1,5 +1,4 @@
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
 pub mod app;
 pub mod config;
 #[cfg(target_os = "macos")]

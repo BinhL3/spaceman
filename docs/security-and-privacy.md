@@ -8,8 +8,9 @@ the on-screen Core Graphics window list, display topology, keyboard input source
 and mouse-button state needed for tiling and gestures.
 
 The permission is broad because macOS grants Accessibility at application scope. Spaceman limits its
-own writes to eligible standard, on-screen, non-minimized, non-fullscreen windows whose position and
-size are settable. It does not require disabling System Integrity Protection.
+own writes to eligible standard, non-minimized, non-fullscreen windows whose position is settable.
+Resizable windows may be moved and resized; movable non-resizable windows may be parked off-screen
+and restored without changing their size. It does not require disabling System Integrity Protection.
 
 ## Data Handling
 
@@ -31,7 +32,7 @@ Local files live under `~/Library/Application Support/Spaceman/`:
 
 - `config.toml`: user-authored configuration;
 - `workspace-state.json`: active workspace selectors, previous-workspace history, logical slots,
-  floating-window ownership, and layout trees;
+  last-focused and maximized slot intent, floating-window ownership, and layout trees;
 - `parked-windows.json`: physical process/window identifiers and original frames needed for recovery;
 - `agent.log`: timestamped diagnostic events (switches, parking, restoration, ownership changes) with
   process/window identifiers and frames, never window titles; mode `0600`, discarded past 5 MB at the

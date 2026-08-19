@@ -149,6 +149,10 @@ pub(crate) struct WorkspaceState {
     slots: Vec<Vec<crate::Slot>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     floating: Vec<(crate::PhysicalWindowId, WorkspaceId)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    last_focused: Vec<Option<crate::SlotId>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    maximized: Vec<Option<crate::SlotId>>,
 }
 
 impl WorkspaceState {
@@ -156,6 +160,8 @@ impl WorkspaceState {
         if self.slots.len() > WorkspaceId::COUNT
             || self.layouts.len() > WorkspaceId::COUNT
             || self.axes.len() > WorkspaceId::COUNT
+            || self.last_focused.len() > WorkspaceId::COUNT
+            || self.maximized.len() > WorkspaceId::COUNT
         {
             return Err("workspace state contains more than 36 workspaces".into());
         }
@@ -185,6 +191,25 @@ impl WorkspaceState {
         }
         if self.layouts.len() > self.slots.len() {
             return Err("workspace layouts have no matching slot state".into());
+        }
+        for (name, intents) in [
+            ("last-focused", &self.last_focused),
+            ("maximized", &self.maximized),
+        ] {
+            for (index, slot) in intents.iter().enumerate() {
+                if let Some(slot) = slot
+                    && !self
+                        .slots
+                        .get(index)
+                        .is_some_and(|slots| slots.iter().any(|candidate| candidate.id == *slot))
+                {
+                    return Err(format!(
+                        "workspace {} {name} slot {} does not exist",
+                        index + 1,
+                        slot.0
+                    ));
+                }
+            }
         }
         let tiled: HashSet<_> = self
             .slots
@@ -252,6 +277,8 @@ pub struct Workspaces {
     previous: HashMap<DisplaySelector, WorkspaceId>,
     floating_owners: HashMap<PhysicalWindowId, WorkspaceId>,
     enabled: HashSet<WorkspaceId>,
+    last_focused: [Option<crate::SlotId>; WorkspaceId::COUNT],
+    maximized: [Option<crate::SlotId>; WorkspaceId::COUNT],
 }
 
 impl Default for Workspaces {
@@ -273,6 +300,8 @@ impl Default for Workspaces {
             previous: HashMap::new(),
             floating_owners: HashMap::new(),
             enabled: WorkspaceId::numbered().collect(),
+            last_focused: std::array::from_fn(|_| None),
+            maximized: std::array::from_fn(|_| None),
         }
     }
 }
@@ -314,6 +343,8 @@ impl Workspaces {
                 floating.sort();
                 floating
             },
+            last_focused: trimmed_intents(&self.last_focused),
+            maximized: trimmed_intents(&self.maximized),
         }
     }
 
@@ -326,6 +357,8 @@ impl Workspaces {
             layouts,
             slots,
             floating,
+            last_focused,
+            maximized,
         } = state;
         for (index, slots) in slots.into_iter().take(WorkspaceId::COUNT).enumerate() {
             let workspace = WorkspaceId::from_index(index);
@@ -357,6 +390,14 @@ impl Workspaces {
             if self.workspace_of(&window).is_none() {
                 self.floating_owners.insert(window, workspace);
             }
+        }
+        for (index, slot) in last_focused.into_iter().enumerate() {
+            self.last_focused[index] =
+                slot.filter(|slot| self.has_slot(WorkspaceId::from_index(index), *slot));
+        }
+        for (index, slot) in maximized.into_iter().enumerate() {
+            self.maximized[index] =
+                slot.filter(|slot| self.has_slot(WorkspaceId::from_index(index), *slot));
         }
     }
 
@@ -460,6 +501,12 @@ impl Workspaces {
             (&mut after[0], &mut before[target_index])
         };
         let slot = source_engine.take_slot(window)?;
+        if self.last_focused[source_index] == Some(slot.id) {
+            self.last_focused[source_index] = None;
+        }
+        if self.maximized[source_index] == Some(slot.id) {
+            self.maximized[source_index] = None;
+        }
         target_engine.insert_slot(slot);
         self.owners.insert(window.clone(), target);
         Some(source)
@@ -560,11 +607,79 @@ impl Workspaces {
         for window in self.engine(workspace).bound_windows() {
             self.owners.insert(window, workspace);
         }
+        let index = workspace.index();
+        if self.last_focused[index].is_some_and(|slot| !self.has_slot(workspace, slot)) {
+            self.last_focused[index] = None;
+        }
+        if self.maximized[index].is_some_and(|slot| !self.has_slot(workspace, slot)) {
+            self.maximized[index] = None;
+        }
     }
 
     pub fn forget_window(&mut self, workspace: WorkspaceId, window: &PhysicalWindowId) {
-        let _ = self.engine_mut(workspace).take_slot(window);
+        let removed = self.engine_mut(workspace).take_slot(window);
+        if let Some(slot) = removed {
+            let index = workspace.index();
+            if self.last_focused[index] == Some(slot.id) {
+                self.last_focused[index] = None;
+            }
+            if self.maximized[index] == Some(slot.id) {
+                self.maximized[index] = None;
+            }
+        }
         self.owners.remove(window);
+    }
+
+    pub(crate) fn remember_focus(&mut self, workspace: WorkspaceId, window: &PhysicalWindowId) {
+        self.last_focused[workspace.index()] = self.engine(workspace).slot_for_window(window);
+    }
+
+    pub(crate) fn preferred_focus(&self, workspace: WorkspaceId) -> Option<PhysicalWindowId> {
+        let index = workspace.index();
+        self.maximized[index]
+            .or(self.last_focused[index])
+            .and_then(|slot| self.window_for_slot(workspace, slot))
+            .cloned()
+    }
+
+    pub(crate) fn maximized_window(&self, workspace: WorkspaceId) -> Option<&PhysicalWindowId> {
+        self.maximized[workspace.index()].and_then(|slot| self.window_for_slot(workspace, slot))
+    }
+
+    pub(crate) fn toggle_maximize(
+        &mut self,
+        workspace: WorkspaceId,
+        window: &PhysicalWindowId,
+    ) -> bool {
+        let Some(slot) = self.engine(workspace).slot_for_window(window) else {
+            return false;
+        };
+        let maximized = &mut self.maximized[workspace.index()];
+        *maximized = (*maximized != Some(slot)).then_some(slot);
+        true
+    }
+
+    fn has_slot(&self, workspace: WorkspaceId, slot: crate::SlotId) -> bool {
+        self.engine(workspace)
+            .model()
+            .workspace
+            .slots
+            .iter()
+            .any(|candidate| candidate.id == slot)
+    }
+
+    fn window_for_slot(
+        &self,
+        workspace: WorkspaceId,
+        slot: crate::SlotId,
+    ) -> Option<&PhysicalWindowId> {
+        self.engine(workspace)
+            .model()
+            .workspace
+            .slots
+            .iter()
+            .find(|candidate| candidate.id == slot)?
+            .bound_window()
     }
 
     pub(crate) fn inactive_windows_except(
@@ -580,6 +695,16 @@ impl Workspaces {
             })
             .collect()
     }
+}
+
+fn trimmed_intents(
+    intents: &[Option<crate::SlotId>; WorkspaceId::COUNT],
+) -> Vec<Option<crate::SlotId>> {
+    let length = intents
+        .iter()
+        .rposition(Option::is_some)
+        .map_or(0, |index| index + 1);
+    intents[..length].to_vec()
 }
 
 #[cfg(test)]
@@ -747,6 +872,35 @@ mod tests {
     }
 
     #[test]
+    fn persisted_state_restores_focus_and_maximize_intent_by_slot() {
+        let first = window(10);
+        let second = window(20);
+        let mut workspaces = Workspaces::default();
+        for (id, window) in [(1, &first), (2, &second)] {
+            workspaces.engine_mut(WorkspaceId::ONE).insert_slot(Slot {
+                id: SlotId(id),
+                weight: 1,
+                binding: BindingState::Bound(window.clone()),
+            });
+        }
+        workspaces.refresh_ownership(WorkspaceId::ONE);
+        workspaces.remember_focus(WorkspaceId::ONE, &second);
+        assert!(workspaces.toggle_maximize(WorkspaceId::ONE, &second));
+
+        let encoded = serde_json::to_vec(&workspaces.state()).unwrap();
+        let state: WorkspaceState = serde_json::from_slice(&encoded).unwrap();
+        state.validate().unwrap();
+        let mut restored = Workspaces::default();
+        restored.restore(state);
+
+        assert_eq!(
+            restored.preferred_focus(WorkspaceId::ONE),
+            Some(second.clone())
+        );
+        assert_eq!(restored.maximized_window(WorkspaceId::ONE), Some(&second));
+    }
+
+    #[test]
     fn persisted_state_round_trips_a_named_workspace() {
         let named = WorkspaceId::named('D').unwrap();
         let owned = window(40);
@@ -852,6 +1006,14 @@ mod tests {
         });
         state.layouts[0] =
             crate::layout_tree::LayoutTree::flat(crate::Axis::Horizontal, [SlotId(1)]);
+
+        assert!(state.validate().is_err());
+    }
+
+    #[test]
+    fn persisted_state_rejects_intent_for_a_missing_slot() {
+        let mut state = Workspaces::default().state();
+        state.maximized = vec![Some(SlotId(99))];
 
         assert!(state.validate().is_err());
     }

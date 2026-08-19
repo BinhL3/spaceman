@@ -5,10 +5,12 @@ This file is the current engineering contract. README and `docs/` describe curre
 
 ## Architecture Map
 
-- `src/bin/spaceman-agent.rs`, `src/app.rs`: GPUI/AppKit foreground lifecycle, action queue, gestures,
-  status, restore-before-exit coordination, and the worker boundary.
-- `src/status_item.rs`, `src/settings.rs`, `src/sparkle.rs`, `src/termination.rs`: main-thread menu,
-  settings, signed updates, and asynchronous AppKit termination coordination.
+- `src/bin/spaceman-agent.rs`, `src/app.rs`: owner-only capped logging, GPUI/AppKit foreground
+  lifecycle, action queue, gestures, status, durable parking/restoration, restore-before-exit
+  coordination, and the worker boundary.
+- `src/desktop_ui.rs`, `src/status_item.rs`, `src/settings.rs`, `src/login_item.rs`, `src/sparkle.rs`,
+  `src/termination.rs`: main-thread UI primitives, menu/settings, login registration, signed updates,
+  and asynchronous AppKit termination coordination.
 - `src/hotkeys.rs`, `src/keyboard_layout.rs`: Carbon global shortcut adapters.
 - `src/macos.rs`: Accessibility/Core Graphics observation and writes, display discovery, native event
   monitor, and native handle cache.
@@ -17,21 +19,28 @@ This file is the current engineering contract. README and `docs/` describe curre
 - `src/workspace.rs`, `src/runtime.rs`, `src/layout_tree.rs`, `src/navigation.rs`: ten default numbered
   workspaces, opt-in named workspaces A-Z,
   ownership, nested weighted layouts, directional operations, and persistence representation.
-- `src/config.rs`: strict version-1 TOML parsing and first-match window disposition.
+- `src/config.rs`, `src/serde_map.rs`: strict version-1 TOML parsing, first-match window disposition,
+  state-path selection, and deterministic persisted-map serialization.
 - `src/control.rs`, `src/main.rs`: mode-`0600` local Unix control protocol, CLI, dry-run/live probes,
   fixture replay, and HUD.
-- `src/geometry.rs`, `src/live.rs`: frame math, parking, and legacy live reconciliation helpers.
-- `scripts/`: signed bundle assembly/install and destructive live acceptance harnesses.
+- `src/geometry.rs`, `src/live.rs`: frame math, off-screen target selection, live observation
+  completion, placement filtering, and CLI probe helpers.
+- `src/permission_guide.rs`, `native/permission_guide.m`: Accessibility onboarding adapter.
+- `scripts/`: icon generation, verified Sparkle setup, signed bundle assembly/install, notarized
+  release preparation/validation/publication, and destructive live acceptance harnesses.
 
 ## Product Invariants
 
 - A logical slot is product identity; a physical `AXWindow` binding is replaceable evidence.
 - Native-tab replacement preserves slot, order, weight, nested layout, workspace, and maximize intent.
-- Incomplete, timed-out, or ambiguous observations never prove absence. Preserve state and retry.
+- Incomplete or timed-out observations never prove absence. Ambiguous native-tab evidence preserves
+  bindings during its bounded settling window; only repeated complete observations may retire an
+  unresolved binding under the tested reconciliation policy.
 - One accepted observation produces one coherent model revision; native writes converge toward it.
 - Rules are ordered and first-match. Named workspaces use the same workspace identity and ordered
   route schema as numbered workspaces; do not introduce an orthogonal app-space schema.
-- Automatic tiling starts when hotkeys are available. Documentation must not claim a paused startup.
+- Automatic tiling starts when Accessibility permission and hotkeys are available. Documentation must
+  not claim an unconditional paused startup.
 
 ## Recovery And Persistence Invariants
 
@@ -78,6 +87,8 @@ This file is the current engineering contract. README and `docs/` describe curre
   scoped live tests.
 - Read live harnesses before running them. Confirm expected displays, preserve baseline workspace and
   focus, and verify cleanup. Never experiment on unrelated user windows.
+- Live harness state must use the internal `SPACEMAN_APPLICATION_SUPPORT` override and must never read
+  or mutate the user's normal workspace or parked-window state.
 - Preserve `~/Library/Application Support/Spaceman/parked-windows.json` until pause/quit restoration is
   confirmed. If a test crashes, reopen the same app and recover before cleaning state.
 
@@ -111,7 +122,7 @@ source. Keep historical documents visibly marked and never rewrite them as curre
   architecture and minimum-OS validation, and clean-machine install/upgrade/recovery/uninstall tests.
 - Build once from a clean reviewed revision, notarize and distribute that exact artifact, and verify
   signature, ticket, architecture, plist, archive contents, and checksum after packaging.
-- Add a real app icon and demo before public presentation if they remain absent.
+- Keep the real app icon and add a concise demo before calling the preview broadly release-ready.
 - Never tell artifact users they need a Developer ID identity; that is a source-build requirement.
 - Never ship instructions to disable SIP, erase recovery metadata before restoration, or imply Mac App
   Store support.

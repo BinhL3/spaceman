@@ -1,7 +1,7 @@
 # Contributing
 
-Spaceman is currently a private experimental project. Coordinate substantial work with the repository
-owner before investing in it. Public contribution expectations may change before a public release.
+Spaceman is an experimental public preview. Coordinate substantial work with the repository owner
+before investing in it; contribution expectations may change as the preview matures.
 
 ## Before Changing Code
 
@@ -24,9 +24,9 @@ Run the commands in [Development](docs/development.md). Add focused tests for be
 README and linked docs whenever controls, configuration, compatibility, paths, privacy, packaging, or
 recovery behavior changes.
 
-Do not weaken safety behavior to make a live test pass. Do not add telemetry, network access,
-automatic updates, new private APIs, or persisted sensitive data without explicit design and security
-review.
+Do not weaken safety behavior to make a live test pass. Do not add telemetry, network access beyond
+the reviewed Sparkle update path, automatic installation, new private APIs, or persisted sensitive
+data without explicit design and security review.
 
 ## Changes And Review
 

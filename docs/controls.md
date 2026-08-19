@@ -1,21 +1,31 @@
 # Controls
 
 Spaceman registers global hotkeys while automatic tiling is enabled. Character keys follow the
-current macOS input source; Spaceman refreshes registrations after an input-source change. A mapping
-collision or unsupported layout leaves tiling paused and reports `Hotkeys unavailable`.
+current macOS input source; Spaceman refreshes registrations after an input-source change. An invalid
+layout prevents startup registration and leaves tiling paused. During a layout change, Spaceman keeps
+the existing registrations if it cannot construct a replacement plan; if replacement registration
+fails after the old registrations are released, it pauses and reports `Hotkeys unavailable`.
 
 | Keys | Action |
 | --- | --- |
 | `Option+1` ... `Option+9`, `Option+0` | Switch workspace 1 ... 10 |
 | Add `Shift` to a workspace key | Move the focused window there without switching |
-| `Option+Tab` | Toggle the focused display's current/previous workspace |
-| `Option+H/J/K/L` | Focus the nearest tile left/down/up/right, including across displays |
 | `Option+A` ... `Option+Z` | Switch to that configured named workspace |
 | Add `Shift` to a named workspace key | Move the focused window there without switching |
+| `Option+Tab` | Toggle the focused display's current/previous workspace |
+| `Option+H/J/K/L` | Focus the nearest tile left/down/up/right, including across displays |
 | `Option+Shift+H/J/K/L` | Move the focused tile in that direction |
 | `Option+/` | Toggle the active workspace layout's root horizontal/vertical axis |
 | `Option+-` / `Option+=` | Shrink/grow the focused tile by 50 pixels at its immediate split |
 | `Option+Shift+F` | Toggle maximize without entering native fullscreen |
+
+Named workspace shortcuts are registered only when referenced by config. If a configured letter
+overlaps a built-in shortcut, the workspace shortcut takes precedence.
+
+Spaceman remembers the last-focused logical tile in each workspace and restores that focus when the
+workspace becomes active again. Pressing an already-active workspace shortcut focuses that tile too.
+Maximize intent survives workspace switches, native-tab physical-window replacement, and Spaceman
+restarts.
 
 Dragging a managed tile over a sibling swaps it. Dropping near a tile edge can create a nested split;
 dropping onto another display can move it to that display's active workspace. Resizing a managed

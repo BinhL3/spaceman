@@ -26,13 +26,14 @@ windows` unless it is irrecoverably stuck.
 Reopen the same installed app without deleting state:
 
 ```sh
-open "$HOME/Applications/Spaceman.app"
+open "/Applications/Spaceman.app"
 ```
 
 If workspace state is absent or invalid, startup first attempts to restore every window recorded in
 `parked-windows.json`. If valid workspace state exists, the app resumes that persisted workspace
 model and restores windows as their workspaces become visible. Then use `spaceman ctl pause` if the
-goal is to return all windows and stop tiling.
+goal is to return all windows and stop tiling. If Accessibility permission or startup hotkey
+registration is unavailable, startup remains paused and attempts to restore all parked windows.
 
 If the app will not stay open, preserve a copy of the whole state directory before manual diagnosis:
 
@@ -47,15 +48,16 @@ losing metadata for a live parked window.
 
 ## Safe Uninstall
 
-1. Disable automatic tiling with `spaceman ctl pause`.
-2. Wait for `spaceman ctl status` to report `"mode":"paused"` and `"busy":false`.
-3. Run `spaceman ctl quit` and wait for `spaceman-agent` to exit.
-4. Visually confirm that parked windows returned.
-5. Re-enable the previous window manager only after Spaceman exits.
-6. Remove the app and CLI link.
+1. Turn off `Launch at Login` in Spaceman Settings and confirm it is disabled.
+2. Disable automatic tiling with `spaceman ctl pause`.
+3. Wait for `spaceman ctl status` to report `"mode":"paused"` and `"busy":false`.
+4. Run `spaceman ctl quit` and wait for `spaceman-agent` to exit.
+5. Visually confirm that parked windows returned.
+6. Re-enable the previous window manager only after Spaceman exits.
+7. Remove the app and CLI link.
 
 ```sh
-rm -rf "$HOME/Applications/Spaceman.app"
+rm -rf "/Applications/Spaceman.app"
 rm -f "$HOME/.local/bin/spaceman"
 ```
 

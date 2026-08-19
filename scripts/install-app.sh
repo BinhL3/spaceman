@@ -3,7 +3,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 source_bundle=$("$root/scripts/build-app.sh")
-install_root="$HOME/Applications"
+install_root="/Applications"
 installed_bundle="$install_root/Spaceman.app"
 cli_root="$HOME/.local/bin"
 was_automatic=false

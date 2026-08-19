@@ -32,5 +32,7 @@ fn redirect_stderr_to_log() {
     else {
         return;
     };
+    use std::os::unix::fs::PermissionsExt;
+    let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
     spaceman::macos::redirect_stderr_to(&file);
 }

@@ -20,18 +20,21 @@ Download, verify, and open:
 
 ```sh
 cd "$(mktemp -d)"
+if [[ -e "/Applications/Spaceman.app" ]]; then
+  echo "Spaceman is already installed; upgrade through Spaceman Settings." >&2
+  exit 1
+fi
 curl -fLO "https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.1-macos-arm64.zip"
 curl -fLO "https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.1-macos-arm64.zip.sha256"
 shasum -a 256 -c Spaceman-v0.1.1-macos-arm64.zip.sha256
 ditto -x -k Spaceman-v0.1.1-macos-arm64.zip .
-mkdir -p "$HOME/Applications"
-mv Spaceman.app "$HOME/Applications/"
-open "$HOME/Applications/Spaceman.app"
+mv Spaceman.app "/Applications/"
+open "/Applications/Spaceman.app"
 ```
 
 Spaceman opens Settings and walks through granting Accessibility access
 (**System Settings > Privacy & Security > Accessibility**). Optionally enable `Launch at Login`.
-Tiling starts automatically once hotkeys register.
+Tiling starts automatically once Accessibility permission is granted and hotkeys register.
 
 ## Verify
 
@@ -39,8 +42,8 @@ The CLI ships inside the bundle:
 
 ```sh
 mkdir -p "$HOME/.local/bin"
-ln -sf "$HOME/Applications/Spaceman.app/Contents/MacOS/spaceman" "$HOME/.local/bin/spaceman"
-spaceman ctl status   # healthy: "mode":"running" and "busy":false
+ln -sf "/Applications/Spaceman.app/Contents/MacOS/spaceman" "$HOME/.local/bin/spaceman"
+spaceman ctl status   # healthy: "mode":"automatic" and "busy":false
 ```
 
 ## Controls
@@ -49,12 +52,12 @@ spaceman ctl status   # healthy: "mode":"running" and "busy":false
 | --- | --- |
 | `Option+1` … `Option+0` | Switch to workspace 1 … 10 |
 | `Option+Shift+1` … `Option+Shift+0` | Move focused window to workspace 1 … 10 |
+| `Option+A` … `Option+Z` | Switch to a configured named workspace |
+| `Option+Shift+A` … `Option+Shift+Z` | Move focused window to a configured named workspace |
 | `Option+Tab` | Previous workspace on the focused display |
 | `Option+H/J/K/L` | Focus left/down/up/right |
 | `Option+Shift+H/J/K/L` | Move the focused tile |
 | `Option+/` | Toggle the root split axis |
-| `Option+A` … `Option+Z` | Switch to a configured named workspace |
-| `Option+Shift+A` … `Option+Shift+Z` | Move focused window to a configured named workspace |
 | `Option+-`, `Option+=` | Shrink/grow the focused tile |
 | `Option+Shift+F` | Toggle maximize |
 
@@ -85,6 +88,8 @@ spaceman displays
 
 ## Uninstall
 
+Turn off `Launch at Login` in Spaceman Settings first, then restore and quit:
+
 ```sh
 spaceman ctl pause   # wait for "mode":"paused" and "busy":false
 spaceman ctl quit    # wait for spaceman-agent to exit
@@ -93,7 +98,7 @@ spaceman ctl quit    # wait for spaceman-agent to exit
 Confirm windows returned, then:
 
 ```sh
-rm -rf "$HOME/Applications/Spaceman.app"
+rm -rf "/Applications/Spaceman.app"
 rm -f "$HOME/.local/bin/spaceman"
 rm -rf "$HOME/Library/Application Support/Spaceman"
 ```

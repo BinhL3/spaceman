@@ -42,7 +42,7 @@ action = "route"
 workspace = "D"                       # named workspace A through Z
 
 [[workspaces]]
-workspace = 9                         # integer 1 through 10; unique in this list
+workspace = 9                         # 1 through 10 or "A" through "Z"; unique
 monitor = "main"                      # non-empty selector
 ```
 
@@ -51,9 +51,10 @@ Rules run in file order and the first matching rule wins. An unmatched window is
 
 - `float` excludes the window from tiling and resizing, preserves its native frame, and keeps it with
   the logical workspace where it was first observed.
-- `route` assigns a newly inserted logical window to workspace 1 through 10 or a configured named
-  workspace A through Z. It does not repeatedly route existing slots, including a Ghostty native-tab
-  physical replacement.
+- `route` assigns a newly inserted resizable logical window to workspace 1 through 10 or a configured
+  named workspace A through Z. Movable
+  non-resizable windows remain floating on the workspace where first observed. A rule does not
+  repeatedly route existing slots, including a Ghostty native-tab physical replacement.
 - `ignore` leaves the window entirely alone: never tiled, never owned by a workspace, never moved or
   parked. Use it for applications that insist on positioning their own windows. A previously managed
   window is released the next time it is observed on screen.
@@ -90,6 +91,10 @@ precedence over a built-in letter shortcut when they overlap.
 provide a UI for setting it. A scoped process registers only workspace hotkeys assigned to its managed
 main/secondary selectors; normal users should leave it unset.
 
+`SPACEMAN_APPLICATION_SUPPORT` is another internal test override. It replaces the Application Support
+directory for the default config path, state, logs, and control files so live harnesses cannot touch
+normal recovery data.
+
 ## Applying Changes
 
 There is no live config reload. Pause or quit and confirm restoration, then open the app again:
@@ -98,7 +103,7 @@ There is no live config reload. Pause or quit and confirm restoration, then open
 spaceman ctl pause
 spaceman ctl status
 spaceman ctl quit
-open "$HOME/Applications/Spaceman.app"
+open "/Applications/Spaceman.app"
 ```
 
 `spaceman ctl restart` safely restores parked windows and exits, but currently does not relaunch the

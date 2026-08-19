@@ -2,8 +2,7 @@
 
 ## Project Status
 
-Spaceman is currently private and experimental. It has no supported public release or security
-maintenance window. If the repository becomes public, this policy must be reviewed before release.
+Spaceman is an experimental public preview without a guaranteed security maintenance window.
 
 ## Reporting A Vulnerability
 
@@ -16,10 +15,11 @@ suggested mitigation. Redact window titles, bundle IDs where sensitive, local pa
 needed to explain the issue, and the contents of `parked-windows.json` or `workspace-state.json`.
 
 The maintainer will acknowledge the report, assess scope, and coordinate disclosure when practical.
-No response-time guarantee applies while the project remains private and experimental.
+No response-time guarantee applies while the project remains experimental.
 
 ## Scope Notes
 
 Spaceman has broad Accessibility permission and uses private `_AXUIElementGetWindow`. The local
-control socket and lock are mode `0600`; there is currently no network, telemetry, or update-check
-surface. See [Security and privacy](docs/security-and-privacy.md) for the current data model.
+control socket and lock are mode `0600`. There is no telemetry; packaged builds use Sparkle to fetch a
+signed update feed and selected archives from the public release bucket. See
+[Security and privacy](docs/security-and-privacy.md) for the current data model.

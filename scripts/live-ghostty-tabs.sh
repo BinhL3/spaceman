@@ -155,7 +155,7 @@ if (( initial_window_menu_items < 1 )); then
   exit 1
 fi
 
-cargo run --quiet -- watch-window "$window_id" 1 >"$initial_output"
+cargo run --locked --quiet -- watch-window "$window_id" 1 >"$initial_output"
 if ! jq -e --argjson window_id "$window_id" '
   any(.steps[0].observation.applications[]?.windows[]?; .id.window_id == $window_id)
 ' "$initial_output" >/dev/null; then
@@ -163,7 +163,7 @@ if ! jq -e --argjson window_id "$window_id" '
   exit 1
 fi
 
-cargo run --quiet -- watch-window "$window_id" 64 --apply >"$output" &
+cargo run --locked --quiet -- watch-window "$window_id" 64 --apply >"$output" &
 watch_pid=$!
 sleep 1
 

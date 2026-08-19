@@ -177,9 +177,14 @@ fn config_path() -> Option<PathBuf> {
 }
 
 pub fn application_support_path(file: &str) -> Option<PathBuf> {
-    std::env::var_os("HOME")
+    std::env::var_os("SPACEMAN_APPLICATION_SUPPORT")
         .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/Spaceman").join(file))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join("Library/Application Support/Spaceman"))
+        })
+        .map(|directory| directory.join(file))
 }
 
 pub fn load_path(path: &Path) -> Result<Config, String> {
