@@ -55,6 +55,7 @@ spaceman ctl status   # healthy: "mode":"automatic" and "busy":false
 | `Option+A` … `Option+Z` | Switch to a configured named workspace |
 | `Option+Shift+A` … `Option+Shift+Z` | Move focused window to a configured named workspace |
 | `Option+Tab` | Previous workspace on the focused display |
+| Option-backtick | Focus the next tiled window in workspace order |
 | `Option+H/J/K/L` | Focus left/down/up/right |
 | `Option+Shift+H/J/K/L` | Move the focused tile |
 | `Option+/` | Toggle the root split axis |

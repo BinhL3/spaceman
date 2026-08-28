@@ -124,6 +124,7 @@ pub(crate) enum Action {
     WorkspaceBackAndForth,
     MoveFocused(WorkspaceId),
     MoveApp(String, WorkspaceId),
+    CycleFocus,
     Focus(Direction),
     Reorder(Direction),
     ToggleLayout,
@@ -147,6 +148,7 @@ enum WorkerAction {
     WorkspaceBackAndForth,
     MoveFocused(WorkspaceId),
     MoveApp(String, WorkspaceId),
+    CycleFocus,
     Focus(Direction),
     Reorder(Direction),
     ToggleLayout,
@@ -165,6 +167,7 @@ impl TryFrom<Action> for WorkerAction {
             Action::WorkspaceBackAndForth => Ok(Self::WorkspaceBackAndForth),
             Action::MoveFocused(workspace) => Ok(Self::MoveFocused(workspace)),
             Action::MoveApp(bundle_id, workspace) => Ok(Self::MoveApp(bundle_id, workspace)),
+            Action::CycleFocus => Ok(Self::CycleFocus),
             Action::Focus(direction) => Ok(Self::Focus(direction)),
             Action::Reorder(direction) => Ok(Self::Reorder(direction)),
             Action::ToggleLayout => Ok(Self::ToggleLayout),
@@ -190,6 +193,7 @@ enum WorkerCommand {
     WorkspaceBackAndForth(macos::DisplayOutputs),
     MoveFocused(WorkspaceId, macos::DisplayOutputs),
     MoveApp(String, WorkspaceId, macos::DisplayOutputs),
+    CycleFocus(macos::DisplayOutputs),
     Focus(Direction, macos::DisplayOutputs),
     Reorder(Direction, macos::DisplayOutputs),
     DropWindow(
@@ -1359,6 +1363,7 @@ fn send_worker_action(
             WorkerAction::MoveApp(bundle_id, workspace) => {
                 WorkerCommand::MoveApp(bundle_id, workspace, outputs)
             }
+            WorkerAction::CycleFocus => WorkerCommand::CycleFocus(outputs),
             WorkerAction::Focus(direction) => WorkerCommand::Focus(direction, outputs),
             WorkerAction::Reorder(direction) => WorkerCommand::Reorder(direction, outputs),
             WorkerAction::ToggleLayout => WorkerCommand::ToggleLayout(outputs),
@@ -1478,6 +1483,14 @@ fn spawn_worker(
                 WorkerCommand::MoveApp(bundle_id, workspace, outputs) => {
                     let debug_outputs = outputs.clone();
                     let result = runtime.move_app(&bundle_id, workspace, outputs, &cancelled);
+                    WorkerResult::Status {
+                        result,
+                        debug: Box::new(runtime.debug_state(&debug_outputs)),
+                    }
+                }
+                WorkerCommand::CycleFocus(outputs) => {
+                    let debug_outputs = outputs.clone();
+                    let result = runtime.cycle_focus(outputs, &cancelled);
                     WorkerResult::Status {
                         result,
                         debug: Box::new(runtime.debug_state(&debug_outputs)),
@@ -2873,7 +2886,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if !self.is_visible(workspace, &outputs) {
             return Err("Focused window is not on an active workspace".into());
         }
-        let Some((_, target)) = self.relative_target(&focused, direction, &outputs) else {
+        let Some((_, target)) = self.spatial_target(&focused, direction, &outputs) else {
             return Ok(self.status(0, 0, &outputs));
         };
         if !self.backend.focus_window(&target) {
@@ -2885,28 +2898,43 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         Ok(self.status(0, 0, &outputs))
     }
 
-    fn relative_target(
-        &self,
-        focused: &crate::PhysicalWindowId,
-        direction: Direction,
-        outputs: &macos::DisplayOutputs,
-    ) -> Option<(WorkspaceId, crate::PhysicalWindowId)> {
-        let workspace = self.workspaces.workspace_of(focused)?;
-        if self.workspaces.uses_fullscreen_layout(workspace) {
-            let windows = self.workspaces.engine(workspace).bound_windows();
-            let index = windows.iter().position(|window| window == focused)?;
-            if windows.len() < 2 {
-                return None;
+    fn cycle_focus(
+        &mut self,
+        outputs: macos::DisplayOutputs,
+        cancelled: &AtomicBool,
+    ) -> Result<CycleStatus, String> {
+        self.synchronize_foreground(&outputs);
+        let focused = self
+            .backend
+            .focused_window()
+            .ok_or("Focused window is unavailable")?;
+        let workspace = match self.workspaces.workspace_of(&focused) {
+            Some(workspace) => workspace,
+            None => {
+                self.cycle(outputs.clone(), cancelled)?;
+                self.workspaces
+                    .workspace_of(&focused)
+                    .ok_or("Focused window is not managed by Spaceman")?
             }
-            let target = match direction {
-                Direction::Left | Direction::Up => {
-                    &windows[(index + windows.len() - 1) % windows.len()]
-                }
-                Direction::Down | Direction::Right => &windows[(index + 1) % windows.len()],
-            };
-            return Some((workspace, target.clone()));
+        };
+        if !self.is_visible(workspace, &outputs) {
+            return Err("Focused window is not on an active workspace".into());
         }
-        self.spatial_target(focused, direction, outputs)
+        let windows = self.workspaces.engine(workspace).bound_windows();
+        let Some(index) = windows.iter().position(|window| window == &focused) else {
+            return Ok(self.status(0, 0, &outputs));
+        };
+        if windows.len() < 2 {
+            return Ok(self.status(0, 0, &outputs));
+        }
+        let target = &windows[(index + 1) % windows.len()];
+        if !self.backend.focus_window(target) {
+            return Err("Target window could not be focused".into());
+        }
+        self.pending_fullscreen_focus_restore.remove(&workspace);
+        self.workspaces.remember_focus(workspace, target);
+        self.persist_workspace_state_if_changed()?;
+        Ok(self.status(0, 0, &outputs))
     }
 
     fn spatial_target(
@@ -2948,8 +2976,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let focused = self.backend.focused_window();
         let target = |direction| {
             focused.as_ref().and_then(|focused| {
-                self.relative_target(focused, direction, outputs)
-                    .map(|(_, window)| window)
+                crate::navigation::target(&tiles, focused, direction)
+                    .map(|tile| tile.window.clone())
             })
         };
         let targets = DebugTargets {
@@ -5747,7 +5775,7 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_layout_focus_wraps_through_tile_order() {
+    fn workspace_focus_cycle_wraps_through_tile_order_in_every_layout() {
         let first = window(10);
         let second = window(20);
         let third = window(30);
@@ -5764,22 +5792,17 @@ mod tests {
         }
         let outputs = outputs();
         let cancelled = AtomicBool::new(false);
+
+        runtime.cycle_focus(outputs.clone(), &cancelled).unwrap();
+        assert_eq!(runtime.backend.focused, Some(third.clone()));
         runtime
             .toggle_fullscreen_layout(outputs.clone(), &cancelled)
             .unwrap();
 
-        runtime
-            .focus_relative(Direction::Right, outputs.clone(), &cancelled)
-            .unwrap();
-        assert_eq!(runtime.backend.focused, Some(third.clone()));
-        runtime
-            .focus_relative(Direction::Right, outputs.clone(), &cancelled)
-            .unwrap();
+        runtime.cycle_focus(outputs.clone(), &cancelled).unwrap();
         assert_eq!(runtime.backend.focused, Some(first.clone()));
-        runtime
-            .focus_relative(Direction::Up, outputs, &cancelled)
-            .unwrap();
-        assert_eq!(runtime.backend.focused, Some(third));
+        runtime.cycle_focus(outputs, &cancelled).unwrap();
+        assert_eq!(runtime.backend.focused, Some(second));
     }
 
     #[test]

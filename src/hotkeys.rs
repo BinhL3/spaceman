@@ -156,6 +156,12 @@ impl HotkeyPlan {
             ),
             (LogicalKey::Character('/'), OPTION_KEY, 108, "toggle layout"),
             (
+                LogicalKey::Character('`'),
+                OPTION_KEY,
+                112,
+                "cycle workspace windows",
+            ),
+            (
                 LogicalKey::Semantic(SemanticKey::Tab),
                 OPTION_KEY,
                 109,
@@ -342,6 +348,9 @@ fn decode_action(id: u32) -> Option<Action> {
     if id == 111 {
         return Some(Action::Resize(ResizeDirection::Grow));
     }
+    if id == 112 {
+        return Some(Action::CycleFocus);
+    }
     let (reorder, direction_id) = if (114..=117).contains(&id) {
         (true, id - 10)
     } else {
@@ -397,6 +406,7 @@ mod tests {
                 (65, '/', false, false),
                 (66, '-', false, false),
                 (67, '=', false, false),
+                (68, '`', false, false),
             ],
             vec![],
         )
@@ -425,6 +435,7 @@ mod tests {
             decode_action(111),
             Some(Action::Resize(ResizeDirection::Grow))
         ));
+        assert!(matches!(decode_action(112), Some(Action::CycleFocus)));
         assert!(matches!(
             decode_action(104),
             Some(Action::Focus(Direction::Left))
@@ -452,11 +463,11 @@ mod tests {
     }
 
     #[test]
-    fn full_plan_contains_all_thirty_three_registrations() {
+    fn full_plan_contains_all_thirty_four_registrations() {
         let enabled = WorkspaceId::numbered().collect::<Vec<_>>();
         let plan = HotkeyPlan::from_layout(&enabled, &layout()).unwrap();
-        assert_eq!(plan.registrations.len(), 33);
-        assert!(plan.registrations.capacity() >= 33);
+        assert_eq!(plan.registrations.len(), 34);
+        assert!(plan.registrations.capacity() >= 34);
     }
 
     #[test]
@@ -504,6 +515,7 @@ mod tests {
                 (65, '/', true, false),
                 (66, '-', false, false),
                 (67, '=', false, false),
+                (68, '`', false, false),
             ],
             vec![],
         );
@@ -528,6 +540,7 @@ mod tests {
                 (65, '/', false, false),
                 (66, '-', false, false),
                 (67, '=', false, false),
+                (68, '`', false, false),
             ],
             vec![],
         );

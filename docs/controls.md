@@ -13,6 +13,7 @@ fails after the old registrations are released, it pauses and reports `Hotkeys u
 | `Option+A` ... `Option+Z` | Switch to that configured named workspace |
 | Add `Shift` to a named workspace key | Move the focused window there without switching |
 | `Option+Tab` | Toggle the focused display's current/previous workspace |
+| Option-backtick | Focus the next tiled window, wrapping in stable workspace order |
 | `Option+H/J/K/L` | Focus the nearest tile left/down/up/right, including across displays |
 | `Option+Shift+H/J/K/L` | Move the focused tile in that direction |
 | `Option+/` | Toggle the active workspace layout's root horizontal/vertical axis |
@@ -28,8 +29,8 @@ focus when one of that workspace's windows is already focused; otherwise it focu
 tile.
 
 Fullscreen Layout is a workspace mode: every tiled window receives the full display frame, and the
-focused window is raised above the others. `Option+H` or `Option+K` focuses the previous tile;
-`Option+J` or `Option+L` focuses the next, wrapping through the workspace's stable tile order.
+focused window is raised above the others. Option-backtick focuses the next tiled window and wraps
+through the workspace's stable tile order; it provides the same ordering in split layouts.
 Command-backtick continues to use macOS's same-application window cycle, and Spaceman remembers the
 resulting focus. Press `Option+Shift+F` again to restore the unchanged split layout. Fullscreen Layout
 and its active tile survive workspace switches, native-tab physical-window replacement, and Spaceman
