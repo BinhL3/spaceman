@@ -9,7 +9,7 @@ import {
 import { useEffect, useId, useRef, useState } from "react";
 
 const DOWNLOAD_URL =
-  "https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.1-macos-arm64.zip";
+  "https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.2-macos-arm64.zip";
 
 type Rect = { x: number; y: number; w: number; h: number };
 
@@ -81,7 +81,7 @@ export function App() {
         >
           Download
         </a>
-        <p className="text-[13px] text-[#5c5d63]">v0.1.1 · macOS 14+ · Apple silicon</p>
+        <p className="text-[13px] text-[#5c5d63]">v0.1.2 · macOS 14+ · Apple silicon</p>
       </footer>
     </main>
   );

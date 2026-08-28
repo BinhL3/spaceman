@@ -29,7 +29,8 @@ focus when one of that workspace's windows is already focused; otherwise it focu
 tile.
 
 Fullscreen Layout is a workspace mode: every tiled window receives the full display frame, and the
-focused window is raised above the others. Option-backtick focuses the next tiled window and wraps
+focused window is raised above the others. Its menu-bar workspace glyph is filled while the mode is
+active. Option-backtick focuses the next tiled window and wraps
 through the workspace's stable tile order; it provides the same ordering in split layouts.
 Command-backtick continues to use macOS's same-application window cycle, and Spaceman remembers the
 resulting focus. Press `Option+Shift+F` again to restore the unchanged split layout. Fullscreen Layout
@@ -37,7 +38,7 @@ and its active tile survive workspace switches, native-tab physical-window repla
 restarts. `Option+/` exits Fullscreen Layout, toggles the preserved split axis, and immediately applies
 the resulting normal layout. Keyboard resize, balance, and tile reordering require leaving Fullscreen
 Layout first. Pointer dragging and resizing are ignored while the mode is active. Floating windows are
-not expanded.
+not expanded. Removing or moving away the workspace's final tiled window exits Fullscreen Layout.
 
 Dragging a managed tile over a sibling swaps it. Dropping near a tile edge can create a nested split;
 dropping onto another display can move it to that display's active workspace. Resizing a managed

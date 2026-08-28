@@ -245,7 +245,13 @@ impl WorkspaceState {
                 self.fullscreen_layout
                     .iter()
                     .enumerate()
-                    .filter(|(_, fullscreen_layout)| **fullscreen_layout)
+                    .filter(|(index, fullscreen_layout)| {
+                        **fullscreen_layout
+                            && self
+                                .slots
+                                .get(*index)
+                                .is_some_and(|slots| !slots.is_empty())
+                    })
                     .map(|(index, _)| WorkspaceId::from_index(index)),
             )
             .filter(|workspace| workspace.letter().is_some())
@@ -416,8 +422,11 @@ impl Workspaces {
                 .flatten()
                 .filter(|slot| self.has_slot(WorkspaceId::from_index(index), *slot));
             self.last_focused[index] = legacy_maximized.or(self.last_focused[index]);
-            self.fullscreen_layout[index] = fullscreen_layout.get(index).copied().unwrap_or(false)
-                || legacy_maximized.is_some();
+            self.set_fullscreen_layout(
+                WorkspaceId::from_index(index),
+                fullscreen_layout.get(index).copied().unwrap_or(false)
+                    || legacy_maximized.is_some(),
+            );
         }
     }
 
@@ -526,6 +535,7 @@ impl Workspaces {
         }
         target_engine.insert_slot(slot);
         self.owners.insert(window.clone(), target);
+        self.clear_fullscreen_layout_if_empty(source);
         Some(source)
     }
 
@@ -628,6 +638,7 @@ impl Workspaces {
         if self.last_focused[index].is_some_and(|slot| !self.has_slot(workspace, slot)) {
             self.last_focused[index] = None;
         }
+        self.clear_fullscreen_layout_if_empty(workspace);
     }
 
     pub fn forget_window(&mut self, workspace: WorkspaceId, window: &PhysicalWindowId) {
@@ -639,6 +650,7 @@ impl Workspaces {
             }
         }
         self.owners.remove(window);
+        self.clear_fullscreen_layout_if_empty(workspace);
     }
 
     pub(crate) fn remember_focus(&mut self, workspace: WorkspaceId, window: &PhysicalWindowId) {
@@ -657,7 +669,16 @@ impl Workspaces {
     }
 
     pub(crate) fn set_fullscreen_layout(&mut self, workspace: WorkspaceId, enabled: bool) {
-        self.fullscreen_layout[workspace.index()] = enabled;
+        self.fullscreen_layout[workspace.index()] =
+            enabled && !self.engine(workspace).model().workspace.slots.is_empty();
+    }
+
+    fn clear_fullscreen_layout_if_empty(&mut self, workspace: WorkspaceId) {
+        if self.fullscreen_layout[workspace.index()]
+            && self.engine(workspace).model().workspace.slots.is_empty()
+        {
+            self.fullscreen_layout[workspace.index()] = false;
+        }
     }
 
     fn has_slot(&self, workspace: WorkspaceId, slot: crate::SlotId) -> bool {
@@ -912,6 +933,38 @@ mod tests {
     }
 
     #[test]
+    fn persisted_empty_workspace_cannot_restore_fullscreen_layout() {
+        let mut state = Workspaces::default().state();
+        state.fullscreen_layout = vec![true];
+        let mut restored = Workspaces::default();
+
+        restored.restore(state);
+
+        assert!(!restored.uses_fullscreen_layout(WorkspaceId::ONE));
+    }
+
+    #[test]
+    fn fullscreen_layout_survives_until_the_final_slot_is_removed() {
+        let first = window(10);
+        let second = window(20);
+        let mut workspaces = Workspaces::default();
+        for (id, window) in [(1, &first), (2, &second)] {
+            workspaces.engine_mut(WorkspaceId::ONE).insert_slot(Slot {
+                id: SlotId(id),
+                weight: 1,
+                binding: BindingState::Bound(window.clone()),
+            });
+        }
+        workspaces.set_fullscreen_layout(WorkspaceId::ONE, true);
+
+        workspaces.forget_window(WorkspaceId::ONE, &first);
+        assert!(workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
+        workspaces.forget_window(WorkspaceId::ONE, &second);
+
+        assert!(!workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
+    }
+
+    #[test]
     fn legacy_maximize_intent_migrates_to_fullscreen_layout() {
         let first = window(10);
         let state = serde_json::json!({
@@ -1126,6 +1179,7 @@ mod tests {
             binding: BindingState::Bound(window.clone()),
         };
         workspaces.engine_mut(WorkspaceId::ONE).insert_slot(slot);
+        workspaces.set_fullscreen_layout(WorkspaceId::ONE, true);
 
         assert_eq!(
             workspaces.move_window(&window, WorkspaceId::new(3).unwrap()),
@@ -1139,6 +1193,7 @@ mod tests {
                 .slots
                 .is_empty()
         );
+        assert!(!workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
         let moved = &workspaces
             .engine(WorkspaceId::new(3).unwrap())
             .model()

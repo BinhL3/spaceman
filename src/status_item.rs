@@ -13,6 +13,25 @@ use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSSt
 
 use crate::{app::Action, login_item};
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WorkspaceLayout {
+    pub(crate) workspace: String,
+    pub(crate) mode: WorkspaceLayoutMode,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum WorkspaceLayoutMode {
+    Split(Vec<crate::Rect>),
+    Fullscreen,
+}
+
+pub(crate) const WORKSPACE_PREVIEW: crate::Rect = crate::Rect {
+    x: 0,
+    y: 0,
+    width: 1500,
+    height: 1100,
+};
+
 struct TargetIvars {
     actions: Sender<Action>,
 }
@@ -70,7 +89,7 @@ struct Controller {
     launch_at_login: Retained<NSMenuItem>,
     status_title: String,
     workspace_title: String,
-    workspace_layouts: Vec<(String, Vec<crate::Rect>)>,
+    workspace_layouts: Vec<WorkspaceLayout>,
 }
 
 thread_local! {
@@ -211,7 +230,7 @@ pub fn set_workspace_numbers(workspaces: &[u8]) {
     });
 }
 
-pub fn set_workspace_layouts(layouts: &[(String, Vec<crate::Rect>)]) {
+pub fn set_workspace_layouts(layouts: &[WorkspaceLayout]) {
     CONTROLLER.with(|controller| {
         let mut controller = controller.borrow_mut();
         if let Some(controller) = controller.as_mut()
@@ -226,10 +245,10 @@ pub fn set_workspace_layouts(layouts: &[(String, Vec<crate::Rect>)]) {
     });
 }
 
-fn workspace_layout_image(layouts: &[(String, Vec<crate::Rect>)]) -> Retained<NSImage> {
+fn workspace_layout_image(layouts: &[WorkspaceLayout]) -> Retained<NSImage> {
     let labels = layouts
         .iter()
-        .map(|(workspace, _)| NSString::from_str(workspace))
+        .map(|layout| NSString::from_str(&layout.workspace))
         .collect::<Vec<_>>();
     let label_widths = labels
         .iter()
@@ -250,34 +269,39 @@ fn workspace_layout_image(layouts: &[(String, Vec<crate::Rect>)]) -> Retained<NS
 }
 
 fn draw_workspace_layouts(
-    layouts: &[(String, Vec<crate::Rect>)],
+    layouts: &[WorkspaceLayout],
     labels: &[Retained<NSString>],
     label_widths: &[f64],
 ) {
     NSColor::blackColor().setStroke();
     NSColor::blackColor().setFill();
     let mut x = 0.5;
-    for (((_, tiles), label), label_width) in
+    for ((layout, label), label_width) in
         layouts.iter().zip(labels).zip(label_widths.iter().copied())
     {
         let frame = NSRect::new(NSPoint::new(x, 2.5), NSSize::new(15.0, 11.0));
         let outline = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(frame, 2.5, 2.5);
-        outline.setLineWidth(1.25);
-        outline.stroke();
-        for tile in tiles {
-            let tile = NSRect::new(
-                NSPoint::new(
-                    x + f64::from(tile.x) / 1500.0 * 15.0,
-                    2.5 + f64::from(tile.y) / 1100.0 * 11.0,
-                ),
-                NSSize::new(
-                    f64::from(tile.width) / 1500.0 * 15.0,
-                    f64::from(tile.height) / 1100.0 * 11.0,
-                ),
-            );
-            let tile = NSBezierPath::bezierPathWithRect(tile);
-            tile.setLineWidth(0.75);
-            tile.stroke();
+        match &layout.mode {
+            WorkspaceLayoutMode::Fullscreen => outline.fill(),
+            WorkspaceLayoutMode::Split(tiles) => {
+                outline.setLineWidth(1.25);
+                outline.stroke();
+                for tile in tiles {
+                    let tile = NSRect::new(
+                        NSPoint::new(
+                            x + f64::from(tile.x) / f64::from(WORKSPACE_PREVIEW.width) * 15.0,
+                            2.5 + f64::from(tile.y) / f64::from(WORKSPACE_PREVIEW.height) * 11.0,
+                        ),
+                        NSSize::new(
+                            f64::from(tile.width) / f64::from(WORKSPACE_PREVIEW.width) * 15.0,
+                            f64::from(tile.height) / f64::from(WORKSPACE_PREVIEW.height) * 11.0,
+                        ),
+                    );
+                    let tile = NSBezierPath::bezierPathWithRect(tile);
+                    tile.setLineWidth(0.75);
+                    tile.stroke();
+                }
+            }
         }
         unsafe { label.drawAtPoint_withAttributes(NSPoint::new(x + 19.0, 0.5), None) };
         x += 24.0 + label_width;

@@ -250,7 +250,7 @@ const fn exit_restore_plan(_intent: ExitIntent, worker_busy: bool) -> RestorePla
 
 struct CycleStatus {
     active: Vec<WorkspaceId>,
-    layouts: Vec<(String, Vec<crate::Rect>)>,
+    layouts: Vec<status_item::WorkspaceLayout>,
     failed: usize,
 }
 
@@ -2097,6 +2097,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             );
             self.workspaces.own_floating(window.clone(), target);
         } else if let Some(source) = self.workspaces.move_window(window, target) {
+            self.clear_fullscreen_restore_if_inactive(source);
             self.clear_relocation_evidence(source, target, window);
             log_event!(
                 "heal: re-home tiled {:?} workspace {} -> {}",
@@ -2242,6 +2243,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .collect();
         let mut routed_targets = HashSet::new();
         for (window, target) in &routes {
+            let source_fullscreen = self.workspaces.uses_fullscreen_layout(workspace);
             if self.workspaces.move_window(window, *target).is_none() {
                 continue;
             }
@@ -2252,6 +2254,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     macos::ApplyOutcome::Gone => self.forget_window(*target, window),
                     _ => {
                         let _ = self.workspaces.move_window(window, workspace);
+                        self.workspaces
+                            .set_fullscreen_layout(workspace, source_fullscreen);
                         counts.failed += 1;
                         continue;
                     }
@@ -2260,8 +2264,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             routed_targets.insert(*target);
         }
         self.workspaces.refresh_ownership(workspace);
+        self.clear_fullscreen_restore_if_inactive(workspace);
         for target in &routed_targets {
             self.workspaces.refresh_ownership(*target);
+            self.clear_fullscreen_restore_if_inactive(*target);
         }
         let bound: HashSet<_> = self
             .workspaces
@@ -2682,6 +2688,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         self.workspaces
             .move_window(&window, target)
             .ok_or("Window could not be moved")?;
+        self.clear_fullscreen_restore_if_inactive(source);
         self.clear_relocation_evidence(source, target, &window);
         if !target_is_active {
             self.suppressed_focus = Some(window.clone());
@@ -3481,11 +3488,18 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
 
     fn forget_window(&mut self, workspace: WorkspaceId, window: &crate::PhysicalWindowId) {
         self.workspaces.forget_window(workspace, window);
+        self.clear_fullscreen_restore_if_inactive(workspace);
         self.workspaces.forget_floating(window);
         self.constrained[workspace.index()].remove(window);
         self.recently_parked.remove(window);
         self.recent_heals.remove(window);
         self.repark_attempts.remove(window);
+    }
+
+    fn clear_fullscreen_restore_if_inactive(&mut self, workspace: WorkspaceId) {
+        if !self.workspaces.uses_fullscreen_layout(workspace) {
+            self.pending_fullscreen_focus_restore.remove(&workspace);
+        }
     }
 
     fn apply_fullscreen_layout(
@@ -3701,18 +3715,17 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             layouts: active
                 .iter()
                 .map(|workspace| {
-                    (
-                        workspace.to_string(),
-                        self.preview_layout(
-                            *workspace,
-                            crate::Rect {
-                                x: 0,
-                                y: 0,
-                                width: 1500,
-                                height: 1100,
-                            },
-                        ),
-                    )
+                    let mode = if self.workspaces.uses_fullscreen_layout(*workspace) {
+                        status_item::WorkspaceLayoutMode::Fullscreen
+                    } else {
+                        status_item::WorkspaceLayoutMode::Split(
+                            self.preview_layout(*workspace, status_item::WORKSPACE_PREVIEW),
+                        )
+                    };
+                    status_item::WorkspaceLayout {
+                        workspace: workspace.to_string(),
+                        mode,
+                    }
                 })
                 .collect(),
             active,
@@ -5849,29 +5862,73 @@ mod tests {
         bind(&mut runtime, WorkspaceId::ONE, &second);
         let outputs = outputs();
 
-        runtime
+        let status = runtime
             .toggle_fullscreen_layout(outputs.clone(), &AtomicBool::new(false))
             .unwrap();
 
         assert_eq!(runtime.backend.frames[&first], outputs.main().frame);
         assert_eq!(runtime.backend.frames[&second], outputs.main().frame);
         assert!(runtime.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
+        assert!(matches!(
+            status.layouts[0].mode,
+            status_item::WorkspaceLayoutMode::Fullscreen
+        ));
         assert_eq!(
             runtime.workspaces.engine(WorkspaceId::ONE).bound_windows(),
             vec![first.clone(), second.clone()]
         );
 
-        runtime
+        let status = runtime
             .toggle_fullscreen_layout(outputs, &AtomicBool::new(false))
             .unwrap();
 
         assert_eq!(runtime.backend.frames[&first].width, 500);
         assert_eq!(runtime.backend.frames[&second].x, 500);
         assert!(!runtime.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
+        assert!(matches!(
+            status.layouts[0].mode,
+            status_item::WorkspaceLayoutMode::Split(_)
+        ));
         assert_eq!(
             runtime.workspaces.engine(WorkspaceId::ONE).bound_windows(),
             vec![first, second]
         );
+    }
+
+    #[test]
+    fn removing_the_last_window_exits_fullscreen_layout() {
+        let window = window(10);
+        let mut backend = FakeBackend {
+            focused: Some(window.clone()),
+            observation: Some(observation(&window, frame(50))),
+            ..FakeBackend::default()
+        };
+        backend.frames.insert(window.clone(), frame(50));
+        let mut runtime = runtime(backend);
+        let outputs = outputs();
+        let cancelled = AtomicBool::new(false);
+        runtime.cycle(outputs.clone(), &cancelled).unwrap();
+        runtime
+            .toggle_fullscreen_layout(outputs.clone(), &cancelled)
+            .unwrap();
+        runtime
+            .pending_fullscreen_focus_restore
+            .insert(WorkspaceId::ONE);
+
+        runtime.backend.frames.remove(&window);
+        runtime.backend.observation = Some(crate::NativeObservation {
+            cycle: 0,
+            mouse_down: false,
+            applications: Vec::new(),
+        });
+        let status = runtime.cycle(outputs, &cancelled).unwrap();
+
+        assert!(!runtime.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
+        assert!(runtime.pending_fullscreen_focus_restore.is_empty());
+        assert!(matches!(
+            status.layouts[0].mode,
+            status_item::WorkspaceLayoutMode::Split(_)
+        ));
     }
 
     #[test]
