@@ -17,15 +17,25 @@ fails after the old registrations are released, it pauses and reports `Hotkeys u
 | `Option+Shift+H/J/K/L` | Move the focused tile in that direction |
 | `Option+/` | Toggle the active workspace layout's root horizontal/vertical axis |
 | `Option+-` / `Option+=` | Shrink/grow the focused tile by 50 pixels at its immediate split |
-| `Option+Shift+F` | Toggle maximize without entering native fullscreen |
+| `Option+Shift+F` | Toggle the workspace-wide Fullscreen Layout without entering native fullscreen |
 
 Named workspace shortcuts are registered only when referenced by config. If a configured letter
 overlaps a built-in shortcut, the workspace shortcut takes precedence.
 
 Spaceman remembers the last-focused logical tile in each workspace and restores that focus when the
-workspace becomes active again. Pressing an already-active workspace shortcut focuses that tile too.
-Maximize intent survives workspace switches, native-tab physical-window replacement, and Spaceman
-restarts.
+workspace becomes active again. Pressing an already-active workspace shortcut preserves the current
+focus when one of that workspace's windows is already focused; otherwise it focuses the remembered
+tile.
+
+Fullscreen Layout is a workspace mode: every tiled window receives the full display frame, and the
+focused window is raised above the others. `Option+H` or `Option+K` focuses the previous tile;
+`Option+J` or `Option+L` focuses the next, wrapping through the workspace's stable tile order.
+Command-backtick continues to use macOS's same-application window cycle, and Spaceman remembers the
+resulting focus. Press `Option+Shift+F` again to restore the unchanged split layout. Fullscreen Layout
+and its active tile survive workspace switches, native-tab physical-window replacement, and Spaceman
+restarts. Split-axis changes, keyboard resize, and balance require leaving Fullscreen Layout first;
+tile reordering also requires leaving it. Pointer dragging and resizing are ignored while the mode is
+active. Floating windows are not expanded.
 
 Dragging a managed tile over a sibling swaps it. Dropping near a tile edge can create a nested split;
 dropping onto another display can move it to that display's active workspace. Resizing a managed
@@ -80,9 +90,10 @@ Directions are `left`, `down`, `up`, and `right`. `balance` equalizes the focuse
 split while respecting nested minimum sizes. `hud` repeatedly renders sanitized runtime geometry in
 the terminal until interrupted.
 
-`ctl debug` excludes window titles. It reports tiled geometry plus floating-window workspace, parked
-state, and original recovery frame so workspace leaks can be diagnosed safely. Its `ignored` list
-names quarantined windows that un-parked themselves repeatedly and are left unmanaged.
+`ctl debug` excludes window titles. It reports each display's Fullscreen Layout state and tiled
+geometry plus floating-window workspace, parked state, and original recovery frame so workspace leaks
+can be diagnosed safely. Its `ignored` list names quarantined windows that un-parked themselves
+repeatedly and are left unmanaged.
 
 The agent listens at `~/Library/Application Support/Spaceman/control.sock`; both socket and lock file
 are mode `0600`. Requests are newline-delimited, limited to 4 KiB, and served locally over a Unix

@@ -812,20 +812,7 @@ pub fn frontmost_application() -> Option<AppInstanceId> {
 }
 
 pub fn focus_window(id: &PhysicalWindowId) -> bool {
-    let raised = with_managed_window(id, |window| {
-        let _ = unsafe {
-            window.set_attribute_value(
-                &CFString::from_static_str("AXFocused"),
-                CFBoolean::new(true),
-            )
-        };
-        (unsafe { window.perform_action(&CFString::from_static_str("AXRaise")) })
-            == AXError::Success
-    })
-    .unwrap_or(false);
-    if !raised {
-        evict_managed_window(id);
-    }
+    let raised = raise_window_with_focus(id, true);
     let running = NSWorkspace::sharedWorkspace().runningApplications();
     let activated = (0..running.count()).any(|index| {
         let application = running.objectAtIndex(index);
@@ -834,6 +821,30 @@ pub fn focus_window(id: &PhysicalWindowId) -> bool {
             && application.activateWithOptions(NSApplicationActivationOptions::empty())
     });
     raised && activated
+}
+
+pub fn raise_window(id: &PhysicalWindowId) -> bool {
+    raise_window_with_focus(id, false)
+}
+
+fn raise_window_with_focus(id: &PhysicalWindowId, focus: bool) -> bool {
+    let raised = with_managed_window(id, |window| {
+        if focus {
+            let _ = unsafe {
+                window.set_attribute_value(
+                    &CFString::from_static_str("AXFocused"),
+                    CFBoolean::new(true),
+                )
+            };
+        }
+        (unsafe { window.perform_action(&CFString::from_static_str("AXRaise")) })
+            == AXError::Success
+    })
+    .unwrap_or(false);
+    if !raised {
+        evict_managed_window(id);
+    }
+    raised
 }
 
 fn apply_window(

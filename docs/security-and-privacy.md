@@ -32,7 +32,7 @@ Local files live under `~/Library/Application Support/Spaceman/`:
 
 - `config.toml`: user-authored configuration;
 - `workspace-state.json`: active workspace selectors, previous-workspace history, logical slots,
-  last-focused and maximized slot intent, floating-window ownership, and layout trees;
+  last-focused tile intent, Fullscreen Layout state, floating-window ownership, and layout trees;
 - `parked-windows.json`: physical process/window identifiers and original frames needed for recovery;
 - `agent.log`: timestamped diagnostic events (switches, parking, restoration, ownership changes) with
   process/window identifiers and frames, never window titles; mode `0600`, discarded past 5 MB at the

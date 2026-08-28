@@ -32,7 +32,8 @@ This file is the current engineering contract. README and `docs/` describe curre
 ## Product Invariants
 
 - A logical slot is product identity; a physical `AXWindow` binding is replaceable evidence.
-- Native-tab replacement preserves slot, order, weight, nested layout, workspace, and maximize intent.
+- Native-tab replacement preserves slot, order, weight, nested layout, workspace, Fullscreen Layout,
+  and active-tile intent.
 - Incomplete or timed-out observations never prove absence. Ambiguous native-tab evidence preserves
   bindings during its bounded settling window; only repeated complete observations may retire an
   unresolved binding under the tested reconciliation policy.

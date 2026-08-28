@@ -59,7 +59,7 @@ spaceman ctl status   # healthy: "mode":"automatic" and "busy":false
 | `Option+Shift+H/J/K/L` | Move the focused tile |
 | `Option+/` | Toggle the root split axis |
 | `Option+-`, `Option+=` | Shrink/grow the focused tile |
-| `Option+Shift+F` | Toggle maximize |
+| `Option+Shift+F` | Toggle workspace-wide Fullscreen Layout |
 
 CLI: `spaceman ctl switch 2`, `ctl move 7`, `ctl back-and-forth`, `ctl layout`, `ctl balance`,
 `ctl pause`, `ctl resume`.

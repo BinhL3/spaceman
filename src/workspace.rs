@@ -152,6 +152,10 @@ pub(crate) struct WorkspaceState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     last_focused: Vec<Option<crate::SlotId>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    fullscreen_layout: Vec<bool>,
+    /// Legacy per-window maximize intent. A populated entry migrates the
+    /// workspace into fullscreen layout mode.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     maximized: Vec<Option<crate::SlotId>>,
 }
 
@@ -161,6 +165,7 @@ impl WorkspaceState {
             || self.layouts.len() > WorkspaceId::COUNT
             || self.axes.len() > WorkspaceId::COUNT
             || self.last_focused.len() > WorkspaceId::COUNT
+            || self.fullscreen_layout.len() > WorkspaceId::COUNT
             || self.maximized.len() > WorkspaceId::COUNT
         {
             return Err("workspace state contains more than 36 workspaces".into());
@@ -236,6 +241,13 @@ impl WorkspaceState {
             .chain(&self.previous)
             .map(|(_, workspace)| *workspace)
             .chain(self.floating.iter().map(|(_, workspace)| *workspace))
+            .chain(
+                self.fullscreen_layout
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, fullscreen_layout)| **fullscreen_layout)
+                    .map(|(index, _)| WorkspaceId::from_index(index)),
+            )
             .filter(|workspace| workspace.letter().is_some())
             .collect::<HashSet<_>>();
         for (index, slots) in self.slots.iter().enumerate() {
@@ -278,7 +290,7 @@ pub struct Workspaces {
     floating_owners: HashMap<PhysicalWindowId, WorkspaceId>,
     enabled: HashSet<WorkspaceId>,
     last_focused: [Option<crate::SlotId>; WorkspaceId::COUNT],
-    maximized: [Option<crate::SlotId>; WorkspaceId::COUNT],
+    fullscreen_layout: [bool; WorkspaceId::COUNT],
 }
 
 impl Default for Workspaces {
@@ -301,7 +313,7 @@ impl Default for Workspaces {
             floating_owners: HashMap::new(),
             enabled: WorkspaceId::numbered().collect(),
             last_focused: std::array::from_fn(|_| None),
-            maximized: std::array::from_fn(|_| None),
+            fullscreen_layout: [false; WorkspaceId::COUNT],
         }
     }
 }
@@ -344,7 +356,8 @@ impl Workspaces {
                 floating
             },
             last_focused: trimmed_intents(&self.last_focused),
-            maximized: trimmed_intents(&self.maximized),
+            fullscreen_layout: trimmed_flags(&self.fullscreen_layout),
+            maximized: Vec::new(),
         }
     }
 
@@ -358,6 +371,7 @@ impl Workspaces {
             slots,
             floating,
             last_focused,
+            fullscreen_layout,
             maximized,
         } = state;
         for (index, slots) in slots.into_iter().take(WorkspaceId::COUNT).enumerate() {
@@ -395,9 +409,17 @@ impl Workspaces {
             self.last_focused[index] =
                 slot.filter(|slot| self.has_slot(WorkspaceId::from_index(index), *slot));
         }
-        for (index, slot) in maximized.into_iter().enumerate() {
-            self.maximized[index] =
-                slot.filter(|slot| self.has_slot(WorkspaceId::from_index(index), *slot));
+        for index in 0..WorkspaceId::COUNT {
+            let legacy_maximized = maximized
+                .get(index)
+                .copied()
+                .flatten()
+                .filter(|slot| self.has_slot(WorkspaceId::from_index(index), *slot));
+            if self.last_focused[index].is_none() {
+                self.last_focused[index] = legacy_maximized;
+            }
+            self.fullscreen_layout[index] = fullscreen_layout.get(index).copied().unwrap_or(false)
+                || legacy_maximized.is_some();
         }
     }
 
@@ -504,9 +526,6 @@ impl Workspaces {
         if self.last_focused[source_index] == Some(slot.id) {
             self.last_focused[source_index] = None;
         }
-        if self.maximized[source_index] == Some(slot.id) {
-            self.maximized[source_index] = None;
-        }
         target_engine.insert_slot(slot);
         self.owners.insert(window.clone(), target);
         Some(source)
@@ -611,9 +630,6 @@ impl Workspaces {
         if self.last_focused[index].is_some_and(|slot| !self.has_slot(workspace, slot)) {
             self.last_focused[index] = None;
         }
-        if self.maximized[index].is_some_and(|slot| !self.has_slot(workspace, slot)) {
-            self.maximized[index] = None;
-        }
     }
 
     pub fn forget_window(&mut self, workspace: WorkspaceId, window: &PhysicalWindowId) {
@@ -622,9 +638,6 @@ impl Workspaces {
             let index = workspace.index();
             if self.last_focused[index] == Some(slot.id) {
                 self.last_focused[index] = None;
-            }
-            if self.maximized[index] == Some(slot.id) {
-                self.maximized[index] = None;
             }
         }
         self.owners.remove(window);
@@ -636,26 +649,25 @@ impl Workspaces {
 
     pub(crate) fn preferred_focus(&self, workspace: WorkspaceId) -> Option<PhysicalWindowId> {
         let index = workspace.index();
-        self.maximized[index]
-            .or(self.last_focused[index])
+        self.last_focused[index]
             .and_then(|slot| self.window_for_slot(workspace, slot))
             .cloned()
     }
 
-    pub(crate) fn maximized_window(&self, workspace: WorkspaceId) -> Option<&PhysicalWindowId> {
-        self.maximized[workspace.index()].and_then(|slot| self.window_for_slot(workspace, slot))
+    pub(crate) fn uses_fullscreen_layout(&self, workspace: WorkspaceId) -> bool {
+        self.fullscreen_layout[workspace.index()]
     }
 
-    pub(crate) fn toggle_maximize(
+    pub(crate) fn toggle_fullscreen_layout(
         &mut self,
         workspace: WorkspaceId,
         window: &PhysicalWindowId,
     ) -> bool {
-        let Some(slot) = self.engine(workspace).slot_for_window(window) else {
+        if self.engine(workspace).slot_for_window(window).is_none() {
             return false;
-        };
-        let maximized = &mut self.maximized[workspace.index()];
-        *maximized = (*maximized != Some(slot)).then_some(slot);
+        }
+        let fullscreen_layout = &mut self.fullscreen_layout[workspace.index()];
+        *fullscreen_layout = !*fullscreen_layout;
         true
     }
 
@@ -705,6 +717,14 @@ fn trimmed_intents(
         .rposition(Option::is_some)
         .map_or(0, |index| index + 1);
     intents[..length].to_vec()
+}
+
+fn trimmed_flags(flags: &[bool; WorkspaceId::COUNT]) -> Vec<bool> {
+    let length = flags
+        .iter()
+        .rposition(|fullscreen_layout| *fullscreen_layout)
+        .map_or(0, |index| index + 1);
+    flags[..length].to_vec()
 }
 
 #[cfg(test)]
@@ -872,7 +892,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_state_restores_focus_and_maximize_intent_by_slot() {
+    fn persisted_state_restores_focus_and_fullscreen_layout() {
         let first = window(10);
         let second = window(20);
         let mut workspaces = Workspaces::default();
@@ -885,10 +905,12 @@ mod tests {
         }
         workspaces.refresh_ownership(WorkspaceId::ONE);
         workspaces.remember_focus(WorkspaceId::ONE, &second);
-        assert!(workspaces.toggle_maximize(WorkspaceId::ONE, &second));
+        assert!(workspaces.toggle_fullscreen_layout(WorkspaceId::ONE, &second));
 
-        let encoded = serde_json::to_vec(&workspaces.state()).unwrap();
-        let state: WorkspaceState = serde_json::from_slice(&encoded).unwrap();
+        let encoded = serde_json::to_value(workspaces.state()).unwrap();
+        assert_eq!(encoded["fullscreen_layout"], serde_json::json!([true]));
+        assert!(encoded.get("maximized").is_none());
+        let state: WorkspaceState = serde_json::from_value(encoded).unwrap();
         state.validate().unwrap();
         let mut restored = Workspaces::default();
         restored.restore(state);
@@ -897,7 +919,43 @@ mod tests {
             restored.preferred_focus(WorkspaceId::ONE),
             Some(second.clone())
         );
-        assert_eq!(restored.maximized_window(WorkspaceId::ONE), Some(&second));
+        assert!(restored.uses_fullscreen_layout(WorkspaceId::ONE));
+    }
+
+    #[test]
+    fn legacy_maximize_intent_migrates_to_fullscreen_layout() {
+        let second = window(20);
+        let state = serde_json::json!({
+            "active": [],
+            "slots": [[
+                {
+                    "id": 7,
+                    "weight": 1,
+                    "binding": {
+                        "state": "bound",
+                        "app": { "pid": 1, "launched_at": 1 },
+                        "window_id": 10
+                    }
+                },
+                {
+                    "id": 8,
+                    "weight": 1,
+                    "binding": {
+                        "state": "bound",
+                        "app": { "pid": 1, "launched_at": 1 },
+                        "window_id": 20
+                    }
+                }
+            ]],
+            "last_focused": [8],
+            "maximized": [7]
+        });
+        let mut workspaces = Workspaces::default();
+
+        workspaces.restore(serde_json::from_value(state).unwrap());
+
+        assert!(workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
+        assert_eq!(workspaces.preferred_focus(WorkspaceId::ONE), Some(second));
     }
 
     #[test]

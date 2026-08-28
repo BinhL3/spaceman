@@ -152,7 +152,7 @@ impl HotkeyPlan {
                 LogicalKey::Character('f'),
                 OPTION_KEY | SHIFT_KEY,
                 103,
-                "toggle maximize",
+                "toggle fullscreen layout",
             ),
             (LogicalKey::Character('/'), OPTION_KEY, 108, "toggle layout"),
             (
@@ -328,7 +328,7 @@ unsafe extern "C" fn hotkey_handler(
 
 fn decode_action(id: u32) -> Option<Action> {
     if id == 103 {
-        return Some(Action::ToggleMaximize);
+        return Some(Action::ToggleFullscreenLayout);
     }
     if id == 108 {
         return Some(Action::ToggleLayout);
@@ -408,7 +408,10 @@ mod tests {
             decode_action(1),
             Some(Action::SwitchWorkspace(id)) if id.number() == Some(1)
         ));
-        assert!(matches!(decode_action(103), Some(Action::ToggleMaximize)));
+        assert!(matches!(
+            decode_action(103),
+            Some(Action::ToggleFullscreenLayout)
+        ));
         assert!(matches!(decode_action(108), Some(Action::ToggleLayout)));
         assert!(matches!(
             decode_action(109),

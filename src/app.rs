@@ -129,7 +129,7 @@ pub(crate) enum Action {
     ToggleLayout,
     Resize(ResizeDirection),
     Balance,
-    ToggleMaximize,
+    ToggleFullscreenLayout,
     OpenSettings,
     OpenAccessibility,
     CheckForUpdates,
@@ -152,7 +152,7 @@ enum WorkerAction {
     ToggleLayout,
     Resize(ResizeDirection),
     Balance,
-    ToggleMaximize,
+    ToggleFullscreenLayout,
 }
 
 impl TryFrom<Action> for WorkerAction {
@@ -170,7 +170,7 @@ impl TryFrom<Action> for WorkerAction {
             Action::ToggleLayout => Ok(Self::ToggleLayout),
             Action::Resize(direction) => Ok(Self::Resize(direction)),
             Action::Balance => Ok(Self::Balance),
-            Action::ToggleMaximize => Ok(Self::ToggleMaximize),
+            Action::ToggleFullscreenLayout => Ok(Self::ToggleFullscreenLayout),
             Action::ToggleAutomatic
             | Action::OpenSettings
             | Action::OpenAccessibility
@@ -207,7 +207,7 @@ enum WorkerCommand {
     ToggleLayout(macos::DisplayOutputs),
     Resize(ResizeDirection, macos::DisplayOutputs),
     Balance(macos::DisplayOutputs),
-    ToggleMaximize(macos::DisplayOutputs),
+    ToggleFullscreenLayout(macos::DisplayOutputs),
     RestoreAll,
     Stop,
 }
@@ -278,6 +278,7 @@ struct DebugDisplay {
     frame: crate::Rect,
     workspace: WorkspaceId,
     axis: crate::Axis,
+    fullscreen_layout: bool,
     layout: Vec<crate::Rect>,
 }
 
@@ -366,6 +367,7 @@ trait WorkspaceBackend {
     ) -> macos::ApplyOutcome;
     fn focused_window(&mut self) -> Option<crate::PhysicalWindowId>;
     fn frontmost_application(&mut self) -> Option<AppInstanceId>;
+    fn raise_window(&mut self, window: &crate::PhysicalWindowId) -> bool;
     fn focus_window(&mut self, window: &crate::PhysicalWindowId) -> bool;
     fn apply_managed(
         &mut self,
@@ -434,6 +436,10 @@ impl WorkspaceBackend for MacWorkspaceBackend {
 
     fn frontmost_application(&mut self) -> Option<AppInstanceId> {
         macos::frontmost_application()
+    }
+
+    fn raise_window(&mut self, window: &crate::PhysicalWindowId) -> bool {
+        macos::raise_window(window)
     }
 
     fn focus_window(&mut self, window: &crate::PhysicalWindowId) -> bool {
@@ -1358,7 +1364,7 @@ fn send_worker_action(
             WorkerAction::ToggleLayout => WorkerCommand::ToggleLayout(outputs),
             WorkerAction::Resize(direction) => WorkerCommand::Resize(direction, outputs),
             WorkerAction::Balance => WorkerCommand::Balance(outputs),
-            WorkerAction::ToggleMaximize => WorkerCommand::ToggleMaximize(outputs),
+            WorkerAction::ToggleFullscreenLayout => WorkerCommand::ToggleFullscreenLayout(outputs),
         },
         worker_busy,
     );
@@ -1533,9 +1539,9 @@ fn spawn_worker(
                         debug: Box::new(runtime.debug_state(&debug_outputs)),
                     }
                 }
-                WorkerCommand::ToggleMaximize(outputs) => {
+                WorkerCommand::ToggleFullscreenLayout(outputs) => {
                     let debug_outputs = outputs.clone();
-                    let result = runtime.toggle_maximize(outputs, &cancelled);
+                    let result = runtime.toggle_fullscreen_layout(outputs, &cancelled);
                     WorkerResult::Status {
                         result,
                         debug: Box::new(runtime.debug_state(&debug_outputs)),
@@ -1575,6 +1581,7 @@ struct WorkspaceRuntime<B = MacWorkspaceBackend> {
     config: Config,
     foreground_lanes: HashMap<String, DisplaySelector>,
     suppressed_focus: Option<crate::PhysicalWindowId>,
+    pending_fullscreen_focus_restore: HashSet<WorkspaceId>,
     persisted_workspace_state: crate::workspace::WorkspaceState,
 }
 
@@ -1616,11 +1623,22 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         config: Config,
         workspace_state: Option<crate::workspace::WorkspaceState>,
     ) -> Self {
+        let restored_workspace_state = workspace_state.is_some();
         let mut workspaces = Workspaces::default();
         config.configure_workspaces(&mut workspaces);
         if let Some(state) = workspace_state {
             workspaces.restore(state);
         }
+        let pending_fullscreen_focus_restore = if restored_workspace_state {
+            WorkspaceId::all()
+                .filter(|workspace| {
+                    workspaces.uses_fullscreen_layout(*workspace)
+                        && scope.manages_selector(workspaces.assignment(*workspace))
+                })
+                .collect()
+        } else {
+            HashSet::new()
+        };
         let persisted_workspace_state = workspaces.state();
         Self {
             backend,
@@ -1636,6 +1654,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             config,
             foreground_lanes: HashMap::new(),
             suppressed_focus: None,
+            pending_fullscreen_focus_restore,
             persisted_workspace_state,
         }
     }
@@ -1812,6 +1831,42 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 cancelled,
                 &mut counts,
             )?;
+        }
+        let mut attempted_focus_restore = HashSet::new();
+        for resolved in &visible {
+            if !self
+                .pending_fullscreen_focus_restore
+                .contains(&resolved.workspace)
+            {
+                continue;
+            }
+            attempted_focus_restore.insert(resolved.workspace);
+            let Some(window) = self.workspaces.preferred_focus(resolved.workspace) else {
+                self.pending_fullscreen_focus_restore
+                    .remove(&resolved.workspace);
+                continue;
+            };
+            let restored = if focus_workspace == Some(resolved.workspace) {
+                self.backend.focus_window(&window)
+            } else {
+                self.backend.raise_window(&window)
+            };
+            self.pending_fullscreen_focus_restore
+                .remove(&resolved.workspace);
+            if !restored {
+                counts.failed += 1;
+            }
+        }
+        if focused_is_frontmost
+            && let Some(focused) = focused.as_ref()
+            && let Some(workspace) = self.workspaces.workspace_of(focused)
+            && self.workspaces.uses_fullscreen_layout(workspace)
+            && !attempted_focus_restore.contains(&workspace)
+            && visible
+                .iter()
+                .any(|resolved| resolved.workspace == workspace)
+        {
+            self.workspaces.remember_focus(workspace, focused);
         }
         self.persist_workspace_state_if_changed()?;
         Ok(self.status_for_visible(counts.applied, counts.failed, &visible))
@@ -2167,7 +2222,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         } else {
             self.workspaces.engine(workspace).placements(&settings)
         };
-        self.apply_maximize(workspace, &mut placements, output);
+        self.apply_fullscreen_layout(workspace, &mut placements, output);
         if filter_unchanged {
             placements.retain(|placement| {
                 placement
@@ -2243,15 +2298,25 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if previous == workspace {
             let focused = self.backend.focused_window();
             let windows = self.workspaces.windows(workspace);
+            if let Some(focused) = focused.as_ref().filter(|focused| windows.contains(focused)) {
+                if self.workspaces.workspace_of(focused) == Some(workspace) {
+                    self.workspaces.remember_focus(workspace, focused);
+                    self.pending_fullscreen_focus_restore.remove(&workspace);
+                    self.persist_workspace_state_if_changed()?;
+                }
+                return Ok(self.status(0, 0, &outputs));
+            }
             let workspace_focus = self
                 .workspaces
                 .preferred_focus(workspace)
                 .filter(|window| windows.contains(window))
                 .or_else(|| windows.first().cloned());
             if let Some(window) = workspace_focus {
-                self.suppressed_focus = (!self.backend.focus_window(&window))
-                    .then_some(focused)
-                    .flatten();
+                let focused_window = self.backend.focus_window(&window);
+                if focused_window {
+                    self.pending_fullscreen_focus_restore.remove(&workspace);
+                }
+                self.suppressed_focus = (!focused_window).then_some(focused).flatten();
             } else {
                 self.suppressed_focus = focused;
             }
@@ -2354,9 +2419,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .filter(|window| incoming.contains(window))
             .or_else(|| incoming.first().cloned());
         if let Some(window) = incoming_focus {
-            self.suppressed_focus = (!self.backend.focus_window(&window))
-                .then_some(outgoing_focus)
-                .flatten();
+            let focused_window = self.backend.focus_window(&window);
+            if focused_window {
+                self.pending_fullscreen_focus_restore.remove(&workspace);
+            }
+            self.suppressed_focus = (!focused_window).then_some(outgoing_focus).flatten();
         } else {
             self.suppressed_focus = outgoing_focus;
         }
@@ -2608,6 +2675,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if !self.is_visible(workspace, &outputs) {
             return Err("Focused window is not on an active workspace".into());
         }
+        if self.workspaces.uses_fullscreen_layout(workspace) {
+            return Err("Exit Fullscreen Layout before reordering the split layout".into());
+        }
         let windows = self.workspaces.engine(workspace).bound_windows();
         let axis = self.workspaces.engine(workspace).root_axis();
         let perpendicular = matches!(
@@ -2686,6 +2756,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let Some(source) = self.workspaces.workspace_of(&window) else {
             return self.cycle(outputs, cancelled);
         };
+        if self.workspaces.uses_fullscreen_layout(source) {
+            return Ok(self.status(0, 0, &outputs));
+        }
         let target = self
             .navigation_tiles(&outputs)
             .into_iter()
@@ -2756,6 +2829,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let Some(workspace) = self.workspaces.workspace_of(&window) else {
             return self.cycle(outputs, cancelled);
         };
+        if self.workspaces.uses_fullscreen_layout(workspace) {
+            return Ok(self.status(0, 0, &outputs));
+        }
         let output = output_for(&self.workspaces, workspace, &outputs);
         if !self
             .workspaces
@@ -2797,13 +2873,40 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if !self.is_visible(workspace, &outputs) {
             return Err("Focused window is not on an active workspace".into());
         }
-        let Some((_, target)) = self.spatial_target(&focused, direction, &outputs) else {
+        let Some((_, target)) = self.relative_target(&focused, direction, &outputs) else {
             return Ok(self.status(0, 0, &outputs));
         };
         if !self.backend.focus_window(&target) {
             return Err("Target window could not be focused".into());
         }
+        self.pending_fullscreen_focus_restore.remove(&workspace);
+        self.workspaces.remember_focus(workspace, &target);
+        self.persist_workspace_state_if_changed()?;
         Ok(self.status(0, 0, &outputs))
+    }
+
+    fn relative_target(
+        &self,
+        focused: &crate::PhysicalWindowId,
+        direction: Direction,
+        outputs: &macos::DisplayOutputs,
+    ) -> Option<(WorkspaceId, crate::PhysicalWindowId)> {
+        let workspace = self.workspaces.workspace_of(focused)?;
+        if self.workspaces.uses_fullscreen_layout(workspace) {
+            let windows = self.workspaces.engine(workspace).bound_windows();
+            let index = windows.iter().position(|window| window == focused)?;
+            if windows.len() < 2 {
+                return None;
+            }
+            let target = match direction {
+                Direction::Left | Direction::Up => {
+                    &windows[(index + windows.len() - 1) % windows.len()]
+                }
+                Direction::Down | Direction::Right => &windows[(index + 1) % windows.len()],
+            };
+            return Some((workspace, target.clone()));
+        }
+        self.spatial_target(focused, direction, outputs)
     }
 
     fn spatial_target(
@@ -2824,9 +2927,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 .workspaces
                 .engine(resolved.workspace)
                 .placements(&Settings::for_output(resolved.output));
-            if let Some(maximized) = self.workspaces.maximized_window(resolved.workspace) {
-                placements.retain(|placement| placement.window.as_ref() == Some(maximized));
-                if let Some(placement) = placements.first_mut() {
+            if self.workspaces.uses_fullscreen_layout(resolved.workspace) {
+                for placement in &mut placements {
                     placement.frame = resolved.output;
                 }
             }
@@ -2846,8 +2948,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let focused = self.backend.focused_window();
         let target = |direction| {
             focused.as_ref().and_then(|focused| {
-                crate::navigation::target(&tiles, focused, direction)
-                    .map(|tile| tile.window.clone())
+                self.relative_target(focused, direction, outputs)
+                    .map(|(_, window)| window)
             })
         };
         let targets = DebugTargets {
@@ -2888,15 +2990,18 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                             .model()
                             .workspace
                             .axis,
-                        layout: self
+                        fullscreen_layout: self
                             .workspaces
-                            .engine(resolved.workspace)
-                            .preview(crate::Rect {
+                            .uses_fullscreen_layout(resolved.workspace),
+                        layout: self.preview_layout(
+                            resolved.workspace,
+                            crate::Rect {
                                 x: 0,
                                 y: 0,
                                 width: 1500,
                                 height: 1100,
-                            }),
+                            },
+                        ),
                     })
                 })
                 .collect(),
@@ -2928,6 +3033,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if !self.is_visible(workspace, &outputs) {
             return Err("Focused window is not on an active workspace".into());
         }
+        if self.workspaces.uses_fullscreen_layout(workspace) {
+            return Err("Exit Fullscreen Layout before changing the split layout".into());
+        }
         self.workspaces.engine_mut(workspace).toggle_axis();
         let layout = self.layout_workspace(
             workspace,
@@ -2955,6 +3063,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .ok_or("Focused window is not managed by Spaceman")?;
         if !self.is_visible(workspace, &outputs) {
             return Err("Focused window is not on an active workspace".into());
+        }
+        if self.workspaces.uses_fullscreen_layout(workspace) {
+            return Err("Exit Fullscreen Layout before resizing the split layout".into());
         }
         let output = output_for(&self.workspaces, workspace, &outputs);
         if !self.workspaces.engine_mut(workspace).resize_focused_tile(
@@ -2987,6 +3098,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if !self.is_visible(workspace, &outputs) {
             return Err("Focused window is not on an active workspace".into());
         }
+        if self.workspaces.uses_fullscreen_layout(workspace) {
+            return Err("Exit Fullscreen Layout before balancing the split layout".into());
+        }
         let output = output_for(&self.workspaces, workspace, &outputs);
         if !self
             .workspaces
@@ -3000,7 +3114,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         Ok(self.status(layout.applied, layout.failed, &outputs))
     }
 
-    fn toggle_maximize(
+    fn toggle_fullscreen_layout(
         &mut self,
         outputs: macos::DisplayOutputs,
         cancelled: &AtomicBool,
@@ -3023,9 +3137,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return Err("Focused window is not on an active workspace".into());
         }
         self.workspaces.remember_focus(workspace, &window);
-        if !self.workspaces.toggle_maximize(workspace, &window) {
+        if !self.workspaces.toggle_fullscreen_layout(workspace, &window) {
             return Err("Focused window is not managed by Spaceman".into());
         }
+        self.pending_fullscreen_focus_restore.remove(&workspace);
         let layout = self.layout_workspace(
             workspace,
             output_for(&self.workspaces, workspace, &outputs),
@@ -3053,7 +3168,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     ) -> LayoutStatus {
         let settings = Settings::for_output(output);
         let mut placements = self.workspaces.engine(workspace).placements(&settings);
-        self.apply_maximize(workspace, &mut placements, output);
+        self.apply_fullscreen_layout(workspace, &mut placements, output);
         let results = match dragged {
             Some(dragged) => {
                 self.backend
@@ -3290,28 +3405,21 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         self.repark_attempts.remove(window);
     }
 
-    fn apply_maximize(
+    fn apply_fullscreen_layout(
         &mut self,
         workspace: WorkspaceId,
-        placements: &mut Vec<crate::Placement>,
+        placements: &mut [crate::Placement],
         output: crate::Rect,
     ) {
-        let Some(maximized) = self.workspaces.maximized_window(workspace).cloned() else {
+        if !self.workspaces.uses_fullscreen_layout(workspace) {
             return;
-        };
-        let Some(mut placement) = placements
-            .iter()
-            .find(|placement| placement.window.as_ref() == Some(&maximized))
-            .cloned()
-        else {
-            return;
-        };
-        placement.frame = output;
-        self.workspaces
-            .engine_mut(workspace)
-            .record_placement_target(placement.slot, output);
-        placements.clear();
-        placements.push(placement);
+        }
+        for placement in placements {
+            placement.frame = output;
+            self.workspaces
+                .engine_mut(workspace)
+                .record_placement_target(placement.slot, output);
+        }
     }
 
     fn mark_parked(&mut self, window: crate::PhysicalWindowId, frame: crate::Rect) -> bool {
@@ -3487,6 +3595,14 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         Ok(())
     }
 
+    fn preview_layout(&self, workspace: WorkspaceId, output: crate::Rect) -> Vec<crate::Rect> {
+        let mut layout = self.workspaces.engine(workspace).preview(output);
+        if self.workspaces.uses_fullscreen_layout(workspace) {
+            layout.fill(output);
+        }
+        layout
+    }
+
     fn status_for_visible(
         &self,
         _applied: usize,
@@ -3504,12 +3620,15 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 .map(|workspace| {
                     (
                         workspace.to_string(),
-                        self.workspaces.engine(*workspace).preview(crate::Rect {
-                            x: 0,
-                            y: 0,
-                            width: 1500,
-                            height: 1100,
-                        }),
+                        self.preview_layout(
+                            *workspace,
+                            crate::Rect {
+                                x: 0,
+                                y: 0,
+                                width: 1500,
+                                height: 1100,
+                            },
+                        ),
                     )
                 })
                 .collect(),
@@ -3683,6 +3802,7 @@ mod tests {
         Persist,
         SetPosition(crate::PhysicalWindowId, crate::Rect),
         Apply(crate::PhysicalWindowId, crate::Rect),
+        Raise(crate::PhysicalWindowId),
         Focus(crate::PhysicalWindowId),
     }
 
@@ -3734,6 +3854,7 @@ mod tests {
         fail_persist: bool,
         frame_outcome: Option<macos::WindowAccessError>,
         managed_outcome: Option<macos::ApplyOutcome>,
+        focus_outcome: Option<bool>,
         snapshot_count: usize,
         observed_apply_count: usize,
         workspace_state: Option<crate::workspace::WorkspaceState>,
@@ -3846,9 +3967,18 @@ mod tests {
             self.frontmost.clone()
         }
 
+        fn raise_window(&mut self, window: &crate::PhysicalWindowId) -> bool {
+            self.calls.push(BackendCall::Raise(window.clone()));
+            true
+        }
+
         fn focus_window(&mut self, window: &crate::PhysicalWindowId) -> bool {
             self.calls.push(BackendCall::Focus(window.clone()));
+            if self.focus_outcome == Some(false) {
+                return false;
+            }
             self.focused = Some(window.clone());
+            self.frontmost = Some(window.app.clone());
             true
         }
 
@@ -5345,7 +5475,7 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_native_tab_replacement_preserves_workspace_and_maximize() {
+    fn ghostty_native_tab_replacement_preserves_workspace_and_fullscreen_layout() {
         let previous = window(10);
         let replacement = window(11);
         let normal = frame(50);
@@ -5364,7 +5494,7 @@ mod tests {
         runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
         runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
         runtime
-            .toggle_maximize(outputs(), &AtomicBool::new(false))
+            .toggle_fullscreen_layout(outputs(), &AtomicBool::new(false))
             .unwrap();
         let accepted = runtime.backend.frames[&previous];
         runtime.backend.observation = Some(observation_for(
@@ -5387,9 +5517,10 @@ mod tests {
             runtime.workspaces.workspace_of(&replacement),
             Some(WorkspaceId::ONE)
         );
+        assert!(runtime.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
         assert_eq!(
-            runtime.workspaces.maximized_window(WorkspaceId::ONE),
-            Some(&replacement)
+            runtime.workspaces.preferred_focus(WorkspaceId::ONE),
+            Some(replacement.clone())
         );
         assert_eq!(runtime.backend.frames[&replacement], outputs().main().frame);
         assert!(!runtime.parked.contains_key(&replacement));
@@ -5545,7 +5676,7 @@ mod tests {
     }
 
     #[test]
-    fn maximize_toggles_without_changing_tile_order() {
+    fn fullscreen_layout_toggles_without_changing_tile_order() {
         let first = window(10);
         let second = window(20);
         let mut backend = FakeBackend {
@@ -5560,21 +5691,24 @@ mod tests {
         let outputs = outputs();
 
         runtime
-            .toggle_maximize(outputs.clone(), &AtomicBool::new(false))
+            .toggle_fullscreen_layout(outputs.clone(), &AtomicBool::new(false))
             .unwrap();
 
+        assert_eq!(runtime.backend.frames[&first], outputs.main().frame);
         assert_eq!(runtime.backend.frames[&second], outputs.main().frame);
+        assert!(runtime.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
         assert_eq!(
             runtime.workspaces.engine(WorkspaceId::ONE).bound_windows(),
             vec![first.clone(), second.clone()]
         );
 
         runtime
-            .toggle_maximize(outputs, &AtomicBool::new(false))
+            .toggle_fullscreen_layout(outputs, &AtomicBool::new(false))
             .unwrap();
 
         assert_eq!(runtime.backend.frames[&first].width, 500);
         assert_eq!(runtime.backend.frames[&second].x, 500);
+        assert!(!runtime.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
         assert_eq!(
             runtime.workspaces.engine(WorkspaceId::ONE).bound_windows(),
             vec![first, second]
@@ -5610,6 +5744,251 @@ mod tests {
             .unwrap();
 
         assert_eq!(runtime.backend.focused, Some(second));
+    }
+
+    #[test]
+    fn fullscreen_layout_focus_wraps_through_tile_order() {
+        let first = window(10);
+        let second = window(20);
+        let third = window(30);
+        let mut backend = FakeBackend {
+            focused: Some(second.clone()),
+            ..FakeBackend::default()
+        };
+        for (window, initial) in [(&first, 50), (&second, 500), (&third, 750)] {
+            backend.frames.insert(window.clone(), frame(initial));
+        }
+        let mut runtime = runtime(backend);
+        for window in [&first, &second, &third] {
+            bind(&mut runtime, WorkspaceId::ONE, window);
+        }
+        let outputs = outputs();
+        let cancelled = AtomicBool::new(false);
+        runtime
+            .toggle_fullscreen_layout(outputs.clone(), &cancelled)
+            .unwrap();
+
+        runtime
+            .focus_relative(Direction::Right, outputs.clone(), &cancelled)
+            .unwrap();
+        assert_eq!(runtime.backend.focused, Some(third.clone()));
+        runtime
+            .focus_relative(Direction::Right, outputs.clone(), &cancelled)
+            .unwrap();
+        assert_eq!(runtime.backend.focused, Some(first.clone()));
+        runtime
+            .focus_relative(Direction::Up, outputs, &cancelled)
+            .unwrap();
+        assert_eq!(runtime.backend.focused, Some(third));
+    }
+
+    #[test]
+    fn fullscreen_layout_remembers_native_same_app_focus_changes() {
+        let first = window(10);
+        let second = window(20);
+        let output = outputs().main().frame;
+        let mut backend = FakeBackend {
+            focused: Some(first.clone()),
+            frontmost: Some(first.app.clone()),
+            observation: Some(observation_for_windows(
+                "com.example.Test",
+                &first,
+                &[(first.clone(), frame(50)), (second.clone(), frame(500))],
+            )),
+            ..FakeBackend::default()
+        };
+        backend.frames.insert(first.clone(), frame(50));
+        backend.frames.insert(second.clone(), frame(500));
+        let mut runtime = runtime(backend);
+        bind(&mut runtime, WorkspaceId::ONE, &first);
+        bind(&mut runtime, WorkspaceId::ONE, &second);
+        let outputs = outputs();
+        let cancelled = AtomicBool::new(false);
+        runtime
+            .toggle_fullscreen_layout(outputs.clone(), &cancelled)
+            .unwrap();
+
+        runtime.backend.focused = Some(second.clone());
+        runtime.backend.observation = Some(observation_for_windows(
+            "com.example.Test",
+            &second,
+            &[(first.clone(), output), (second.clone(), output)],
+        ));
+        runtime.cycle(outputs, &cancelled).unwrap();
+
+        assert_eq!(
+            runtime.workspaces.preferred_focus(WorkspaceId::ONE),
+            Some(second)
+        );
+    }
+
+    #[test]
+    fn fullscreen_layout_activates_persisted_cross_app_focus_after_restart() {
+        let first = window(10);
+        let focused = crate::PhysicalWindowId {
+            app: AppInstanceId {
+                pid: 2,
+                launched_at: 2,
+            },
+            window_id: 20,
+        };
+        let output = outputs().main().frame;
+        let mut persisted = Workspaces::default();
+        for (id, window) in [(10, &first), (20, &focused)] {
+            persisted.engine_mut(WorkspaceId::ONE).insert_slot(Slot {
+                id: SlotId(id),
+                weight: 1,
+                binding: BindingState::Bound(window.clone()),
+            });
+        }
+        persisted.refresh_ownership(WorkspaceId::ONE);
+        persisted.remember_focus(WorkspaceId::ONE, &focused);
+        assert!(persisted.toggle_fullscreen_layout(WorkspaceId::ONE, &focused));
+        let mut backend = FakeBackend {
+            focused: Some(first.clone()),
+            frontmost: Some(first.app.clone()),
+            observation: Some(crate::NativeObservation {
+                cycle: 0,
+                mouse_down: false,
+                applications: vec![
+                    crate::AppObservation::Complete {
+                        app: crate::ObservedApplication {
+                            id: first.app.clone(),
+                            bundle_id: "com.example.First".into(),
+                        },
+                        focused: Some(first.clone()),
+                        windows: vec![crate::ObservedWindow {
+                            id: first.clone(),
+                            frame: output,
+                            resizable: true,
+                            title: None,
+                        }],
+                    },
+                    crate::AppObservation::Complete {
+                        app: crate::ObservedApplication {
+                            id: focused.app.clone(),
+                            bundle_id: "com.example.Second".into(),
+                        },
+                        focused: Some(focused.clone()),
+                        windows: vec![crate::ObservedWindow {
+                            id: focused.clone(),
+                            frame: output,
+                            resizable: true,
+                            title: None,
+                        }],
+                    },
+                ],
+            }),
+            ..FakeBackend::default()
+        };
+        backend.frames.insert(first, output);
+        backend.frames.insert(focused.clone(), output);
+        let mut runtime = WorkspaceRuntime::with_backend_config_state(
+            ManagementScope::Both,
+            backend,
+            HashMap::new(),
+            Config::default(),
+            Some(persisted.state()),
+        );
+
+        runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+
+        assert!(
+            runtime
+                .backend
+                .calls
+                .contains(&BackendCall::Focus(focused.clone()))
+        );
+        runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+        assert_eq!(
+            runtime.workspaces.preferred_focus(WorkspaceId::ONE),
+            Some(focused)
+        );
+    }
+
+    #[test]
+    fn failed_fullscreen_focus_restore_does_not_fight_later_focus() {
+        let first = window(10);
+        let persisted_focus = window(20);
+        let output = outputs().main().frame;
+        let mut persisted = Workspaces::default();
+        for (id, window) in [(10, &first), (20, &persisted_focus)] {
+            persisted.engine_mut(WorkspaceId::ONE).insert_slot(Slot {
+                id: SlotId(id),
+                weight: 1,
+                binding: BindingState::Bound(window.clone()),
+            });
+        }
+        persisted.refresh_ownership(WorkspaceId::ONE);
+        persisted.remember_focus(WorkspaceId::ONE, &persisted_focus);
+        assert!(persisted.toggle_fullscreen_layout(WorkspaceId::ONE, &persisted_focus));
+        let mut backend = FakeBackend {
+            focused: Some(first.clone()),
+            frontmost: Some(first.app.clone()),
+            focus_outcome: Some(false),
+            observation: Some(observation_for_windows(
+                "com.example.Test",
+                &first,
+                &[(first.clone(), output), (persisted_focus.clone(), output)],
+            )),
+            ..FakeBackend::default()
+        };
+        backend.frames.insert(first.clone(), output);
+        backend.frames.insert(persisted_focus.clone(), output);
+        let mut runtime = WorkspaceRuntime::with_backend_config_state(
+            ManagementScope::Both,
+            backend,
+            HashMap::new(),
+            Config::default(),
+            Some(persisted.state()),
+        );
+
+        runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+        runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+
+        assert_eq!(
+            runtime
+                .backend
+                .calls
+                .iter()
+                .filter(|call| **call == BackendCall::Focus(persisted_focus.clone()))
+                .count(),
+            1
+        );
+        assert_eq!(
+            runtime.workspaces.preferred_focus(WorkspaceId::ONE),
+            Some(first)
+        );
+    }
+
+    #[test]
+    fn fullscreen_layout_rejects_hidden_split_changes() {
+        let window = window(10);
+        let mut backend = FakeBackend {
+            focused: Some(window.clone()),
+            ..FakeBackend::default()
+        };
+        backend.frames.insert(window.clone(), frame(50));
+        let mut runtime = runtime(backend);
+        bind(&mut runtime, WorkspaceId::ONE, &window);
+        let outputs = outputs();
+        let cancelled = AtomicBool::new(false);
+        runtime
+            .toggle_fullscreen_layout(outputs.clone(), &cancelled)
+            .unwrap();
+
+        let Err(error) = runtime.toggle_layout(outputs, &cancelled) else {
+            panic!("split layout changed while Fullscreen Layout was active");
+        };
+
+        assert_eq!(
+            error,
+            "Exit Fullscreen Layout before changing the split layout"
+        );
+        assert_eq!(
+            runtime.workspaces.engine(WorkspaceId::ONE).root_axis(),
+            crate::Axis::Horizontal
+        );
     }
 
     #[test]
@@ -6097,9 +6476,9 @@ mod tests {
     }
 
     #[test]
-    fn switching_away_and_back_preserves_maximize() {
+    fn switching_away_and_back_preserves_fullscreen_layout() {
         let first = window(10);
-        let maximized = window(20);
+        let focused = window(20);
         let incoming = window(30);
         let outputs = outputs();
         let displays = outputs.frames().collect::<Vec<_>>();
@@ -6107,35 +6486,33 @@ mod tests {
         let incoming_parked =
             crate::geometry::parked_frame(outputs.main().frame, &displays, incoming_normal);
         let mut backend = FakeBackend {
-            focused: Some(maximized.clone()),
+            focused: Some(focused.clone()),
             ..FakeBackend::default()
         };
         backend.frames.insert(first.clone(), frame(50));
-        backend.frames.insert(maximized.clone(), frame(500));
+        backend.frames.insert(focused.clone(), frame(500));
         backend.frames.insert(incoming.clone(), incoming_parked);
         let mut parked = HashMap::new();
         parked.insert(incoming.clone(), incoming_normal);
         let mut runtime = WorkspaceRuntime::with_backend(ManagementScope::Both, backend, parked);
         bind(&mut runtime, WorkspaceId::ONE, &first);
-        bind(&mut runtime, WorkspaceId::ONE, &maximized);
+        bind(&mut runtime, WorkspaceId::ONE, &focused);
         let target = WorkspaceId::new(2).unwrap();
         bind(&mut runtime, target, &incoming);
         let cancelled = AtomicBool::new(false);
 
         runtime
-            .toggle_maximize(outputs.clone(), &cancelled)
+            .toggle_fullscreen_layout(outputs.clone(), &cancelled)
             .unwrap();
         runtime.switch(target, outputs.clone(), &cancelled).unwrap();
         runtime
             .switch(WorkspaceId::ONE, outputs.clone(), &cancelled)
             .unwrap();
 
-        assert_eq!(
-            runtime.workspaces.maximized_window(WorkspaceId::ONE),
-            Some(&maximized)
-        );
-        assert_eq!(runtime.backend.frames[&maximized], outputs.main().frame);
-        assert_eq!(runtime.backend.focused, Some(maximized));
+        assert!(runtime.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
+        assert_eq!(runtime.backend.frames[&first], outputs.main().frame);
+        assert_eq!(runtime.backend.frames[&focused], outputs.main().frame);
+        assert_eq!(runtime.backend.focused, Some(focused));
     }
 
     #[test]
@@ -6166,9 +6543,50 @@ mod tests {
 
         runtime.switch(target, outputs.clone(), &cancelled).unwrap();
         runtime
-            .switch(WorkspaceId::ONE, outputs, &cancelled)
+            .switch(WorkspaceId::ONE, outputs.clone(), &cancelled)
             .unwrap();
 
+        assert_eq!(runtime.backend.focused, Some(focused));
+    }
+
+    #[test]
+    fn switching_away_and_back_restores_fullscreen_layout_focus() {
+        let first = window(10);
+        let focused = window(20);
+        let incoming = window(30);
+        let outputs = outputs();
+        let displays = outputs.frames().collect::<Vec<_>>();
+        let incoming_normal = frame(100);
+        let incoming_parked =
+            crate::geometry::parked_frame(outputs.main().frame, &displays, incoming_normal);
+        let mut backend = FakeBackend {
+            focused: Some(first.clone()),
+            ..FakeBackend::default()
+        };
+        backend.frames.insert(first.clone(), frame(50));
+        backend.frames.insert(focused.clone(), frame(500));
+        backend.frames.insert(incoming.clone(), incoming_parked);
+        let mut parked = HashMap::new();
+        parked.insert(incoming.clone(), incoming_normal);
+        let mut runtime = WorkspaceRuntime::with_backend(ManagementScope::Both, backend, parked);
+        bind(&mut runtime, WorkspaceId::ONE, &first);
+        bind(&mut runtime, WorkspaceId::ONE, &focused);
+        let target = WorkspaceId::new(2).unwrap();
+        bind(&mut runtime, target, &incoming);
+        let cancelled = AtomicBool::new(false);
+
+        runtime
+            .toggle_fullscreen_layout(outputs.clone(), &cancelled)
+            .unwrap();
+        runtime.backend.focused = Some(focused.clone());
+        runtime.switch(target, outputs.clone(), &cancelled).unwrap();
+        runtime
+            .switch(WorkspaceId::ONE, outputs.clone(), &cancelled)
+            .unwrap();
+
+        assert!(runtime.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
+        assert_eq!(runtime.backend.frames[&first], outputs.main().frame);
+        assert_eq!(runtime.backend.frames[&focused], outputs.main().frame);
         assert_eq!(runtime.backend.focused, Some(focused));
     }
 
@@ -6195,6 +6613,33 @@ mod tests {
             runtime.backend.calls.last(),
             Some(BackendCall::Focus(window)) if window == &target
         ));
+    }
+
+    #[test]
+    fn selecting_an_active_workspace_preserves_its_current_focus() {
+        let first = window(10);
+        let focused = window(20);
+        let outputs = outputs();
+        let mut backend = FakeBackend {
+            focused: Some(first.clone()),
+            ..FakeBackend::default()
+        };
+        backend.frames.insert(first.clone(), frame(50));
+        backend.frames.insert(focused.clone(), frame(500));
+        let mut runtime = runtime(backend);
+        bind(&mut runtime, WorkspaceId::ONE, &first);
+        bind(&mut runtime, WorkspaceId::ONE, &focused);
+        let cancelled = AtomicBool::new(false);
+        runtime
+            .toggle_fullscreen_layout(outputs.clone(), &cancelled)
+            .unwrap();
+        runtime.backend.focused = Some(focused.clone());
+
+        runtime
+            .switch(WorkspaceId::ONE, outputs, &cancelled)
+            .unwrap();
+
+        assert_eq!(runtime.backend.focused, Some(focused));
     }
 
     #[test]

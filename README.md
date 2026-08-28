@@ -23,7 +23,7 @@ Spaceman currently:
   metadata across restarts;
 - can register its signed app bundle with macOS to launch automatically at login;
 - supports directional focus and movement across displays, drag-to-reorder/nest, mouse and keyboard
-  resizing, balancing, and non-fullscreen maximize;
+  resizing, balancing, and a workspace-wide Fullscreen Layout;
 - keeps movable non-resizable and rule-floated windows with their logical workspace without tiling
   or resizing them;
 - exposes a local CLI over a user-only Unix socket.
@@ -119,7 +119,7 @@ Core controls:
 | `Option+Shift+H/J/K/L` | Move the focused tile left/down/up/right |
 | `Option+/` | Toggle the active layout's root split axis |
 | `Option+-`, `Option+=` | Shrink/grow the focused tile by 50 pixels |
-| `Option+Shift+F` | Toggle maximize without native fullscreen |
+| `Option+Shift+F` | Toggle Fullscreen Layout without native fullscreen |
 
 Character shortcuts follow the active macOS keyboard layout. Workspace digits remain the physical
 ANSI number row, and Tab remains physical Tab. See [Controls](docs/controls.md) for drag, resize,

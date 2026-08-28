@@ -180,11 +180,16 @@ fn run_hud() -> Result<String, String> {
         print!("\x1b[2J\x1b[HSpaceman HUD  (Ctrl-C to close)\n\n");
         for display in debug["displays"].as_array().into_iter().flatten() {
             let frame = &display["frame"];
+            let layout = if display["fullscreen_layout"].as_bool() == Some(true) {
+                "Fullscreen Layout"
+            } else {
+                display["axis"].as_str().unwrap_or("unknown")
+            };
             println!(
                 "{}  workspace {}  {}  @ {},{} {}x{}",
                 display["name"].as_str().unwrap_or("Display"),
                 display["workspace"].as_u64().unwrap_or_default(),
-                display["axis"].as_str().unwrap_or("unknown"),
+                layout,
                 frame["x"].as_i64().unwrap_or_default(),
                 frame["y"].as_i64().unwrap_or_default(),
                 frame["width"].as_i64().unwrap_or_default(),
