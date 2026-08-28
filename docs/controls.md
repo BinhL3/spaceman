@@ -34,9 +34,10 @@ through the workspace's stable tile order; it provides the same ordering in spli
 Command-backtick continues to use macOS's same-application window cycle, and Spaceman remembers the
 resulting focus. Press `Option+Shift+F` again to restore the unchanged split layout. Fullscreen Layout
 and its active tile survive workspace switches, native-tab physical-window replacement, and Spaceman
-restarts. Split-axis changes, keyboard resize, and balance require leaving Fullscreen Layout first;
-tile reordering also requires leaving it. Pointer dragging and resizing are ignored while the mode is
-active. Floating windows are not expanded.
+restarts. `Option+/` exits Fullscreen Layout, toggles the preserved split axis, and immediately applies
+the resulting normal layout. Keyboard resize, balance, and tile reordering require leaving Fullscreen
+Layout first. Pointer dragging and resizing are ignored while the mode is active. Floating windows are
+not expanded.
 
 Dragging a managed tile over a sibling swaps it. Dropping near a tile edge can create a nested split;
 dropping onto another display can move it to that display's active workspace. Resizing a managed

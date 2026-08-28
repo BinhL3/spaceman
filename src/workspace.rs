@@ -415,9 +415,7 @@ impl Workspaces {
                 .copied()
                 .flatten()
                 .filter(|slot| self.has_slot(WorkspaceId::from_index(index), *slot));
-            if self.last_focused[index].is_none() {
-                self.last_focused[index] = legacy_maximized;
-            }
+            self.last_focused[index] = legacy_maximized.or(self.last_focused[index]);
             self.fullscreen_layout[index] = fullscreen_layout.get(index).copied().unwrap_or(false)
                 || legacy_maximized.is_some();
         }
@@ -658,17 +656,8 @@ impl Workspaces {
         self.fullscreen_layout[workspace.index()]
     }
 
-    pub(crate) fn toggle_fullscreen_layout(
-        &mut self,
-        workspace: WorkspaceId,
-        window: &PhysicalWindowId,
-    ) -> bool {
-        if self.engine(workspace).slot_for_window(window).is_none() {
-            return false;
-        }
-        let fullscreen_layout = &mut self.fullscreen_layout[workspace.index()];
-        *fullscreen_layout = !*fullscreen_layout;
-        true
+    pub(crate) fn set_fullscreen_layout(&mut self, workspace: WorkspaceId, enabled: bool) {
+        self.fullscreen_layout[workspace.index()] = enabled;
     }
 
     fn has_slot(&self, workspace: WorkspaceId, slot: crate::SlotId) -> bool {
@@ -905,7 +894,7 @@ mod tests {
         }
         workspaces.refresh_ownership(WorkspaceId::ONE);
         workspaces.remember_focus(WorkspaceId::ONE, &second);
-        assert!(workspaces.toggle_fullscreen_layout(WorkspaceId::ONE, &second));
+        workspaces.set_fullscreen_layout(WorkspaceId::ONE, true);
 
         let encoded = serde_json::to_value(workspaces.state()).unwrap();
         assert_eq!(encoded["fullscreen_layout"], serde_json::json!([true]));
@@ -924,7 +913,7 @@ mod tests {
 
     #[test]
     fn legacy_maximize_intent_migrates_to_fullscreen_layout() {
-        let second = window(20);
+        let first = window(10);
         let state = serde_json::json!({
             "active": [],
             "slots": [[
@@ -955,7 +944,7 @@ mod tests {
         workspaces.restore(serde_json::from_value(state).unwrap());
 
         assert!(workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
-        assert_eq!(workspaces.preferred_focus(WorkspaceId::ONE), Some(second));
+        assert_eq!(workspaces.preferred_focus(WorkspaceId::ONE), Some(first));
     }
 
     #[test]

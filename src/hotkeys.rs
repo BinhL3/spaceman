@@ -86,7 +86,7 @@ impl HotkeyPlan {
     }
 
     fn from_layout(enabled: &[WorkspaceId], layout: &LayoutSnapshot) -> Result<Self, String> {
-        let mut registrations = Vec::with_capacity(33 + enabled.len() * 2);
+        let mut registrations = Vec::with_capacity(14 + enabled.len() * 2);
         let claimed_letters = enabled
             .iter()
             .filter_map(|workspace| workspace.letter().map(|letter| letter.to_ascii_lowercase()))

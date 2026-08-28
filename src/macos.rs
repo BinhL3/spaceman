@@ -813,13 +813,11 @@ pub fn frontmost_application() -> Option<AppInstanceId> {
 
 pub fn focus_window(id: &PhysicalWindowId) -> bool {
     let raised = raise_window_with_focus(id, true);
-    let running = NSWorkspace::sharedWorkspace().runningApplications();
-    let activated = (0..running.count()).any(|index| {
-        let application = running.objectAtIndex(index);
-        application.processIdentifier() == id.app.pid
-            && launch_time(&application) == id.app.launched_at
-            && application.activateWithOptions(NSApplicationActivationOptions::empty())
-    });
+    let activated = NSRunningApplication::runningApplicationWithProcessIdentifier(id.app.pid)
+        .is_some_and(|application| {
+            launch_time(&application) == id.app.launched_at
+                && application.activateWithOptions(NSApplicationActivationOptions::empty())
+        });
     raised && activated
 }
 
@@ -1072,11 +1070,8 @@ pub fn mouse_position() -> Option<(i32, i32)> {
 }
 
 fn process_incarnation_matches(id: &AppInstanceId) -> bool {
-    let running = NSWorkspace::sharedWorkspace().runningApplications();
-    (0..running.count()).any(|index| {
-        let application = running.objectAtIndex(index);
-        application.processIdentifier() == id.pid && launch_time(&application) == id.launched_at
-    })
+    NSRunningApplication::runningApplicationWithProcessIdentifier(id.pid)
+        .is_some_and(|application| launch_time(&application) == id.launched_at)
 }
 
 pub fn is_process_incarnation_running(id: &AppInstanceId) -> bool {
@@ -1322,19 +1317,17 @@ fn onscreen_windows() -> Option<HashMap<i32, HashSet<CGWindowID>>> {
 /// (`kCGWindowListOptionIncludingWindow`) silently returns nothing for some
 /// applications' windows.
 pub fn window_server_frame(id: &PhysicalWindowId) -> Option<Rect> {
-    window_server_frames().remove(&id.window_id)
+    window_server_frames()?.remove(&id.window_id)
 }
 
 /// Window-server frames for every ordinary window in one list copy. Use this
 /// instead of [`window_server_frame`] when checking more than one window.
-pub fn window_server_frames() -> HashMap<CGWindowID, Rect> {
+pub fn window_server_frames() -> Option<HashMap<CGWindowID, Rect>> {
     let mut frames = HashMap::new();
-    let Some(list) = CGWindowListCopyWindowInfo(
+    let list = CGWindowListCopyWindowInfo(
         CGWindowListOption::OptionAll | CGWindowListOption::ExcludeDesktopElements,
         0,
-    ) else {
-        return frames;
-    };
+    )?;
     for index in 0..list.count() {
         let entry = unsafe { list.value_at_index(index) };
         let Some(entry) = (unsafe { entry.cast::<CFType>().as_ref() })
@@ -1374,7 +1367,7 @@ pub fn window_server_frames() -> HashMap<CGWindowID, Rect> {
             );
         }
     }
-    frames
+    Some(frames)
 }
 
 fn dictionary_double(dictionary: &CFDictionary, key: &CFString) -> Option<f64> {

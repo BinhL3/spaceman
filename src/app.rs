@@ -16,8 +16,8 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 
 use crate::{
-    AppInstanceId, Decision, Direction, DisplaySelector, NavigationTile, ResizeDirection, Settings,
-    WorkspaceId, Workspaces,
+    AppInstanceId, BindingState, Decision, Direction, DisplaySelector, NavigationTile,
+    ResizeDirection, Settings, WorkspaceId, Workspaces,
     config::{Config, WindowDisposition},
     control::{self, Command as ControlCommand, Request as ControlRequest},
     hotkeys::{HotkeyPlan, Hotkeys},
@@ -330,6 +330,15 @@ struct FrozenAffinityPolicy {
     visible_workspaces: HashSet<WorkspaceId>,
 }
 
+struct ReconcileDisplayContext<'a> {
+    outputs: &'a macos::DisplayOutputs,
+    observation: &'a mut crate::NativeObservation,
+    affinity_policy: &'a FrozenAffinityPolicy,
+    server_frames: Option<&'a HashMap<u32, crate::Rect>>,
+    cancelled: &'a AtomicBool,
+    counts: &'a mut CycleCounts,
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 struct ParkedWindows(
     #[serde(with = "crate::serde_map")] HashMap<crate::PhysicalWindowId, crate::Rect>,
@@ -363,7 +372,7 @@ trait WorkspaceBackend {
     fn window_server_frame(&mut self, window: &crate::PhysicalWindowId) -> Option<crate::Rect>;
     /// Authoritative window-server frames for all windows in one snapshot.
     /// Use for per-cycle checks instead of repeated single-window queries.
-    fn window_server_frames(&mut self) -> HashMap<u32, crate::Rect>;
+    fn window_server_frames(&mut self) -> Option<HashMap<u32, crate::Rect>>;
     fn set_position(
         &mut self,
         window: &crate::PhysicalWindowId,
@@ -422,7 +431,7 @@ impl WorkspaceBackend for MacWorkspaceBackend {
         macos::window_server_frame(window)
     }
 
-    fn window_server_frames(&mut self) -> HashMap<u32, crate::Rect> {
+    fn window_server_frames(&mut self) -> Option<HashMap<u32, crate::Rect>> {
         macos::window_server_frames()
     }
 
@@ -1814,12 +1823,14 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         }
         // One window-server snapshot serves every authoritative-frame check in
         // this cycle; per-window queries would each copy the full window list.
-        let server_frames = self.backend.window_server_frames();
+        let server_snapshot = self.backend.window_server_frames();
+        let empty_server_frames = HashMap::new();
+        let server_frames = server_snapshot.as_ref().unwrap_or(&empty_server_frames);
         self.restore_visible(&visible, cancelled, &mut counts.failed);
         self.park_inactive(
             &outputs,
             &visible,
-            &server_frames,
+            server_frames,
             cancelled,
             &mut counts.failed,
         );
@@ -1831,18 +1842,21 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .snapshot(0, &outputs)
             .map_err(|error| format!("Observation error: {error}"))?;
         let affinity_policy =
-            self.freeze_window_affinities(&observation, &visible, &server_frames)?;
+            self.freeze_window_affinities(&observation, &visible, server_frames)?;
         for resolved in &visible {
             if !self.scope.manages_selector(&resolved.selector) {
                 continue;
             }
             self.reconcile_display(
                 resolved,
-                &outputs,
-                &mut observation,
-                &affinity_policy,
-                cancelled,
-                &mut counts,
+                ReconcileDisplayContext {
+                    outputs: &outputs,
+                    observation: &mut observation,
+                    affinity_policy: &affinity_policy,
+                    server_frames: server_snapshot.as_ref(),
+                    cancelled,
+                    counts: &mut counts,
+                },
             )?;
         }
         let mut attempted_focus_restore = HashSet::new();
@@ -2107,12 +2121,16 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     fn reconcile_display(
         &mut self,
         resolved: &ResolvedWorkspace,
-        outputs: &macos::DisplayOutputs,
-        observation: &mut crate::NativeObservation,
-        affinity_policy: &FrozenAffinityPolicy,
-        cancelled: &AtomicBool,
-        counts: &mut CycleCounts,
+        context: ReconcileDisplayContext<'_>,
     ) -> Result<(), String> {
+        let ReconcileDisplayContext {
+            outputs,
+            observation,
+            affinity_policy,
+            server_frames,
+            cancelled,
+            counts,
+        } = context;
         let workspace = resolved.workspace;
         let output = resolved.output;
         let ticket = {
@@ -2172,10 +2190,34 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 }
             }
         }
+        let mut apps_with_window_server_evidence = HashSet::new();
+        if let Some(server_frames) = server_frames {
+            for slot in &self.workspaces.engine(workspace).model().workspace.slots {
+                match &slot.binding {
+                    BindingState::Bound(window) => {
+                        if server_frames.contains_key(&window.window_id) {
+                            apps_with_window_server_evidence.insert(window.app.clone());
+                        }
+                    }
+                    BindingState::Unresolved {
+                        previous,
+                        candidates,
+                        ..
+                    } => {
+                        for window in std::iter::once(previous).chain(candidates) {
+                            if server_frames.contains_key(&window.window_id) {
+                                apps_with_window_server_evidence.insert(window.app.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
         live::add_absent_applications_with(
             &mut scoped_observation,
             &mut self.known_apps[workspace.index()],
             |app| self.backend.is_process_running(app),
+            |app| server_frames.is_none() || apps_with_window_server_evidence.contains(app),
         );
         let reconciliation = self
             .workspaces
@@ -2311,12 +2353,14 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if previous == workspace {
             let focused = self.backend.focused_window();
             let windows = self.workspaces.windows(workspace);
-            if let Some(focused) = focused.as_ref().filter(|focused| windows.contains(focused)) {
-                if self.workspaces.workspace_of(focused) == Some(workspace) {
-                    self.workspaces.remember_focus(workspace, focused);
-                    self.pending_fullscreen_focus_restore.remove(&workspace);
-                    self.persist_workspace_state_if_changed()?;
-                }
+            if self.workspaces.uses_fullscreen_layout(workspace)
+                && let Some(focused) = focused
+                    .as_ref()
+                    .filter(|focused| self.workspaces.workspace_of(focused) == Some(workspace))
+            {
+                self.workspaces.remember_focus(workspace, focused);
+                self.pending_fullscreen_focus_restore.remove(&workspace);
+                self.persist_workspace_state_if_changed()?;
                 return Ok(self.status(0, 0, &outputs));
             }
             let workspace_focus = self
@@ -2475,7 +2519,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 return;
             }
             thread::sleep(REVEAL_POLL_INTERVAL);
-            let frames = self.backend.window_server_frames();
+            let Some(frames) = self.backend.window_server_frames() else {
+                continue;
+            };
             let mut removed = Vec::new();
             for window in &pending {
                 let Some(original) = self.parked.get(window).copied() else {
@@ -2892,9 +2938,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if !self.backend.focus_window(&target) {
             return Err("Target window could not be focused".into());
         }
-        self.pending_fullscreen_focus_restore.remove(&workspace);
-        self.workspaces.remember_focus(workspace, &target);
-        self.persist_workspace_state_if_changed()?;
+        self.remember_fullscreen_focus(workspace, &target)?;
         Ok(self.status(0, 0, &outputs))
     }
 
@@ -2931,10 +2975,21 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if !self.backend.focus_window(target) {
             return Err("Target window could not be focused".into());
         }
-        self.pending_fullscreen_focus_restore.remove(&workspace);
-        self.workspaces.remember_focus(workspace, target);
-        self.persist_workspace_state_if_changed()?;
+        self.remember_fullscreen_focus(workspace, target)?;
         Ok(self.status(0, 0, &outputs))
+    }
+
+    fn remember_fullscreen_focus(
+        &mut self,
+        workspace: WorkspaceId,
+        window: &crate::PhysicalWindowId,
+    ) -> Result<(), String> {
+        if !self.workspaces.uses_fullscreen_layout(workspace) {
+            return Ok(());
+        }
+        self.pending_fullscreen_focus_restore.remove(&workspace);
+        self.workspaces.remember_focus(workspace, window);
+        self.persist_workspace_state_if_changed()
     }
 
     fn spatial_target(
@@ -3062,7 +3117,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return Err("Focused window is not on an active workspace".into());
         }
         if self.workspaces.uses_fullscreen_layout(workspace) {
-            return Err("Exit Fullscreen Layout before changing the split layout".into());
+            self.workspaces.set_fullscreen_layout(workspace, false);
+            self.pending_fullscreen_focus_restore.remove(&workspace);
         }
         self.workspaces.engine_mut(workspace).toggle_axis();
         let layout = self.layout_workspace(
@@ -3165,9 +3221,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return Err("Focused window is not on an active workspace".into());
         }
         self.workspaces.remember_focus(workspace, &window);
-        if !self.workspaces.toggle_fullscreen_layout(workspace, &window) {
-            return Err("Focused window is not managed by Spaceman".into());
-        }
+        let enabled = !self.workspaces.uses_fullscreen_layout(workspace);
+        self.workspaces.set_fullscreen_layout(workspace, enabled);
         self.pending_fullscreen_focus_restore.remove(&workspace);
         let layout = self.layout_workspace(
             workspace,
@@ -3883,6 +3938,7 @@ mod tests {
         frame_outcome: Option<macos::WindowAccessError>,
         managed_outcome: Option<macos::ApplyOutcome>,
         focus_outcome: Option<bool>,
+        server_snapshot_unavailable: bool,
         snapshot_count: usize,
         observed_apply_count: usize,
         workspace_state: Option<crate::workspace::WorkspaceState>,
@@ -3954,7 +4010,10 @@ mod tests {
                 .copied()
         }
 
-        fn window_server_frames(&mut self) -> HashMap<u32, crate::Rect> {
+        fn window_server_frames(&mut self) -> Option<HashMap<u32, crate::Rect>> {
+            if self.server_snapshot_unavailable {
+                return None;
+            }
             let mut frames: HashMap<u32, crate::Rect> = self
                 .frames
                 .iter()
@@ -3963,7 +4022,7 @@ mod tests {
             for (window, frame) in &self.server_frames {
                 frames.insert(window.window_id, *frame);
             }
-            frames
+            Some(frames)
         }
 
         fn set_position(
@@ -4384,6 +4443,78 @@ mod tests {
     }
 
     #[test]
+    fn closing_the_only_window_of_a_running_app_reflows_surviving_windows() {
+        let terminal = window(10);
+        let popup = crate::PhysicalWindowId {
+            app: AppInstanceId {
+                pid: 2,
+                launched_at: 1,
+            },
+            window_id: 20,
+        };
+        let backend = FakeBackend {
+            frames: HashMap::from([(terminal.clone(), frame(50)), (popup.clone(), frame(500))]),
+            observation: Some(crate::NativeObservation {
+                cycle: 0,
+                mouse_down: false,
+                applications: vec![
+                    crate::AppObservation::Complete {
+                        app: crate::ObservedApplication {
+                            id: terminal.app.clone(),
+                            bundle_id: "com.mitchellh.ghostty".into(),
+                        },
+                        focused: Some(terminal.clone()),
+                        windows: vec![crate::ObservedWindow {
+                            id: terminal.clone(),
+                            frame: frame(50),
+                            resizable: true,
+                            title: None,
+                        }],
+                    },
+                    crate::AppObservation::Complete {
+                        app: crate::ObservedApplication {
+                            id: popup.app.clone(),
+                            bundle_id: "com.raycast.macos".into(),
+                        },
+                        focused: Some(popup.clone()),
+                        windows: vec![crate::ObservedWindow {
+                            id: popup.clone(),
+                            frame: frame(500),
+                            resizable: true,
+                            title: None,
+                        }],
+                    },
+                ],
+            }),
+            ..FakeBackend::default()
+        };
+        let mut runtime = runtime(backend);
+        let outputs = outputs();
+        let cancelled = AtomicBool::new(false);
+        runtime.cycle(outputs.clone(), &cancelled).unwrap();
+        assert_eq!(runtime.backend.frames[&terminal].width, 500);
+
+        runtime.backend.frames.remove(&popup);
+        runtime.backend.observation = Some(observation_for(
+            "com.mitchellh.ghostty",
+            &terminal,
+            runtime.backend.frames[&terminal],
+        ));
+        runtime.backend.server_snapshot_unavailable = true;
+        runtime.cycle(outputs.clone(), &cancelled).unwrap();
+        assert_eq!(runtime.backend.frames[&terminal].width, 500);
+
+        runtime.backend.server_snapshot_unavailable = false;
+        runtime.cycle(outputs.clone(), &cancelled).unwrap();
+
+        assert_eq!(runtime.backend.frames[&terminal], outputs.main().frame);
+        assert_eq!(
+            runtime.workspaces.engine(WorkspaceId::ONE).bound_windows(),
+            vec![terminal]
+        );
+    }
+
+    #[test]
     fn configured_third_display_has_an_independent_visible_workspace() {
         let config =
             Config::parse("version = 1\n[[workspaces]]\nworkspace = 9\nmonitor = 'third-id'")
@@ -4561,7 +4692,7 @@ mod tests {
         let mut failed = 0;
         let outputs = outputs();
         let visible = runtime.visible_workspaces(&outputs);
-        let server_frames = runtime.backend.window_server_frames();
+        let server_frames = runtime.backend.window_server_frames().unwrap();
         runtime.park_inactive(
             &outputs,
             &visible,
@@ -4597,7 +4728,7 @@ mod tests {
         let outputs = outputs();
         let visible = runtime.visible_workspaces(&outputs);
         let mut failed = 0;
-        let server_frames = runtime.backend.window_server_frames();
+        let server_frames = runtime.backend.window_server_frames().unwrap();
         runtime.park_inactive(
             &outputs,
             &visible,
@@ -5055,7 +5186,7 @@ mod tests {
         runtime.parked.insert(fighter.clone(), frame(400));
 
         for _ in 0..=REPARK_ATTEMPT_LIMIT {
-            let server_frames = runtime.backend.window_server_frames();
+            let server_frames = runtime.backend.window_server_frames().unwrap();
             let visible = runtime.visible_workspaces(&outputs());
             runtime.park_inactive(
                 &outputs(),
@@ -5564,7 +5695,7 @@ mod tests {
         bind(&mut runtime, WorkspaceId::new(2).unwrap(), &window);
         let outputs = outputs();
         let visible = runtime.visible_workspaces(&outputs);
-        let server_frames = runtime.backend.window_server_frames();
+        let server_frames = runtime.backend.window_server_frames().unwrap();
         runtime.park_inactive(
             &outputs,
             &visible,
@@ -5795,6 +5926,7 @@ mod tests {
 
         runtime.cycle_focus(outputs.clone(), &cancelled).unwrap();
         assert_eq!(runtime.backend.focused, Some(third.clone()));
+        assert_eq!(runtime.workspaces.preferred_focus(WorkspaceId::ONE), None);
         runtime
             .toggle_fullscreen_layout(outputs.clone(), &cancelled)
             .unwrap();
@@ -5866,7 +5998,7 @@ mod tests {
         }
         persisted.refresh_ownership(WorkspaceId::ONE);
         persisted.remember_focus(WorkspaceId::ONE, &focused);
-        assert!(persisted.toggle_fullscreen_layout(WorkspaceId::ONE, &focused));
+        persisted.set_fullscreen_layout(WorkspaceId::ONE, true);
         let mut backend = FakeBackend {
             focused: Some(first.clone()),
             frontmost: Some(first.app.clone()),
@@ -5944,7 +6076,7 @@ mod tests {
         }
         persisted.refresh_ownership(WorkspaceId::ONE);
         persisted.remember_focus(WorkspaceId::ONE, &persisted_focus);
-        assert!(persisted.toggle_fullscreen_layout(WorkspaceId::ONE, &persisted_focus));
+        persisted.set_fullscreen_layout(WorkspaceId::ONE, true);
         let mut backend = FakeBackend {
             focused: Some(first.clone()),
             frontmost: Some(first.app.clone()),
@@ -5985,33 +6117,33 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_layout_rejects_hidden_split_changes() {
-        let window = window(10);
+    fn layout_toggle_exits_fullscreen_and_applies_the_next_split_axis() {
+        let first = window(10);
+        let second = window(20);
         let mut backend = FakeBackend {
-            focused: Some(window.clone()),
+            focused: Some(first.clone()),
             ..FakeBackend::default()
         };
-        backend.frames.insert(window.clone(), frame(50));
+        backend.frames.insert(first.clone(), frame(50));
+        backend.frames.insert(second.clone(), frame(500));
         let mut runtime = runtime(backend);
-        bind(&mut runtime, WorkspaceId::ONE, &window);
+        bind(&mut runtime, WorkspaceId::ONE, &first);
+        bind(&mut runtime, WorkspaceId::ONE, &second);
         let outputs = outputs();
         let cancelled = AtomicBool::new(false);
         runtime
             .toggle_fullscreen_layout(outputs.clone(), &cancelled)
             .unwrap();
 
-        let Err(error) = runtime.toggle_layout(outputs, &cancelled) else {
-            panic!("split layout changed while Fullscreen Layout was active");
-        };
+        runtime.toggle_layout(outputs, &cancelled).unwrap();
 
-        assert_eq!(
-            error,
-            "Exit Fullscreen Layout before changing the split layout"
-        );
+        assert!(!runtime.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
         assert_eq!(
             runtime.workspaces.engine(WorkspaceId::ONE).root_axis(),
-            crate::Axis::Horizontal
+            crate::Axis::Vertical
         );
+        assert_eq!(runtime.backend.frames[&first].height, 400);
+        assert_eq!(runtime.backend.frames[&second].y, 400);
     }
 
     #[test]
@@ -6639,7 +6771,7 @@ mod tests {
     }
 
     #[test]
-    fn selecting_an_active_workspace_preserves_its_current_focus() {
+    fn selecting_an_active_fullscreen_workspace_preserves_its_current_focus() {
         let first = window(10);
         let focused = window(20);
         let outputs = outputs();
@@ -6663,6 +6795,30 @@ mod tests {
             .unwrap();
 
         assert_eq!(runtime.backend.focused, Some(focused));
+    }
+
+    #[test]
+    fn selecting_an_active_split_workspace_restores_its_remembered_focus() {
+        let first = window(10);
+        let remembered = window(20);
+        let mut backend = FakeBackend {
+            focused: Some(first.clone()),
+            ..FakeBackend::default()
+        };
+        backend.frames.insert(first.clone(), frame(50));
+        backend.frames.insert(remembered.clone(), frame(500));
+        let mut runtime = runtime(backend);
+        bind(&mut runtime, WorkspaceId::ONE, &first);
+        bind(&mut runtime, WorkspaceId::ONE, &remembered);
+        runtime
+            .workspaces
+            .remember_focus(WorkspaceId::ONE, &remembered);
+
+        runtime
+            .switch(WorkspaceId::ONE, outputs(), &AtomicBool::new(false))
+            .unwrap();
+
+        assert_eq!(runtime.backend.focused, Some(remembered));
     }
 
     #[test]

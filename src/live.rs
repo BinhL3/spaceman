@@ -12,6 +12,7 @@ pub fn add_absent_applications(
         observation,
         known_apps,
         macos::is_process_incarnation_running,
+        |_| true,
     );
 }
 
@@ -19,6 +20,7 @@ pub fn add_absent_applications_with(
     observation: &mut NativeObservation,
     known_apps: &mut HashMap<AppInstanceId, String>,
     mut is_running: impl FnMut(&AppInstanceId) -> bool,
+    mut has_window_server_evidence: impl FnMut(&AppInstanceId) -> bool,
 ) {
     let present: HashSet<_> = observation
         .applications
@@ -40,17 +42,23 @@ pub fn add_absent_applications_with(
         .filter(|(app, _)| !present.contains(*app))
         .map(|(app, bundle_id)| (app.clone(), bundle_id.clone()))
         .collect();
-    for (app, _) in missing {
-        if is_running(&app) {
+    for (app, bundle_id) in missing {
+        if !is_running(&app) {
+            known_apps.remove(&app);
+            observation
+                .applications
+                .push(AppObservation::Terminated { app });
+        } else if has_window_server_evidence(&app) {
             observation.applications.push(AppObservation::Unavailable {
                 app,
                 error: "application was absent from the Core Graphics snapshot".into(),
             });
         } else {
-            known_apps.remove(&app);
-            observation
-                .applications
-                .push(AppObservation::Terminated { app });
+            observation.applications.push(AppObservation::Complete {
+                app: crate::ObservedApplication { id: app, bundle_id },
+                focused: None,
+                windows: Vec::new(),
+            });
         }
     }
 }
@@ -212,7 +220,7 @@ mod tests {
             applications: Vec::new(),
         };
 
-        add_absent_applications_with(&mut missing, &mut known, |_| true);
+        add_absent_applications_with(&mut missing, &mut known, |_| true, |_| true);
         let result = reconcile(
             &initial.model,
             &missing,
@@ -229,5 +237,24 @@ mod tests {
             result.model.workspace.slots[0].bound_window(),
             Some(&window)
         );
+
+        let mut confirmed_absent = NativeObservation {
+            cycle: 3,
+            mouse_down: false,
+            applications: Vec::new(),
+        };
+        add_absent_applications_with(&mut confirmed_absent, &mut known, |_| true, |_| false);
+        let result = reconcile(
+            &initial.model,
+            &confirmed_absent,
+            &ReconciliationEvidence::default(),
+            &settings,
+        );
+
+        assert!(matches!(
+            confirmed_absent.applications.as_slice(),
+            [AppObservation::Complete { windows, .. }] if windows.is_empty()
+        ));
+        assert!(result.model.workspace.slots.is_empty());
     }
 }
