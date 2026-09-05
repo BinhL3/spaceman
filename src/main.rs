@@ -157,7 +157,8 @@ fn print_usage(executable: &str) {
     eprintln!("       {executable} displays");
     #[cfg(target_os = "macos")]
     eprintln!(
-        "       {executable} ctl <status|debug|switch WORKSPACE|back-and-forth|move WORKSPACE|move-app ID WORKSPACE|focus DIR|move-direction DIR|layout|resize shrink|resize grow|balance|pause|resume|retile|restart|quit>"
+        "       {executable} ctl <{}>",
+        spaceman::control::COMMAND_USAGE
     );
     #[cfg(target_os = "macos")]
     eprintln!("       {executable} hud");
@@ -185,10 +186,14 @@ fn run_hud() -> Result<String, String> {
             } else {
                 display["axis"].as_str().unwrap_or("unknown")
             };
+            let workspace = display["workspace"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| display["workspace"].to_string());
             println!(
                 "{}  workspace {}  {}  @ {},{} {}x{}",
                 display["name"].as_str().unwrap_or("Display"),
-                display["workspace"].as_u64().unwrap_or_default(),
+                workspace,
                 layout,
                 frame["x"].as_i64().unwrap_or_default(),
                 frame["y"].as_i64().unwrap_or_default(),

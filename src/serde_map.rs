@@ -5,11 +5,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
 pub fn serialize<S, K, V>(values: &HashMap<K, V>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
-    K: Clone + Ord + Serialize,
+    K: Ord + Serialize,
     V: Serialize,
 {
     let mut entries: Vec<_> = values.iter().collect();
-    entries.sort_by_key(|(key, _)| (*key).clone());
+    entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
     entries.serialize(serializer)
 }
 

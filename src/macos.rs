@@ -1317,17 +1317,60 @@ fn onscreen_windows() -> Option<HashMap<i32, HashSet<CGWindowID>>> {
 /// (`kCGWindowListOptionIncludingWindow`) silently returns nothing for some
 /// applications' windows.
 pub fn window_server_frame(id: &PhysicalWindowId) -> Option<Rect> {
-    window_server_frames()?.remove(&id.window_id)
+    window_server_windows(CGWindowListOption::OptionAll)?
+        .into_iter()
+        .find(|window| window.id == id.window_id && window.pid == id.app.pid)
+        .map(|window| window.frame)
+}
+
+/// Hit-test front-to-back window-server geometry, without synchronous AX calls
+/// or native handles crossing the main-thread/worker boundary.
+pub fn window_at_point(point: (i32, i32)) -> Option<(PhysicalWindowId, Rect)> {
+    let windows = window_server_windows(CGWindowListOption::OptionOnScreenOnly)?;
+    let window = top_window_at_point(&windows, point)?;
+    let application = NSRunningApplication::runningApplicationWithProcessIdentifier(window.pid)?;
+    let launched_at = launch_time(&application);
+    (launched_at != 0).then_some((
+        PhysicalWindowId {
+            app: AppInstanceId {
+                pid: window.pid,
+                launched_at,
+            },
+            window_id: window.id,
+        },
+        window.frame,
+    ))
+}
+
+struct WindowServerWindow {
+    pid: i32,
+    id: u32,
+    frame: Rect,
+}
+
+fn top_window_at_point(
+    windows: &[WindowServerWindow],
+    point: (i32, i32),
+) -> Option<&WindowServerWindow> {
+    windows
+        .iter()
+        .find(|window| window.frame.contains(point.0, point.1))
 }
 
 /// Window-server frames for every ordinary window in one list copy. Use this
 /// instead of [`window_server_frame`] when checking more than one window.
 pub fn window_server_frames() -> Option<HashMap<CGWindowID, Rect>> {
-    let mut frames = HashMap::new();
-    let list = CGWindowListCopyWindowInfo(
-        CGWindowListOption::OptionAll | CGWindowListOption::ExcludeDesktopElements,
-        0,
-    )?;
+    Some(
+        window_server_windows(CGWindowListOption::OptionAll)?
+            .into_iter()
+            .map(|window| (window.id, window.frame))
+            .collect(),
+    )
+}
+
+fn window_server_windows(options: CGWindowListOption) -> Option<Vec<WindowServerWindow>> {
+    let mut windows = Vec::new();
+    let list = CGWindowListCopyWindowInfo(options | CGWindowListOption::ExcludeDesktopElements, 0)?;
     for index in 0..list.count() {
         let entry = unsafe { list.value_at_index(index) };
         let Some(entry) = (unsafe { entry.cast::<CFType>().as_ref() })
@@ -1340,6 +1383,11 @@ pub fn window_server_frames() -> Option<HashMap<CGWindowID, Rect>> {
         }
         let Some(id) = dictionary_number(entry, unsafe { kCGWindowNumber })
             .and_then(|id| u32::try_from(id).ok())
+        else {
+            continue;
+        };
+        let Some(pid) = dictionary_number(entry, unsafe { kCGWindowOwnerPID })
+            .and_then(|pid| i32::try_from(pid).ok())
         else {
             continue;
         };
@@ -1356,18 +1404,19 @@ pub fn window_server_frames() -> Option<HashMap<CGWindowID, Rect>> {
         if let (Some(x), Some(y), Some(width), Some(height)) =
             (field("X"), field("Y"), field("Width"), field("Height"))
         {
-            frames.insert(
+            windows.push(WindowServerWindow {
                 id,
-                Rect {
+                pid,
+                frame: Rect {
                     x,
                     y,
                     width,
                     height,
                 },
-            );
+            });
         }
     }
-    Some(frames)
+    Some(windows)
 }
 
 fn dictionary_double(dictionary: &CFDictionary, key: &CFString) -> Option<f64> {
@@ -1477,6 +1526,32 @@ fn ax_size(element: &AXUIElement, name: &'static str) -> Option<CGSize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointer_hit_testing_uses_front_to_back_geometry_without_ax_focus() {
+        let front = WindowServerWindow {
+            pid: 1,
+            id: 10,
+            frame: Rect {
+                x: -1000,
+                y: -200,
+                width: 400,
+                height: 300,
+            },
+        };
+        let behind = WindowServerWindow {
+            pid: 2,
+            id: 20,
+            frame: Rect {
+                width: 800,
+                ..front.frame
+            },
+        };
+        let windows = [front, behind];
+        assert_eq!(top_window_at_point(&windows, (-900, -100)).unwrap().id, 10);
+        assert_eq!(top_window_at_point(&windows, (-500, -100)).unwrap().id, 20);
+        assert!(top_window_at_point(&windows, (100, 100)).is_none());
+    }
 
     #[test]
     fn position_only_validation_ignores_window_size() {

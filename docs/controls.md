@@ -45,6 +45,19 @@ dropping onto another display can move it to that display's active workspace. Re
 window with the pointer updates the relevant split weights. Spaceman previews the rest of the layout
 during the gesture and applies the final result on mouse-up.
 
+While the worker is busy, keyboard commands and completed pointer gestures are queued in arrival
+order. Repeated relative commands (resize, focus, move, and toggles) are not discarded. The queue holds
+up to 64 pending inputs; excess input is rejected with `Input queue full; command was not queued` in
+the menu status and log. Pausing, quitting, or losing hotkeys clears pending input so it cannot replay
+after resuming. A gesture is classified from its starting and final geometry even if the worker was
+too busy to show a preview. Pointer tracking reads window-server geometry rather than making
+synchronous Accessibility requests on the main thread.
+
+A workspace switch reveals incoming parked windows before hiding outgoing windows. If restoration
+cannot be confirmed by the window server within the bounded reveal wait, the switch is rolled back:
+the outgoing workspace stays active and pending incoming reveals are re-parked. Retry once the slow
+application is responsive. Successful Accessibility writes alone do not confirm arrival.
+
 ## Menu
 
 The menu-bar control shows active workspace/layout glyphs and runtime errors. Its actions are:

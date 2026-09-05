@@ -48,9 +48,14 @@ impl Slot {
 
     #[must_use]
     pub fn belongs_to(&self, app: &AppInstanceId) -> bool {
+        &self.identity_window().app == app
+    }
+
+    #[must_use]
+    pub(crate) fn identity_window(&self) -> &PhysicalWindowId {
         match &self.binding {
-            BindingState::Bound(window) => &window.app == app,
-            BindingState::Unresolved { previous, .. } => &previous.app == app,
+            BindingState::Bound(window) => window,
+            BindingState::Unresolved { previous, .. } => previous,
         }
     }
 }
@@ -95,15 +100,15 @@ impl Model {
             if !slot_ids.insert(slot.id) {
                 return Err(format!("duplicate slot ID {}", slot.id.0));
             }
+            let window = slot.identity_window();
+            if !windows.insert(window) {
+                return Err(format!(
+                    "window {} is owned more than once",
+                    window.window_id
+                ));
+            }
             match &slot.binding {
-                BindingState::Bound(window) => {
-                    if !windows.insert(window) {
-                        return Err(format!(
-                            "window {} is bound more than once",
-                            window.window_id
-                        ));
-                    }
-                }
+                BindingState::Bound(_) => {}
                 BindingState::Unresolved {
                     previous,
                     candidates,

@@ -89,13 +89,15 @@ pub fn reconcile(
     settings: &Settings,
 ) -> Reconciliation {
     if observation.mouse_down {
+        let mut model = model.clone();
+        reset_all_unresolved_settling(&mut model, observation.cycle);
         return Reconciliation {
-            model: model.clone(),
             placements: geometry::partition(
                 settings.output,
                 model.workspace.axis,
                 &model.workspace.slots,
             ),
+            model,
             decisions: vec![Decision::MouseDownDeferred],
         };
     }
@@ -106,6 +108,7 @@ pub fn reconcile(
     for app_observation in &observation.applications {
         match app_observation {
             AppObservation::Unavailable { app, error } => {
+                reset_unresolved_settling(&mut next, app, observation.cycle);
                 decisions.push(Decision::ObservationUnavailable {
                     app: app.clone(),
                     error: error.clone(),
@@ -261,33 +264,6 @@ fn reconcile_unresolved(
         .map(|window| window.id.clone())
         .collect();
 
-    let expired = unresolved.iter().all(|index| {
-        let BindingState::Unresolved { since, .. } = &model.workspace.slots[*index].binding else {
-            unreachable!()
-        };
-        context.cycle.saturating_sub(*since) >= GHOSTTY_REPLACEMENT_SETTLE_CYCLES
-    });
-    if expired {
-        let expired_slots: HashSet<_> = unresolved
-            .iter()
-            .map(|index| model.workspace.slots[*index].id)
-            .collect();
-        model.workspace.slots.retain(|slot| {
-            if !expired_slots.contains(&slot.id) {
-                return true;
-            }
-            let BindingState::Unresolved { previous, .. } = &slot.binding else {
-                unreachable!()
-            };
-            decisions.push(Decision::WindowRemoved {
-                slot: slot.id,
-                window: previous.clone(),
-            });
-            false
-        });
-        insert_windows(model, &candidates, decisions);
-        return true;
-    }
     if unresolved.len() == 1 && candidates.len() == 1 && context.focused == candidates.first() {
         let index = unresolved[0];
         let slot = &model.workspace.slots[index];
@@ -322,6 +298,34 @@ fn reconcile_unresolved(
         }
     }
 
+    let expired = unresolved.iter().all(|index| {
+        let BindingState::Unresolved { since, .. } = &model.workspace.slots[*index].binding else {
+            unreachable!()
+        };
+        context.cycle.saturating_sub(*since) >= GHOSTTY_REPLACEMENT_SETTLE_CYCLES
+    });
+    if expired {
+        let expired_slots: HashSet<_> = unresolved
+            .iter()
+            .map(|index| model.workspace.slots[*index].id)
+            .collect();
+        model.workspace.slots.retain(|slot| {
+            if !expired_slots.contains(&slot.id) {
+                return true;
+            }
+            let BindingState::Unresolved { previous, .. } = &slot.binding else {
+                unreachable!()
+            };
+            decisions.push(Decision::WindowRemoved {
+                slot: slot.id,
+                window: previous.clone(),
+            });
+            false
+        });
+        insert_windows(model, &candidates, decisions);
+        return true;
+    }
+
     for index in unresolved {
         if let BindingState::Unresolved {
             candidates: existing,
@@ -333,6 +337,27 @@ fn reconcile_unresolved(
     }
     decisions.push(Decision::NativeTabAmbiguous { app: app.clone() });
     true
+}
+
+fn reset_all_unresolved_settling(model: &mut Model, cycle: u64) {
+    for slot in &mut model.workspace.slots {
+        if let BindingState::Unresolved { since, .. } = &mut slot.binding {
+            *since = cycle;
+        }
+    }
+}
+
+fn reset_unresolved_settling(model: &mut Model, app: &AppInstanceId, cycle: u64) {
+    for slot in model
+        .workspace
+        .slots
+        .iter_mut()
+        .filter(|slot| slot.belongs_to(app))
+    {
+        if let BindingState::Unresolved { since, .. } = &mut slot.binding {
+            *since = cycle;
+        }
+    }
 }
 
 fn replacement_candidate(
@@ -796,6 +821,82 @@ mod tests {
         assert!(matches!(
             expired.decisions.as_slice(),
             [Decision::WindowRemoved { .. }]
+        ));
+    }
+
+    #[test]
+    fn incomplete_observations_do_not_advance_ghostty_settling() {
+        let ghostty = app(10, 1);
+        let first = run(
+            &Model::default(),
+            1,
+            vec![complete(
+                &ghostty,
+                "com.mitchellh.ghostty",
+                Some(1),
+                vec![window(&ghostty, 1, OUTPUT)],
+            )],
+        );
+        let ambiguous = run(
+            &first.model,
+            2,
+            vec![complete(
+                &ghostty,
+                "com.mitchellh.ghostty",
+                Some(2),
+                vec![window(
+                    &ghostty,
+                    2,
+                    Rect {
+                        width: 500,
+                        ..OUTPUT
+                    },
+                )],
+            )],
+        );
+        let mouse_down = reconcile(
+            &ambiguous.model,
+            &NativeObservation {
+                cycle: 7,
+                mouse_down: true,
+                applications: Vec::new(),
+            },
+            &ReconciliationEvidence::default(),
+            &Settings {
+                output: OUTPUT,
+                frame_tolerance: 2,
+            },
+        );
+        let unavailable = run(
+            &mouse_down.model,
+            8,
+            vec![AppObservation::Unavailable {
+                app: ghostty.clone(),
+                error: "timed out".into(),
+            }],
+        );
+        let retried = run(
+            &unavailable.model,
+            9,
+            vec![complete(
+                &ghostty,
+                "com.mitchellh.ghostty",
+                Some(2),
+                vec![window(
+                    &ghostty,
+                    2,
+                    Rect {
+                        width: 500,
+                        ..OUTPUT
+                    },
+                )],
+            )],
+        );
+
+        assert_eq!(retried.model.workspace.slots.len(), 1);
+        assert!(matches!(
+            retried.model.workspace.slots[0].binding,
+            BindingState::Unresolved { .. }
         ));
     }
 

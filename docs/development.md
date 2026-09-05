@@ -8,15 +8,33 @@ not current product documentation.
 
 ```sh
 cargo fmt --check
+scripts/validate-release.sh --metadata-only
 cargo check --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
+cargo test --locked --all-targets
+cargo audit
 cargo run --locked -- replay fixtures/ghostty-tab-replacement.json
 cargo run --locked -- config-check config.example.toml
+(cd website && bun install --frozen-lockfile && bun audit && bun run build)
 git diff --check
 ```
 
-Useful read-only or dry-run macOS probes:
+### Focused Reliability Checks
+
+The reliability regressions in `src/app/tests/reliability.rs` exercise ambiguous multi-display tabs,
+cross-file crash recovery, delayed window-server confirmation, and display-gap parking through the
+fake backend. `src/app/input.rs` tests ordered input, queue limits, and complete gestures without
+preview ticks. Layout and geometry tests cover resize-then-drag and multi-display parking. Run the
+focused checks without touching desktop windows:
+
+```sh
+cargo test --locked --lib app::tests::reliability
+cargo test --locked --lib app::input::tests
+cargo test --locked --lib layout_tree::tests
+cargo test --locked --lib geometry::tests
+```
+
+Read-only or dry-run macOS probes:
 
 ```sh
 cargo run --locked -- config-check config.example.toml
@@ -38,11 +56,12 @@ AeroSpace to be enabled initially so they can capture a baseline, then they disa
 ```
 
 These harnesses require a current signed bundle at `target/Spaceman.app`; build it with
-`./scripts/build-app.sh` first. They isolate control and recovery files with
-`SPACEMAN_APPLICATION_SUPPORT` and restore their baseline, but still exercise live Accessibility
-writes. Start them with AeroSpace enabled, read each script, preserve unrelated windows, and confirm
-its expected display and Ghostty assumptions. Never run a destructive live test on a user's normal
-workspace merely because unit tests pass.
+`./scripts/build-app.sh` first. `live-workspaces.sh` isolates control and recovery files with
+`SPACEMAN_APPLICATION_SUPPORT`; `live-ghostty-tabs.sh` uses a scoped, non-persistent `watch-window`
+process. Both restore their baseline but still exercise live Accessibility writes. Start them with
+AeroSpace enabled, read each script, preserve unrelated windows, and confirm its expected display and
+Ghostty assumptions. Never run a destructive live test on a user's normal workspace merely because
+unit tests pass.
 
 ## Documentation Checks
 

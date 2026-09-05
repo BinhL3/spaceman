@@ -15,6 +15,9 @@ use gpui::{Application, Timer};
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 
+mod input;
+use input::{GestureTracker, InputQueue, QueuedInput};
+
 use crate::{
     AppInstanceId, BindingState, Decision, Direction, DisplaySelector, NavigationTile,
     ResizeDirection, Settings, WorkspaceId, Workspaces,
@@ -188,32 +191,19 @@ impl TryFrom<Action> for WorkerAction {
 }
 
 enum WorkerCommand {
-    Cycle(macos::DisplayOutputs),
-    Switch(WorkspaceId, macos::DisplayOutputs),
-    WorkspaceBackAndForth(macos::DisplayOutputs),
-    MoveFocused(WorkspaceId, macos::DisplayOutputs),
-    MoveApp(String, WorkspaceId, macos::DisplayOutputs),
-    CycleFocus(macos::DisplayOutputs),
-    Focus(Direction, macos::DisplayOutputs),
-    Reorder(Direction, macos::DisplayOutputs),
-    DropWindow(
-        crate::PhysicalWindowId,
-        (i32, i32),
-        bool,
-        macos::DisplayOutputs,
-    ),
-    ResizeWindow(
-        crate::PhysicalWindowId,
-        crate::Rect,
-        bool,
-        macos::DisplayOutputs,
-    ),
-    ToggleLayout(macos::DisplayOutputs),
-    Resize(ResizeDirection, macos::DisplayOutputs),
-    Balance(macos::DisplayOutputs),
-    ToggleFullscreenLayout(macos::DisplayOutputs),
+    Action(WorkerAction, macos::DisplayOutputs),
+    Gesture(FinalGesture, bool, macos::DisplayOutputs),
     RestoreAll,
     Stop,
+}
+
+impl WorkerCommand {
+    fn interruptible(&self) -> bool {
+        matches!(
+            self,
+            Self::Action(WorkerAction::Retile, _) | Self::Gesture(_, true, _)
+        )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -228,24 +218,6 @@ enum ExitIntent {
     Restart,
     Update,
     Terminate,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RestorePlan {
-    Now,
-    AfterWorker,
-}
-
-const fn restore_plan(worker_busy: bool) -> RestorePlan {
-    if worker_busy {
-        RestorePlan::AfterWorker
-    } else {
-        RestorePlan::Now
-    }
-}
-
-const fn exit_restore_plan(_intent: ExitIntent, worker_busy: bool) -> RestorePlan {
-    restore_plan(worker_busy)
 }
 
 struct CycleStatus {
@@ -295,15 +267,8 @@ struct DebugTargets {
 }
 
 struct LayoutStatus {
-    applied: usize,
     failed: usize,
     blocked: bool,
-}
-
-#[derive(Default)]
-struct CycleCounts {
-    applied: usize,
-    failed: usize,
 }
 
 #[derive(Clone)]
@@ -317,6 +282,8 @@ struct ResolvedWorkspace {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FrozenWindowAffinity {
     Owned(WorkspaceId),
+    PendingReplacement(WorkspaceId),
+    AmbiguousReplacement,
     Floating,
     ExplicitRoute(WorkspaceId),
     Inferred(WorkspaceId),
@@ -336,7 +303,7 @@ struct ReconcileDisplayContext<'a> {
     affinity_policy: &'a FrozenAffinityPolicy,
     server_frames: Option<&'a HashMap<u32, crate::Rect>>,
     cancelled: &'a AtomicBool,
-    counts: &'a mut CycleCounts,
+    failed: &'a mut usize,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -511,19 +478,9 @@ enum WorkerResult {
 /// Shared per-cycle context for parking decisions.
 struct ParkContext<'a> {
     displays: &'a [crate::Rect],
-    union: crate::Rect,
     frontmost: &'a Option<AppInstanceId>,
     server_frames: &'a HashMap<u32, crate::Rect>,
     visible: &'a [ResolvedWorkspace],
-}
-
-/// Cross-thread coordination flags between the app loop and the worker.
-struct WorkerSignals {
-    /// Requests abandonment of in-flight interruptible work.
-    cancelled: Arc<AtomicBool>,
-    /// Whether the currently executing worker command may be cancelled by an
-    /// activation change (background cycles yes, explicit user commands no).
-    interruptible: Arc<AtomicBool>,
 }
 
 struct AppLoop {
@@ -532,7 +489,6 @@ struct AppLoop {
     commands: Sender<WorkerCommand>,
     results: Receiver<WorkerResult>,
     cancelled: Arc<AtomicBool>,
-    worker_interruptible: Arc<AtomicBool>,
     scope: ManagementScope,
     events: macos::WindowEventMonitor,
     hotkey_workspaces: Vec<WorkspaceId>,
@@ -576,14 +532,10 @@ pub fn run() -> Result<(), String> {
     })
     .map_err(|error| format!("failed to install app signal handler: {error}"))?;
     let cancelled = Arc::new(AtomicBool::new(false));
-    let worker_interruptible = Arc::new(AtomicBool::new(true));
     spawn_worker(
         worker_commands,
         worker_results,
-        WorkerSignals {
-            cancelled: Arc::clone(&cancelled),
-            interruptible: Arc::clone(&worker_interruptible),
-        },
+        Arc::clone(&cancelled),
         scope,
         parked,
         config,
@@ -632,7 +584,6 @@ pub fn run() -> Result<(), String> {
                     commands,
                     results,
                     cancelled,
-                    worker_interruptible,
                     scope,
                     events,
                     hotkey_workspaces,
@@ -659,7 +610,6 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
         commands,
         results,
         cancelled,
-        worker_interruptible,
         scope,
         events,
         hotkey_workspaces,
@@ -678,6 +628,7 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
     };
     let mut automatic = _hotkeys.is_some();
     let mut worker_busy = false;
+    let mut worker_interruptible = false;
     let mut exit_intent = None;
     let mut restore_pending = false;
     let mut restoring = false;
@@ -689,28 +640,32 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
     };
     let mut last_error = hotkey_error;
     let mut latest_debug: Option<RuntimeDebug> = None;
-    let mut pending_action = None;
-    let mut pending_gesture = None;
+    let mut pending_inputs = InputQueue::default();
+    let mut gesture_tracker = GestureTracker::default();
     let mut last_refresh = Instant::now() - FALLBACK_REFRESH_INTERVAL;
     let mut last_application_refresh = last_refresh;
     let mut last_hotkey_refresh = last_refresh;
     let mut mouse_was_down = macos::mouse_down();
-    let mut dragged_window = None;
-    let mut drag_start_frame = None;
-    let mut window_was_dragged = false;
-    let mut window_was_resized = false;
-    let mut last_manipulated_frame = None;
-    let mut last_drag_point = None;
     let mut frontmost_application = macos::frontmost_application();
     let mut activation_refresh_at = None;
 
     status_item::set_automatic(automatic);
     if automatic {
         status_item::set_status("Automatic tiling enabled");
-        send_with_outputs(&commands, WorkerCommand::Cycle, &mut worker_busy);
+        send_with_outputs(
+            &commands,
+            |outputs| WorkerCommand::Action(WorkerAction::Retile, outputs),
+            &mut worker_busy,
+            &mut worker_interruptible,
+        );
     } else {
         status_item::set_status(last_error.as_deref().unwrap_or("Paused"));
-        send_restore(&commands, &mut worker_busy, &mut restoring);
+        send_restore(
+            &commands,
+            &mut worker_busy,
+            &mut worker_interruptible,
+            &mut restoring,
+        );
     }
 
     loop {
@@ -720,26 +675,19 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     _hotkeys = None;
+                    pending_inputs.clear();
+                    gesture_tracker.clear();
                     status_item::set_automatic(false);
-                    if exit_intent.is_some_and(|intent| {
-                        matches!(intent, ExitIntent::Update | ExitIntent::Terminate)
-                    }) {
-                        automatic = false;
-                        worker_busy = false;
-                        last_error =
-                            Some("Exit blocked because window restoration is unavailable".into());
-                        status_item::set_status("Exit blocked · restoration unavailable");
-                        break;
-                    }
-                    status_item::set_status("Worker stopped unexpectedly");
-                    if exit_intent.is_some_and(|intent| {
-                        !matches!(intent, ExitIntent::Update | ExitIntent::Terminate)
-                    }) {
-                        let _ = cx.update(quit_app);
-                        return;
-                    }
                     automatic = false;
                     worker_busy = false;
+                    restore_pending = false;
+                    restoring = false;
+                    next_restore_retry = None;
+                    if exit_intent.is_some() {
+                        cancel_unavailable_exit(cx, &mut exit_intent, &mut last_error);
+                    } else {
+                        status_item::set_status("Worker stopped unexpectedly");
+                    }
                     break;
                 }
             };
@@ -771,7 +719,6 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                     }
                 }
                 WorkerResult::Restored { failed: 0 } if exit_intent == Some(ExitIntent::Update) => {
-                    let _ = commands.send(WorkerCommand::Stop);
                     worker_busy = false;
                     restoring = false;
                     let continuation = cx
@@ -816,14 +763,14 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
             }
             if restore_pending && !worker_busy {
                 restore_pending = false;
-                send_restore(&commands, &mut worker_busy, &mut restoring);
-                if !worker_busy
-                    && exit_intent.is_some_and(|intent| {
-                        !matches!(intent, ExitIntent::Update | ExitIntent::Terminate)
-                    })
-                {
-                    let _ = cx.update(quit_app);
-                    return;
+                send_restore(
+                    &commands,
+                    &mut worker_busy,
+                    &mut worker_interruptible,
+                    &mut restoring,
+                );
+                if !worker_busy && exit_intent.is_some() {
+                    cancel_unavailable_exit(cx, &mut exit_intent, &mut last_error);
                 }
             }
         }
@@ -935,6 +882,9 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
         }
         for action in actions.try_iter() {
             if exit_intent.is_some() {
+                if action == Action::Terminate {
+                    let _ = cx.update(|_| termination::cancel_pending());
+                }
                 continue;
             }
             match action {
@@ -942,12 +892,15 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                     automatic = false;
                     cancelled.store(true, Ordering::Release);
                     _hotkeys = None;
-                    pending_action = None;
-                    if worker_busy {
-                        restore_pending = true;
-                    } else {
-                        send_restore(&commands, &mut worker_busy, &mut restoring);
-                    }
+                    pending_inputs.clear();
+                    gesture_tracker.clear();
+                    request_restore(
+                        &commands,
+                        &mut worker_busy,
+                        &mut worker_interruptible,
+                        &mut restore_pending,
+                        &mut restoring,
+                    );
                     status_item::set_automatic(false);
                     status_item::set_status(if worker_busy {
                         "Paused"
@@ -987,12 +940,13 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                         Err(error) => {
                             let error = format!("Hotkeys unavailable: {error}");
                             last_error = Some(error.clone());
-                            match restore_plan(worker_busy) {
-                                RestorePlan::Now => {
-                                    send_restore(&commands, &mut worker_busy, &mut restoring);
-                                }
-                                RestorePlan::AfterWorker => restore_pending = true,
-                            }
+                            request_restore(
+                                &commands,
+                                &mut worker_busy,
+                                &mut worker_interruptible,
+                                &mut restore_pending,
+                                &mut restoring,
+                            );
                             status_item::set_status(&error);
                         }
                     }
@@ -1039,13 +993,15 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                     exit_intent = Some(intent);
                     cancelled.store(true, Ordering::Release);
                     _hotkeys = None;
-                    pending_action = None;
-                    match exit_restore_plan(intent, worker_busy) {
-                        RestorePlan::Now => {
-                            send_restore(&commands, &mut worker_busy, &mut restoring);
-                        }
-                        RestorePlan::AfterWorker => restore_pending = true,
-                    }
+                    pending_inputs.clear();
+                    gesture_tracker.clear();
+                    request_restore(
+                        &commands,
+                        &mut worker_busy,
+                        &mut worker_interruptible,
+                        &mut restore_pending,
+                        &mut restoring,
+                    );
                     status_item::set_automatic(false);
                     if worker_busy {
                         status_item::set_status(match intent {
@@ -1055,64 +1011,37 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                             ExitIntent::Terminate => "Terminating · restoring windows...",
                         });
                     } else {
-                        match intent {
-                            ExitIntent::Update | ExitIntent::Terminate => {
-                                last_error = Some(
-                                    "Exit blocked because window restoration is unavailable".into(),
-                                );
-                                status_item::set_status("Exit blocked · restoration unavailable");
-                            }
-                            ExitIntent::Quit | ExitIntent::Restart => {
-                                let _ = cx.update(quit_app);
-                                return;
-                            }
-                        }
+                        cancel_unavailable_exit(cx, &mut exit_intent, &mut last_error);
                     }
                 }
                 action => {
-                    if let Ok(action) = WorkerAction::try_from(action) {
-                        if automatic && !worker_busy {
-                            pending_action = None;
-                            send_worker_action(&commands, action, &mut worker_busy, &cancelled);
-                        } else if automatic {
-                            queue_latest(&mut pending_action, action);
-                        }
+                    if automatic && let Ok(action) = WorkerAction::try_from(action) {
+                        queue_input(
+                            &mut pending_inputs,
+                            QueuedInput::Action(action),
+                            &mut last_error,
+                        );
                     }
                 }
             }
         }
 
-        if automatic
-            && !worker_busy
-            && let Some(gesture) = pending_gesture.take()
-        {
-            cancelled.store(false, Ordering::Release);
-            send_final_gesture(&commands, gesture, &mut worker_busy);
-        }
-        if automatic
-            && !worker_busy
-            && let Some(action) = pending_action.take()
-        {
-            send_worker_action(&commands, action, &mut worker_busy, &cancelled);
-        }
         if restoring
             && !worker_busy
             && next_restore_retry.is_some_and(|retry| Instant::now() >= retry)
         {
             next_restore_retry = None;
-            send_restore(&commands, &mut worker_busy, &mut restoring);
+            send_restore(
+                &commands,
+                &mut worker_busy,
+                &mut worker_interruptible,
+                &mut restoring,
+            );
             if !worker_busy {
-                match exit_intent {
-                    Some(ExitIntent::Update | ExitIntent::Terminate) => {
-                        last_error =
-                            Some("Exit blocked because window restoration is unavailable".into());
-                        status_item::set_status("Exit blocked · restoration unavailable");
-                    }
-                    Some(ExitIntent::Quit | ExitIntent::Restart) => {
-                        let _ = cx.update(quit_app);
-                        return;
-                    }
-                    None => status_item::set_status("Paused · worker unavailable"),
+                if exit_intent.is_some() {
+                    cancel_unavailable_exit(cx, &mut exit_intent, &mut last_error);
+                } else {
+                    status_item::set_status("Paused · worker unavailable");
                 }
             }
         }
@@ -1146,17 +1075,18 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                                 }
                                 Err(error) => {
                                     automatic = false;
+                                    pending_inputs.clear();
+                                    gesture_tracker.clear();
                                     cancelled.store(true, Ordering::Release);
                                     let error = format!("Hotkeys unavailable: {error}");
                                     last_error = Some(error.clone());
-                                    match restore_plan(worker_busy) {
-                                        RestorePlan::Now => send_restore(
-                                            &commands,
-                                            &mut worker_busy,
-                                            &mut restoring,
-                                        ),
-                                        RestorePlan::AfterWorker => restore_pending = true,
-                                    }
+                                    request_restore(
+                                        &commands,
+                                        &mut worker_busy,
+                                        &mut worker_interruptible,
+                                        &mut restore_pending,
+                                        &mut restoring,
+                                    );
                                     status_item::set_automatic(false);
                                     status_item::set_status(&error);
                                 }
@@ -1171,14 +1101,19 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                     }
                 }
             }
+            if !automatic {
+                // Hotkey failure may have paused inside this iteration.
+                Timer::after(TICK_INTERVAL).await;
+                continue;
+            }
             let current_frontmost = macos::frontmost_application();
             if current_frontmost != frontmost_application {
                 frontmost_application = current_frontmost;
                 activation_refresh_at = Some(Instant::now() + APPLICATION_ACTIVATION_SETTLE);
-                // Only background cycles yield to activation changes. Explicit
+                // Background cycles and previews yield to activation changes. Explicit
                 // user commands (switch, move, focus) change the frontmost app
                 // themselves; cancelling them here would abort our own work.
-                if worker_busy && worker_interruptible.load(Ordering::Acquire) {
+                if worker_busy && worker_interruptible {
                     cancelled.store(true, Ordering::Release);
                 }
             }
@@ -1189,75 +1124,64 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
             }
             let mouse_down = macos::mouse_down();
             if !mouse_was_down && mouse_down {
-                dragged_window = macos::focused_window();
-                drag_start_frame = dragged_window
-                    .as_ref()
-                    .and_then(|window| macos::frame(window).ok());
-                window_was_dragged = false;
-                window_was_resized = false;
-                last_manipulated_frame = drag_start_frame;
-                last_drag_point = None;
+                // Core Graphics hit-testing and readback do not send synchronous
+                // AX messages to another app from the main-thread input loop.
+                gesture_tracker.begin(macos::mouse_position().and_then(macos::window_at_point));
             }
             if mouse_was_down && !mouse_down {
-                let final_frame = dragged_window
-                    .as_ref()
-                    .and_then(|window| macos::frame(window).ok());
-                let final_point = window_was_dragged.then(macos::mouse_position).flatten();
-                let gesture = final_gesture(
-                    dragged_window.take(),
-                    window_was_dragged,
-                    window_was_resized,
-                    final_frame,
-                    final_point,
-                );
-                if let Some(gesture) = gesture.and_then(|gesture| {
-                    coordinate_final_gesture(worker_busy, &mut pending_gesture, gesture, &cancelled)
-                }) {
-                    send_final_gesture(&commands, gesture, &mut worker_busy);
-                } else if pending_gesture.is_none() {
-                    events.invalidate();
+                let final_frame = gesture_tracker
+                    .window()
+                    .and_then(macos::window_server_frame);
+                if let Some(gesture) = gesture_tracker.finish(final_frame, macos::mouse_position())
+                {
+                    if worker_busy && worker_interruptible {
+                        cancelled.store(true, Ordering::Release);
+                    }
+                    queue_input(
+                        &mut pending_inputs,
+                        QueuedInput::Gesture(gesture),
+                        &mut last_error,
+                    );
                 }
-                drag_start_frame = None;
-                window_was_dragged = false;
-                window_was_resized = false;
-                last_manipulated_frame = None;
-                last_drag_point = None;
+                events.invalidate();
             } else if mouse_down
                 && !worker_busy
-                && let Some(window) = dragged_window.as_ref()
-                && let Some(start) = drag_start_frame
-                && let Ok(current) = macos::frame(window)
-                && last_manipulated_frame != Some(current)
+                && pending_inputs.is_empty()
+                && let Some(current) = gesture_tracker
+                    .window()
+                    .and_then(macos::window_server_frame)
+                && let Some(gesture) = gesture_tracker.preview(current, macos::mouse_position())
             {
-                last_manipulated_frame = Some(current);
-                if window_was_resized || is_window_resize(start, current) {
-                    window_was_resized = true;
-                    let window = window.clone();
-                    send_with_outputs(
-                        &commands,
-                        |outputs| WorkerCommand::ResizeWindow(window, current, true, outputs),
-                        &mut worker_busy,
-                    );
-                } else if (window_was_dragged || is_window_drag(start, current))
-                    && let Some(point) = macos::mouse_position()
-                    && last_drag_point != Some(point)
-                {
-                    window_was_dragged = true;
-                    last_drag_point = Some(point);
-                    let window = window.clone();
-                    send_with_outputs(
-                        &commands,
-                        |outputs| WorkerCommand::DropWindow(window, point, true, outputs),
-                        &mut worker_busy,
-                    );
-                }
+                send_with_outputs(
+                    &commands,
+                    |outputs| WorkerCommand::Gesture(gesture, true, outputs),
+                    &mut worker_busy,
+                    &mut worker_interruptible,
+                );
             }
             mouse_was_down = mouse_down;
             if last_application_refresh.elapsed() >= APPLICATION_REFRESH_INTERVAL {
                 events.refresh_applications();
                 last_application_refresh = Instant::now();
             }
-            if !mouse_down && !worker_busy && pending_gesture.is_none() && {
+            if !worker_busy && let Some(input) = pending_inputs.front().cloned() {
+                cancelled.store(false, Ordering::Release);
+                send_with_outputs(
+                    &commands,
+                    |outputs| match input {
+                        QueuedInput::Action(action) => WorkerCommand::Action(action, outputs),
+                        QueuedInput::Gesture(gesture) => {
+                            WorkerCommand::Gesture(gesture, false, outputs)
+                        }
+                    },
+                    &mut worker_busy,
+                    &mut worker_interruptible,
+                );
+                if worker_busy {
+                    pending_inputs.pop();
+                }
+            }
+            if !mouse_down && !worker_busy && pending_inputs.is_empty() && {
                 let window_created = events.take_window_created();
                 let event_dirty = (window_created || activation_ready) && events.take_dirty();
                 refresh_due(
@@ -1267,7 +1191,12 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                     activation_ready,
                 )
             } {
-                send_with_outputs(&commands, WorkerCommand::Cycle, &mut worker_busy);
+                send_with_outputs(
+                    &commands,
+                    |outputs| WorkerCommand::Action(WorkerAction::Retile, outputs),
+                    &mut worker_busy,
+                    &mut worker_interruptible,
+                );
                 if worker_busy {
                     last_refresh = Instant::now();
                 }
@@ -1293,107 +1222,84 @@ fn is_window_resize(start: crate::Rect, current: crate::Rect) -> bool {
         >= 6
 }
 
-fn final_gesture(
-    window: Option<crate::PhysicalWindowId>,
-    dragged: bool,
-    resized: bool,
-    frame: Option<crate::Rect>,
-    point: Option<(i32, i32)>,
-) -> Option<FinalGesture> {
-    let window = window?;
-    if resized {
-        frame.map(|frame| FinalGesture::Resize(window, frame))
-    } else if dragged {
-        point.map(|point| FinalGesture::Drop(window, point))
-    } else {
-        None
-    }
-}
-
-fn coordinate_final_gesture(
-    worker_busy: bool,
-    pending: &mut Option<FinalGesture>,
-    gesture: FinalGesture,
-    cancelled: &AtomicBool,
-) -> Option<FinalGesture> {
-    if worker_busy {
-        cancelled.store(true, Ordering::Release);
-        pending.replace(gesture);
-        None
-    } else {
-        Some(gesture)
-    }
-}
-
-fn send_final_gesture(
+fn request_restore(
     commands: &Sender<WorkerCommand>,
-    gesture: FinalGesture,
     worker_busy: &mut bool,
+    worker_interruptible: &mut bool,
+    restore_pending: &mut bool,
+    restoring: &mut bool,
 ) {
-    send_with_outputs(
-        commands,
-        |outputs| match gesture {
-            FinalGesture::Drop(window, point) => {
-                WorkerCommand::DropWindow(window, point, false, outputs)
-            }
-            FinalGesture::Resize(window, frame) => {
-                WorkerCommand::ResizeWindow(window, frame, false, outputs)
-            }
-        },
-        worker_busy,
-    );
+    if *worker_busy {
+        *restore_pending = true;
+    } else {
+        send_restore(commands, worker_busy, worker_interruptible, restoring);
+    }
 }
 
-fn send_restore(commands: &Sender<WorkerCommand>, worker_busy: &mut bool, restoring: &mut bool) {
-    *worker_busy = commands.send(WorkerCommand::RestoreAll).is_ok();
+fn send_restore(
+    commands: &Sender<WorkerCommand>,
+    worker_busy: &mut bool,
+    worker_interruptible: &mut bool,
+    restoring: &mut bool,
+) {
+    *worker_busy = send_worker_command(
+        commands,
+        WorkerCommand::RestoreAll,
+        worker_busy,
+        worker_interruptible,
+    );
     *restoring = *worker_busy;
 }
 
-fn queue_latest(pending_action: &mut Option<WorkerAction>, action: WorkerAction) {
-    pending_action.replace(action);
+fn cancel_unavailable_exit(
+    cx: &mut gpui::AsyncApp,
+    exit_intent: &mut Option<ExitIntent>,
+    last_error: &mut Option<String>,
+) {
+    if exit_intent.take() == Some(ExitIntent::Terminate) {
+        let _ = cx.update(|_| termination::cancel_pending());
+    }
+    *last_error = Some("Exit blocked because window restoration is unavailable".into());
+    status_item::set_status("Exit blocked · restoration unavailable");
 }
 
-fn send_worker_action(
-    commands: &Sender<WorkerCommand>,
-    action: WorkerAction,
-    worker_busy: &mut bool,
-    cancelled: &AtomicBool,
-) {
-    if matches!(action, WorkerAction::Retile) {
-        cancelled.store(false, Ordering::Release);
+fn queue_input(queue: &mut InputQueue, input: QueuedInput, last_error: &mut Option<String>) {
+    if let Err(error) = queue.push(input) {
+        log_event!("{error}");
+        *last_error = Some(error.into());
+        status_item::set_status(error);
     }
-    send_with_outputs(
-        commands,
-        |outputs| match action {
-            WorkerAction::Retile => WorkerCommand::Cycle(outputs),
-            WorkerAction::SwitchWorkspace(workspace) => WorkerCommand::Switch(workspace, outputs),
-            WorkerAction::WorkspaceBackAndForth => WorkerCommand::WorkspaceBackAndForth(outputs),
-            WorkerAction::MoveFocused(workspace) => WorkerCommand::MoveFocused(workspace, outputs),
-            WorkerAction::MoveApp(bundle_id, workspace) => {
-                WorkerCommand::MoveApp(bundle_id, workspace, outputs)
-            }
-            WorkerAction::CycleFocus => WorkerCommand::CycleFocus(outputs),
-            WorkerAction::Focus(direction) => WorkerCommand::Focus(direction, outputs),
-            WorkerAction::Reorder(direction) => WorkerCommand::Reorder(direction, outputs),
-            WorkerAction::ToggleLayout => WorkerCommand::ToggleLayout(outputs),
-            WorkerAction::Resize(direction) => WorkerCommand::Resize(direction, outputs),
-            WorkerAction::Balance => WorkerCommand::Balance(outputs),
-            WorkerAction::ToggleFullscreenLayout => WorkerCommand::ToggleFullscreenLayout(outputs),
-        },
-        worker_busy,
-    );
+}
+
+fn send_worker_command(
+    commands: &Sender<WorkerCommand>,
+    command: WorkerCommand,
+    worker_busy: &mut bool,
+    worker_interruptible: &mut bool,
+) -> bool {
+    let interruptible = command.interruptible();
+    if commands.send(command).is_err() {
+        return false;
+    }
+    *worker_busy = true;
+    *worker_interruptible = interruptible;
+    true
 }
 
 fn send_with_outputs(
     commands: &Sender<WorkerCommand>,
     command: impl FnOnce(macos::DisplayOutputs) -> WorkerCommand,
     worker_busy: &mut bool,
+    worker_interruptible: &mut bool,
 ) {
     match macos::outputs() {
         Ok(outputs) => {
-            if commands.send(command(outputs)).is_ok() {
-                *worker_busy = true;
-            }
+            send_worker_command(
+                commands,
+                command(outputs),
+                worker_busy,
+                worker_interruptible,
+            );
         }
         Err(error) => status_item::set_status(&format!("Display error: {error}")),
     }
@@ -1420,16 +1326,12 @@ fn show_result(result: Result<CycleStatus, String>) {
 fn spawn_worker(
     commands: Receiver<WorkerCommand>,
     results: Sender<WorkerResult>,
-    signals: WorkerSignals,
+    cancelled: Arc<AtomicBool>,
     scope: ManagementScope,
     parked: HashMap<crate::PhysicalWindowId, crate::Rect>,
     config: Config,
     workspace_state: Option<crate::workspace::WorkspaceState>,
 ) {
-    let WorkerSignals {
-        cancelled,
-        interruptible,
-    } = signals;
     thread::spawn(move || {
         let restore_on_start = workspace_state.is_none();
         let mut runtime = WorkspaceRuntime::new(scope, parked, config, workspace_state);
@@ -1449,131 +1351,11 @@ fn spawn_worker(
         while let Ok(command) = commands.recv() {
             // Every command starts uncancelled: a cancellation aimed at previous
             // work must never abort a freshly dispatched command. Background
-            // cycles remain interruptible by activation changes; explicit user
+            // cycles and previews remain interruptible; explicit user
             // commands are atomic once native writes begin.
             cancelled.store(false, Ordering::Release);
-            interruptible.store(
-                matches!(command, WorkerCommand::Cycle(_)),
-                Ordering::Release,
-            );
-            let result = match command {
-                WorkerCommand::Cycle(outputs) => {
-                    let debug_outputs = outputs.clone();
-                    let result = runtime.cycle(outputs, &cancelled);
-                    WorkerResult::Status {
-                        result,
-                        debug: Box::new(runtime.debug_state(&debug_outputs)),
-                    }
-                }
-                WorkerCommand::Switch(workspace, outputs) => {
-                    let debug_outputs = outputs.clone();
-                    let result = runtime.switch(workspace, outputs, &cancelled);
-                    WorkerResult::Status {
-                        result,
-                        debug: Box::new(runtime.debug_state(&debug_outputs)),
-                    }
-                }
-                WorkerCommand::WorkspaceBackAndForth(outputs) => {
-                    let debug_outputs = outputs.clone();
-                    let result = runtime.workspace_back_and_forth(outputs, &cancelled);
-                    WorkerResult::Status {
-                        result,
-                        debug: Box::new(runtime.debug_state(&debug_outputs)),
-                    }
-                }
-                WorkerCommand::MoveFocused(workspace, outputs) => {
-                    let debug_outputs = outputs.clone();
-                    let result = runtime.move_focused(workspace, outputs, &cancelled);
-                    WorkerResult::Status {
-                        result,
-                        debug: Box::new(runtime.debug_state(&debug_outputs)),
-                    }
-                }
-                WorkerCommand::MoveApp(bundle_id, workspace, outputs) => {
-                    let debug_outputs = outputs.clone();
-                    let result = runtime.move_app(&bundle_id, workspace, outputs, &cancelled);
-                    WorkerResult::Status {
-                        result,
-                        debug: Box::new(runtime.debug_state(&debug_outputs)),
-                    }
-                }
-                WorkerCommand::CycleFocus(outputs) => {
-                    let debug_outputs = outputs.clone();
-                    let result = runtime.cycle_focus(outputs, &cancelled);
-                    WorkerResult::Status {
-                        result,
-                        debug: Box::new(runtime.debug_state(&debug_outputs)),
-                    }
-                }
-                WorkerCommand::Focus(direction, outputs) => {
-                    let debug_outputs = outputs.clone();
-                    let result = runtime.focus_relative(direction, outputs, &cancelled);
-                    WorkerResult::Status {
-                        result,
-                        debug: Box::new(runtime.debug_state(&debug_outputs)),
-                    }
-                }
-                WorkerCommand::Reorder(direction, outputs) => {
-                    let debug_outputs = outputs.clone();
-                    let result = runtime.reorder_focused(direction, outputs, &cancelled);
-                    WorkerResult::Status {
-                        result,
-                        debug: Box::new(runtime.debug_state(&debug_outputs)),
-                    }
-                }
-                WorkerCommand::DropWindow(window, point, preview, outputs) => {
-                    let debug_outputs = outputs.clone();
-                    let result = runtime.drop_window(window, point, preview, outputs, &cancelled);
-                    WorkerResult::Status {
-                        result,
-                        debug: Box::new(runtime.debug_state(&debug_outputs)),
-                    }
-                }
-                WorkerCommand::ResizeWindow(window, frame, preview, outputs) => {
-                    let debug_outputs = outputs.clone();
-                    let result = runtime.resize_window(window, frame, preview, outputs, &cancelled);
-                    WorkerResult::Status {
-                        result,
-                        debug: Box::new(runtime.debug_state(&debug_outputs)),
-                    }
-                }
-                WorkerCommand::ToggleLayout(outputs) => {
-                    let debug_outputs = outputs.clone();
-                    let result = runtime.toggle_layout(outputs, &cancelled);
-                    WorkerResult::Status {
-                        result,
-                        debug: Box::new(runtime.debug_state(&debug_outputs)),
-                    }
-                }
-                WorkerCommand::Resize(direction, outputs) => {
-                    let debug_outputs = outputs.clone();
-                    let result = runtime.resize_focused(direction, outputs, &cancelled);
-                    WorkerResult::Status {
-                        result,
-                        debug: Box::new(runtime.debug_state(&debug_outputs)),
-                    }
-                }
-                WorkerCommand::Balance(outputs) => {
-                    let debug_outputs = outputs.clone();
-                    let result = runtime.balance_focused(outputs, &cancelled);
-                    WorkerResult::Status {
-                        result,
-                        debug: Box::new(runtime.debug_state(&debug_outputs)),
-                    }
-                }
-                WorkerCommand::ToggleFullscreenLayout(outputs) => {
-                    let debug_outputs = outputs.clone();
-                    let result = runtime.toggle_fullscreen_layout(outputs, &cancelled);
-                    WorkerResult::Status {
-                        result,
-                        debug: Box::new(runtime.debug_state(&debug_outputs)),
-                    }
-                }
-                WorkerCommand::RestoreAll => {
-                    let failed = runtime.restore_all();
-                    WorkerResult::Restored { failed }
-                }
-                WorkerCommand::Stop => return,
+            let Some(result) = runtime.execute(command, &cancelled) else {
+                return;
             };
             if results.send(result).is_err() {
                 return;
@@ -1619,6 +1401,66 @@ impl WorkspaceRuntime<MacWorkspaceBackend> {
 }
 
 impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
+    fn execute(&mut self, command: WorkerCommand, cancelled: &AtomicBool) -> Option<WorkerResult> {
+        let (result, outputs) = match command {
+            WorkerCommand::Action(action, outputs) => {
+                let result = self.execute_action(action, outputs.clone(), cancelled);
+                (result, outputs)
+            }
+            WorkerCommand::Gesture(gesture, preview, outputs) => {
+                let result = match gesture {
+                    FinalGesture::Drop(window, point) => {
+                        self.drop_window(window, point, preview, outputs.clone(), cancelled)
+                    }
+                    FinalGesture::Resize(window, frame) => {
+                        self.resize_window(window, frame, preview, outputs.clone(), cancelled)
+                    }
+                };
+                (result, outputs)
+            }
+            WorkerCommand::RestoreAll => {
+                return Some(WorkerResult::Restored {
+                    failed: self.restore_all(),
+                });
+            }
+            WorkerCommand::Stop => return None,
+        };
+        Some(WorkerResult::Status {
+            result,
+            debug: Box::new(self.debug_state(&outputs)),
+        })
+    }
+
+    fn execute_action(
+        &mut self,
+        action: WorkerAction,
+        outputs: macos::DisplayOutputs,
+        cancelled: &AtomicBool,
+    ) -> Result<CycleStatus, String> {
+        match action {
+            WorkerAction::Retile => self.cycle(outputs, cancelled),
+            WorkerAction::SwitchWorkspace(workspace) => self.switch(workspace, outputs, cancelled),
+            WorkerAction::WorkspaceBackAndForth => {
+                self.workspace_back_and_forth(outputs, cancelled)
+            }
+            WorkerAction::MoveFocused(workspace) => {
+                self.move_focused(workspace, outputs, cancelled)
+            }
+            WorkerAction::MoveApp(bundle_id, workspace) => {
+                self.move_app(&bundle_id, workspace, outputs, cancelled)
+            }
+            WorkerAction::CycleFocus => self.cycle_focus(outputs, cancelled),
+            WorkerAction::Focus(direction) => self.focus_relative(direction, outputs, cancelled),
+            WorkerAction::Reorder(direction) => self.reorder_focused(direction, outputs, cancelled),
+            WorkerAction::ToggleLayout => self.toggle_layout(outputs, cancelled),
+            WorkerAction::Resize(direction) => self.resize_focused(direction, outputs, cancelled),
+            WorkerAction::Balance => self.balance_focused(outputs, cancelled),
+            WorkerAction::ToggleFullscreenLayout => {
+                self.toggle_fullscreen_layout(outputs, cancelled)
+            }
+        }
+    }
+
     #[cfg(test)]
     fn with_backend(
         scope: ManagementScope,
@@ -1661,12 +1503,18 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         } else {
             HashSet::new()
         };
+        let known_apps = std::array::from_fn(|index| {
+            workspaces
+                .app_instances(WorkspaceId::from_index(index))
+                .map(|app| (app.clone(), String::new()))
+                .collect()
+        });
         let persisted_workspace_state = workspaces.state();
         Self {
             backend,
             scope,
             workspaces,
-            known_apps: std::array::from_fn(|_| HashMap::new()),
+            known_apps,
             constrained: std::array::from_fn(|_| HashMap::new()),
             parked,
             recently_parked: HashMap::new(),
@@ -1781,9 +1629,23 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         outputs: macos::DisplayOutputs,
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
-        let mut counts = CycleCounts::default();
+        let mut failed = 0;
         if cancelled.load(Ordering::Acquire) {
             return Err("workspace operation cancelled".into());
+        }
+        // Parking is durable before workspace ownership. A crash between those
+        // writes must not strand an unowned window behind an otherwise valid state.
+        let unowned = self
+            .parked
+            .keys()
+            .filter(|window| self.workspaces.workspace_of_any(window).is_none())
+            .cloned()
+            .collect::<Vec<_>>();
+        let pending = self.restore_windows(unowned);
+        if pending > 0 {
+            return Err(format!(
+                "Recovery pending for {pending} unowned parked window(s)"
+            ));
         }
         self.synchronize_foreground(&outputs);
         let visible = self.visible_workspaces(&outputs);
@@ -1826,14 +1688,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let server_snapshot = self.backend.window_server_frames();
         let empty_server_frames = HashMap::new();
         let server_frames = server_snapshot.as_ref().unwrap_or(&empty_server_frames);
-        self.restore_visible(&visible, cancelled, &mut counts.failed);
-        self.park_inactive(
-            &outputs,
-            &visible,
-            server_frames,
-            cancelled,
-            &mut counts.failed,
-        );
+        self.restore_visible(&visible, cancelled, &mut failed);
+        self.park_inactive(&outputs, &visible, server_frames, cancelled, &mut failed);
         if cancelled.load(Ordering::Acquire) {
             return Err("workspace operation cancelled".into());
         }
@@ -1855,7 +1711,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     affinity_policy: &affinity_policy,
                     server_frames: server_snapshot.as_ref(),
                     cancelled,
-                    counts: &mut counts,
+                    failed: &mut failed,
                 },
             )?;
         }
@@ -1881,7 +1737,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             self.pending_fullscreen_focus_restore
                 .remove(&resolved.workspace);
             if !restored {
-                counts.failed += 1;
+                failed += 1;
             }
         }
         if focused_is_frontmost
@@ -1896,7 +1752,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             self.workspaces.remember_focus(workspace, focused);
         }
         self.persist_workspace_state_if_changed()?;
-        Ok(self.status_for_visible(counts.applied, counts.failed, &visible))
+        Ok(self.status_for_visible(failed, &visible))
     }
 
     fn freeze_window_affinities(
@@ -1955,11 +1811,29 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     continue;
                 }
                 let floating = !window.resizable || disposition == WindowDisposition::Floating;
-                if !floating && self.workspaces.floating_workspace_of(&window.id).is_some() {
+                if floating {
+                    if let Some(owner) = self.workspaces.workspace_of(&window.id) {
+                        self.forget_window(owner, &window.id);
+                        self.workspaces.own_floating(window.id.clone(), owner);
+                    }
+                } else if self.workspaces.floating_workspace_of(&window.id).is_some() {
                     self.workspaces.forget_floating(&window.id);
                 }
                 let affinity = if let Some(owner) = self.workspaces.workspace_of(&window.id) {
                     FrozenWindowAffinity::Owned(owner)
+                } else if !floating
+                    && let Some(affinity) = {
+                        let mut reserved = self.workspaces.replacement_workspaces(&window.id);
+                        reserved.next().map(|workspace| {
+                            if reserved.next().is_some() {
+                                FrozenWindowAffinity::AmbiguousReplacement
+                            } else {
+                                FrozenWindowAffinity::PendingReplacement(workspace)
+                            }
+                        })
+                    }
+                {
+                    affinity
                 } else if floating && self.workspaces.floating_workspace_of(&window.id).is_some() {
                     FrozenWindowAffinity::Floating
                 } else if floating {
@@ -2130,7 +2004,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             affinity_policy,
             server_frames,
             cancelled,
-            counts,
+            failed,
         } = context;
         let workspace = resolved.workspace;
         let output = resolved.output;
@@ -2142,7 +2016,6 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let mut scoped_observation = observation.clone();
         scoped_observation.cycle = ticket.cycle;
         let settings = Settings::for_output(output);
-        let mut dispositions = HashMap::new();
         for app in &mut scoped_observation.applications {
             if let crate::AppObservation::Complete {
                 app: _,
@@ -2156,8 +2029,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                         .get(&window.id)
                         .copied()
                         .unwrap_or(FrozenWindowAffinity::CurrentDisplay);
-                    let admitted = match affinity {
-                        FrozenWindowAffinity::Owned(owner) => owner == workspace,
+                    match affinity {
+                        FrozenWindowAffinity::Owned(owner)
+                        | FrozenWindowAffinity::PendingReplacement(owner) => owner == workspace,
+                        FrozenWindowAffinity::AmbiguousReplacement => false,
                         FrozenWindowAffinity::Floating | FrozenWindowAffinity::Ignored => false,
                         FrozenWindowAffinity::Inferred(target)
                             if affinity_policy.visible_workspaces.contains(&target) =>
@@ -2170,18 +2045,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                             output.contains_center(window.frame)
                                 && !self.workspaces.owned_by_other(workspace, &window.id)
                         }
-                    };
-                    if admitted {
-                        let disposition = match affinity {
-                            FrozenWindowAffinity::ExplicitRoute(target)
-                            | FrozenWindowAffinity::Inferred(target) => {
-                                WindowDisposition::Route(target)
-                            }
-                            _ => WindowDisposition::Managed,
-                        };
-                        dispositions.insert(window.id.clone(), disposition);
                     }
-                    admitted
                 });
                 if focused
                     .as_ref()
@@ -2229,11 +2093,15 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .decisions
             .iter()
             .filter_map(|decision| match decision {
-                Decision::WindowInserted { window, .. } => dispositions
+                Decision::WindowInserted { window, .. } => affinity_policy
+                    .windows
                     .get(window)
                     .copied()
-                    .and_then(|disposition| match disposition {
-                        WindowDisposition::Route(target) if target != workspace => {
+                    .and_then(|affinity| match affinity {
+                        FrozenWindowAffinity::ExplicitRoute(target)
+                        | FrozenWindowAffinity::Inferred(target)
+                            if target != workspace =>
+                        {
                             Some((window.clone(), target))
                         }
                         _ => None,
@@ -2256,7 +2124,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                         let _ = self.workspaces.move_window(window, workspace);
                         self.workspaces
                             .set_fullscreen_layout(workspace, source_fullscreen);
-                        counts.failed += 1;
+                        *failed += 1;
                         continue;
                     }
                 }
@@ -2312,14 +2180,13 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 .backend
                 .apply_observed(&placements, &settings, cancelled);
             self.record_results(workspace, &results);
-            count_results(&results, &mut counts.applied, &mut counts.failed);
+            *failed += failed_results(&results);
         }
         for target in routed_targets {
             if affinity_policy.visible_workspaces.contains(&target) {
                 let target_output = output_for(&self.workspaces, target, outputs);
                 let layout = self.layout_workspace(target, target_output, cancelled);
-                counts.applied += layout.applied;
-                counts.failed += layout.failed;
+                *failed += layout.failed;
                 update_observed_frames(
                     observation,
                     &self
@@ -2367,7 +2234,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 self.workspaces.remember_focus(workspace, focused);
                 self.pending_fullscreen_focus_restore.remove(&workspace);
                 self.persist_workspace_state_if_changed()?;
-                return Ok(self.status(0, 0, &outputs));
+                return Ok(self.status(0, &outputs));
             }
             let workspace_focus = self
                 .workspaces
@@ -2383,7 +2250,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             } else {
                 self.suppressed_focus = focused;
             }
-            return Ok(self.status(0, 0, &outputs));
+            return Ok(self.status(0, &outputs));
         }
         let switch_started = Instant::now();
         let outgoing = self.workspaces.windows(previous);
@@ -2417,10 +2284,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             if !self.parked.contains_key(window) {
                 continue;
             }
+            restored.push(window.clone());
             match self.restore_window(window) {
-                macos::ApplyOutcome::Applied => {
-                    restored.push(window.clone());
-                }
+                macos::ApplyOutcome::Applied => {}
                 macos::ApplyOutcome::Gone => {
                     self.forget_window(workspace, window);
                 }
@@ -2438,7 +2304,12 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 }
             }
         }
-        self.wait_for_reveal(&incoming, cancelled);
+        if !self.wait_for_reveal(&incoming, cancelled) {
+            self.rollback_switch(Vec::new(), &restored, output, &outputs);
+            return Err(format!(
+                "Workspace {workspace} stayed inactive because its windows did not finish restoring"
+            ));
+        }
         let layout = self.layout_workspace(workspace, output, cancelled);
         if layout.blocked {
             log_event!("switch rollback: workspace {} layout blocked", workspace);
@@ -2496,7 +2367,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             workspace,
             switch_started.elapsed().as_millis()
         );
-        Ok(self.status(layout.applied, layout.failed, &outputs))
+        Ok(self.status(layout.failed, &outputs))
     }
 
     /// Bounded wait until every incoming window's restore is confirmed by the
@@ -2505,7 +2376,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     /// before they arrive would flash the bare desktop. Polling is
     /// confirmation-only; the restore write is re-issued only for windows
     /// that still have not arrived after [`REVEAL_REWRITE_INTERVAL`].
-    fn wait_for_reveal(&mut self, incoming: &[crate::PhysicalWindowId], cancelled: &AtomicBool) {
+    fn wait_for_reveal(
+        &mut self,
+        incoming: &[crate::PhysicalWindowId],
+        cancelled: &AtomicBool,
+    ) -> bool {
         let started = Instant::now();
         let mut last_rewrite = started;
         loop {
@@ -2515,14 +2390,14 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 .cloned()
                 .collect();
             if pending.is_empty() {
-                return;
+                return !cancelled.load(Ordering::Acquire);
             }
             if started.elapsed() >= REVEAL_SETTLE_LIMIT || cancelled.load(Ordering::Acquire) {
                 log_event!(
-                    "reveal timeout: {} window(s) still arriving; proceeding",
+                    "reveal interrupted: {} window(s) still arriving; keeping outgoing workspace",
                     pending.len()
                 );
-                return;
+                return false;
             }
             thread::sleep(REVEAL_POLL_INTERVAL);
             let Some(frames) = self.backend.window_server_frames() else {
@@ -2571,9 +2446,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             self.restore_window(&window);
         }
         for window in revealed {
-            if !self.parked.contains_key(window) {
-                let _ = self.park_window(window, output, outputs);
-            }
+            // A pending restore may land after rollback. Supersede that write
+            // even when its recovery entry has not yet been retired.
+            let _ = self.park_window(window, output, outputs);
         }
     }
 
@@ -2672,7 +2547,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             }
         };
         if source == target {
-            return Ok(self.status(0, 0, &outputs));
+            return Ok(self.status(0, &outputs));
         }
         let source_output = output_for(&self.workspaces, source, &outputs);
         let target_output = output_for(&self.workspaces, target, &outputs);
@@ -2693,11 +2568,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if !target_is_active {
             self.suppressed_focus = Some(window.clone());
         }
-        let mut applied = 0;
         let mut failed = 0;
         if self.is_visible(source, &outputs) {
             let layout = self.layout_workspace(source, source_output, cancelled);
-            applied += layout.applied;
             failed += layout.failed;
         }
         if target_is_active {
@@ -2710,12 +2583,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 failed += 1;
             }
             let layout = self.layout_workspace(target, target_output, cancelled);
-            applied += layout.applied;
             failed += layout.failed;
             let _ = self.backend.focus_window(&window);
         }
         self.persist_workspace_state_if_changed()?;
-        Ok(self.status(applied, failed, &outputs))
+        Ok(self.status(failed, &outputs))
     }
 
     fn reorder_focused(
@@ -2762,7 +2634,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 .engine_mut(workspace)
                 .swap_windows(&window, &target.window)
             {
-                return Ok(self.status(0, 0, &outputs));
+                return Ok(self.status(0, &outputs));
             }
             let layout = self.layout_workspace(
                 workspace,
@@ -2770,7 +2642,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 cancelled,
             );
             self.persist_workspace_state_if_changed()?;
-            return Ok(self.status(layout.applied, layout.failed, &outputs));
+            return Ok(self.status(layout.failed, &outputs));
         }
         if windows.len() >= 2
             && perpendicular
@@ -2785,12 +2657,12 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 cancelled,
             );
             self.persist_workspace_state_if_changed()?;
-            return Ok(self.status(layout.applied, layout.failed, &outputs));
+            return Ok(self.status(layout.failed, &outputs));
         }
         let Some((target_workspace, target_window)) =
             self.spatial_target(&window, direction, &outputs)
         else {
-            return Ok(self.status(0, 0, &outputs));
+            return Ok(self.status(0, &outputs));
         };
         if target_workspace != workspace {
             return self.move_window(window, target_workspace, outputs, cancelled);
@@ -2800,7 +2672,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .engine_mut(workspace)
             .swap_windows(&window, &target_window)
         {
-            return Ok(self.status(0, 0, &outputs));
+            return Ok(self.status(0, &outputs));
         }
         let layout = self.layout_workspace(
             workspace,
@@ -2808,7 +2680,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             cancelled,
         );
         self.persist_workspace_state_if_changed()?;
-        Ok(self.status(layout.applied, layout.failed, &outputs))
+        Ok(self.status(layout.failed, &outputs))
     }
 
     fn drop_window(
@@ -2823,7 +2695,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return self.cycle(outputs, cancelled);
         };
         if self.workspaces.uses_fullscreen_layout(source) {
-            return Ok(self.status(0, 0, &outputs));
+            return Ok(self.status(0, &outputs));
         }
         let target = self
             .navigation_tiles(&outputs)
@@ -2832,7 +2704,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if let Some(target) = target {
             if target.workspace != source {
                 if preview {
-                    return Ok(self.status(0, 0, &outputs));
+                    return Ok(self.status(0, &outputs));
                 }
                 return self.move_window(window, target.workspace, outputs, cancelled);
             }
@@ -2858,7 +2730,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 if !preview {
                     self.persist_workspace_state_if_changed()?;
                 }
-                return Ok(self.status(layout.applied, layout.failed, &outputs));
+                return Ok(self.status(layout.failed, &outputs));
             }
         }
         if let Some(target) = self
@@ -2869,7 +2741,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             && target != source
         {
             if preview {
-                return Ok(self.status(0, 0, &outputs));
+                return Ok(self.status(0, &outputs));
             }
             return self.move_window(window, target, outputs, cancelled);
         }
@@ -2881,7 +2753,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if !preview {
             self.persist_workspace_state_if_changed()?;
         }
-        Ok(self.status(layout.applied, layout.failed, &outputs))
+        Ok(self.status(layout.failed, &outputs))
     }
 
     fn resize_window(
@@ -2896,7 +2768,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return self.cycle(outputs, cancelled);
         };
         if self.workspaces.uses_fullscreen_layout(workspace) {
-            return Ok(self.status(0, 0, &outputs));
+            return Ok(self.status(0, &outputs));
         }
         let output = output_for(&self.workspaces, workspace, &outputs);
         if !self
@@ -2907,13 +2779,13 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             if !preview {
                 self.persist_workspace_state_if_changed()?;
             }
-            return Ok(self.status(0, 0, &outputs));
+            return Ok(self.status(0, &outputs));
         }
         let layout = self.layout_workspace_during_drag(workspace, output, Some(&window), cancelled);
         if !preview {
             self.persist_workspace_state_if_changed()?;
         }
-        Ok(self.status(layout.applied, layout.failed, &outputs))
+        Ok(self.status(layout.failed, &outputs))
     }
 
     fn focus_relative(
@@ -2940,13 +2812,13 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return Err("Focused window is not on an active workspace".into());
         }
         let Some((_, target)) = self.spatial_target(&focused, direction, &outputs) else {
-            return Ok(self.status(0, 0, &outputs));
+            return Ok(self.status(0, &outputs));
         };
         if !self.backend.focus_window(&target) {
             return Err("Target window could not be focused".into());
         }
         self.remember_fullscreen_focus(workspace, &target)?;
-        Ok(self.status(0, 0, &outputs))
+        Ok(self.status(0, &outputs))
     }
 
     fn cycle_focus(
@@ -2973,17 +2845,17 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         }
         let windows = self.workspaces.engine(workspace).bound_windows();
         let Some(index) = windows.iter().position(|window| window == &focused) else {
-            return Ok(self.status(0, 0, &outputs));
+            return Ok(self.status(0, &outputs));
         };
         if windows.len() < 2 {
-            return Ok(self.status(0, 0, &outputs));
+            return Ok(self.status(0, &outputs));
         }
         let target = &windows[(index + 1) % windows.len()];
         if !self.backend.focus_window(target) {
             return Err("Target window could not be focused".into());
         }
         self.remember_fullscreen_focus(workspace, target)?;
-        Ok(self.status(0, 0, &outputs))
+        Ok(self.status(0, &outputs))
     }
 
     fn remember_fullscreen_focus(
@@ -3083,15 +2955,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                         fullscreen_layout: self
                             .workspaces
                             .uses_fullscreen_layout(resolved.workspace),
-                        layout: self.preview_layout(
-                            resolved.workspace,
-                            crate::Rect {
-                                x: 0,
-                                y: 0,
-                                width: 1500,
-                                height: 1100,
-                            },
-                        ),
+                        layout: self
+                            .preview_layout(resolved.workspace, status_item::WORKSPACE_PREVIEW),
                     })
                 })
                 .collect(),
@@ -3134,7 +2999,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             cancelled,
         );
         self.persist_workspace_state_if_changed()?;
-        Ok(self.status(layout.applied, layout.failed, &outputs))
+        Ok(self.status(layout.failed, &outputs))
     }
 
     fn resize_focused(
@@ -3165,11 +3030,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             KEYBOARD_RESIZE_INCREMENT,
             output,
         ) {
-            return Ok(self.status(0, 0, &outputs));
+            return Ok(self.status(0, &outputs));
         }
         let layout = self.layout_workspace(workspace, output, cancelled);
         self.persist_workspace_state_if_changed()?;
-        Ok(self.status(layout.applied, layout.failed, &outputs))
+        Ok(self.status(layout.failed, &outputs))
     }
 
     fn balance_focused(
@@ -3198,11 +3063,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .engine_mut(workspace)
             .balance_focused_parent(&window, output)
         {
-            return Ok(self.status(0, 0, &outputs));
+            return Ok(self.status(0, &outputs));
         }
         let layout = self.layout_workspace(workspace, output, cancelled);
         self.persist_workspace_state_if_changed()?;
-        Ok(self.status(layout.applied, layout.failed, &outputs))
+        Ok(self.status(layout.failed, &outputs))
     }
 
     fn toggle_fullscreen_layout(
@@ -3237,7 +3102,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             cancelled,
         );
         self.persist_workspace_state_if_changed()?;
-        Ok(self.status(layout.applied, layout.failed, &outputs))
+        Ok(self.status(layout.failed, &outputs))
     }
 
     fn layout_workspace(
@@ -3270,9 +3135,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         };
         // Managed layout runs without a fresh observation; the next cycle validates readback.
         self.record_results(workspace, &results);
-        let mut applied = 0;
-        let mut failed = 0;
-        count_results(&results, &mut applied, &mut failed);
+        let failed = failed_results(&results);
         let expected = placements
             .iter()
             .filter(|placement| placement.window.is_some())
@@ -3286,11 +3149,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     macos::ApplyOutcome::Gone | macos::ApplyOutcome::Unavailable
                 )
             });
-        LayoutStatus {
-            applied,
-            failed,
-            blocked,
-        }
+        LayoutStatus { failed, blocked }
     }
 
     fn park_inactive(
@@ -3305,11 +3164,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             visible.iter().map(|resolved| resolved.workspace).collect();
         let inactive = self.workspaces.inactive_windows_except(&visible_workspaces);
         let displays = outputs.frames().collect::<Vec<_>>();
-        let union = outputs.union();
         let frontmost = self.backend.frontmost_application();
         let context = ParkContext {
             displays: &displays,
-            union,
             frontmost: &frontmost,
             server_frames,
             visible,
@@ -3339,7 +3196,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 .get(&window.window_id)
                 .copied()
                 .unwrap_or(frame);
-            if !union.contains_center(frame) {
+            if !displays
+                .iter()
+                .any(|display| display.contains_center(frame))
+            {
                 // Already off-screen by the app's own doing; leave it alone rather
                 // than recording an off-screen frame as recovery data.
                 continue;
@@ -3408,7 +3268,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let Some(server) = context.server_frames.get(&window.window_id).copied() else {
             return;
         };
-        if !context.union.contains_center(server) {
+        if !context
+            .displays
+            .iter()
+            .any(|display| display.contains_center(server))
+        {
             // Only a window that STAYED parked past the settle grace ends a
             // fight; right after a re-park write the app may still undo it.
             if self
@@ -3467,14 +3331,20 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
 
     fn restore_all(&mut self) -> usize {
         let parked: Vec<_> = self.parked.keys().cloned().collect();
+        self.restore_windows(parked)
+    }
+
+    fn restore_windows(&mut self, windows: Vec<crate::PhysicalWindowId>) -> usize {
         let mut restored = Vec::new();
-        for window in parked {
-            let frame = self.parked[&window];
-            match self.restore_window_uncommitted(&window) {
+        for window in &windows {
+            let Some(frame) = self.parked.get(window).copied() else {
+                continue;
+            };
+            match self.restore_window_uncommitted(window) {
                 macos::ApplyOutcome::Applied | macos::ApplyOutcome::Gone
-                    if !self.parked.contains_key(&window) =>
+                    if !self.parked.contains_key(window) =>
                 {
-                    restored.push((window, frame));
+                    restored.push((window.clone(), frame));
                 }
                 _ => {}
             }
@@ -3483,7 +3353,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         // Persistence failure rolls recovery entries back into this map. The
         // caller may only exit when both native restoration and durable state
         // removal have completed.
-        self.parked.len()
+        windows
+            .iter()
+            .filter(|window| self.parked.contains_key(*window))
+            .count()
     }
 
     fn forget_window(&mut self, workspace: WorkspaceId, window: &crate::PhysicalWindowId) {
@@ -3549,7 +3422,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         // right after a move, which would misclassify the window and record a
         // wrong recovery frame.
         let frame = self.backend.window_server_frame(window).unwrap_or(frame);
-        if !outputs.union().contains_center(frame) && !self.parked.contains_key(window) {
+        if !outputs
+            .frames()
+            .any(|display| display.contains_center(frame))
+            && !self.parked.contains_key(window)
+        {
             // The app keeps this window off-screen itself. There is nothing to hide
             // and no on-screen frame worth recording for recovery.
             log_event!("park skip: {:?} already off-screen at {:?}", window, frame);
@@ -3673,13 +3550,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         }
     }
 
-    fn status(
-        &self,
-        applied: usize,
-        failed: usize,
-        outputs: &macos::DisplayOutputs,
-    ) -> CycleStatus {
-        self.status_for_visible(applied, failed, &self.visible_workspaces(outputs))
+    fn status(&self, failed: usize, outputs: &macos::DisplayOutputs) -> CycleStatus {
+        self.status_for_visible(failed, &self.visible_workspaces(outputs))
     }
 
     fn persist_workspace_state_if_changed(&mut self) -> Result<(), String> {
@@ -3700,12 +3572,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         layout
     }
 
-    fn status_for_visible(
-        &self,
-        _applied: usize,
-        failed: usize,
-        visible: &[ResolvedWorkspace],
-    ) -> CycleStatus {
+    fn status_for_visible(&self, failed: usize, visible: &[ResolvedWorkspace]) -> CycleStatus {
         let active: Vec<_> = visible
             .iter()
             .filter(|resolved| self.scope.manages_selector(&resolved.selector))
@@ -3792,14 +3659,11 @@ fn update_observed_frames(
     }
 }
 
-fn count_results(results: &[macos::ApplyResult], applied: &mut usize, failed: &mut usize) {
-    for result in results {
-        if matches!(result.outcome, macos::ApplyOutcome::Applied) {
-            *applied += 1;
-        } else {
-            *failed += 1;
-        }
-    }
+fn failed_results(results: &[macos::ApplyResult]) -> usize {
+    results
+        .iter()
+        .filter(|result| result.outcome != macos::ApplyOutcome::Applied)
+        .count()
 }
 
 fn parked_path() -> Option<PathBuf> {
@@ -3812,46 +3676,38 @@ fn workspace_state_path() -> Option<PathBuf> {
 
 fn load_parked() -> Result<HashMap<crate::PhysicalWindowId, crate::Rect>, String> {
     let path = parked_path().ok_or("HOME is unavailable")?;
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
-        Err(error) => return Err(format!("failed to read parked-window state: {error}")),
-    };
-    serde_json::from_slice::<ParkedWindows>(&bytes)
-        .map(|parked| parked.0)
-        .map_err(|error| format!("parked-window state is invalid: {error}"))
+    load_json::<ParkedWindows>(&path, "parked-window")
+        .map(|parked| parked.map_or_else(HashMap::new, |parked| parked.0))
 }
 
 fn persist_parked(parked: &HashMap<crate::PhysicalWindowId, crate::Rect>) -> Result<(), String> {
     let path = parked_path().ok_or("HOME is unavailable")?;
-    let parent = path
-        .parent()
-        .ok_or("parked-window state path has no parent")?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("failed to create state directory: {error}"))?;
-    let bytes = serde_json::to_vec(&ParkedWindowsRef(parked))
-        .map_err(|error| format!("failed to serialize parked windows: {error}"))?;
-    let mut file = atomic_write_file::AtomicWriteFile::open(&path)
-        .map_err(|error| format!("failed to open parked-window state: {error}"))?;
-    file.write_all(&bytes)
-        .map_err(|error| format!("failed to write parked windows: {error}"))?;
-    file.commit()
-        .map_err(|error| format!("failed to commit parked windows: {error}"))
+    persist_json(&path, &ParkedWindowsRef(parked), "parked-window")
 }
 
 fn load_workspace_state() -> Result<Option<crate::workspace::WorkspaceState>, String> {
     let path = workspace_state_path().ok_or("HOME is unavailable")?;
-    let bytes = match std::fs::read(&path) {
+    let state = load_json::<crate::workspace::WorkspaceState>(&path, "workspace")?;
+    if let Some(state) = &state {
+        state
+            .validate()
+            .map_err(|error| format!("workspace state is invalid: {error}"))?;
+    }
+    Ok(state)
+}
+
+fn load_json<T: serde::de::DeserializeOwned>(
+    path: &std::path::Path,
+    state: &str,
+) -> Result<Option<T>, String> {
+    let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("failed to read workspace state: {error}")),
+        Err(error) => return Err(format!("failed to read {state} state: {error}")),
     };
-    let state: crate::workspace::WorkspaceState = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("workspace state is invalid: {error}"))?;
-    state
-        .validate()
-        .map_err(|error| format!("workspace state is invalid: {error}"))?;
-    Ok(Some(state))
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| format!("{state} state is invalid: {error}"))
 }
 
 fn recover_startup_metadata(
@@ -3874,21 +3730,33 @@ fn recover_startup_metadata(
 
 fn persist_workspace_state(state: &crate::workspace::WorkspaceState) -> Result<(), String> {
     let path = workspace_state_path().ok_or("HOME is unavailable")?;
-    let parent = path.parent().ok_or("workspace state path has no parent")?;
+    persist_json(&path, state, "workspace")
+}
+
+fn persist_json(
+    path: &std::path::Path,
+    value: &impl serde::Serialize,
+    state: &str,
+) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{state} state path has no parent"))?;
     std::fs::create_dir_all(parent)
         .map_err(|error| format!("failed to create state directory: {error}"))?;
-    let bytes = serde_json::to_vec(state)
-        .map_err(|error| format!("failed to serialize workspace state: {error}"))?;
-    let mut file = atomic_write_file::AtomicWriteFile::open(&path)
-        .map_err(|error| format!("failed to open workspace state: {error}"))?;
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| format!("failed to serialize {state} state: {error}"))?;
+    let mut file = atomic_write_file::AtomicWriteFile::open(path)
+        .map_err(|error| format!("failed to open {state} state: {error}"))?;
     file.write_all(&bytes)
-        .map_err(|error| format!("failed to write workspace state: {error}"))?;
+        .map_err(|error| format!("failed to write {state} state: {error}"))?;
     file.commit()
-        .map_err(|error| format!("failed to commit workspace state: {error}"))
+        .map_err(|error| format!("failed to commit {state} state: {error}"))
 }
 
 #[cfg(test)]
 mod tests {
+    mod dispatch;
+    mod reliability;
     use crate::{BindingState, DisplayRole, Slot, SlotId};
 
     use super::*;
@@ -3952,6 +3820,7 @@ mod tests {
         managed_outcome: Option<macos::ApplyOutcome>,
         focus_outcome: Option<bool>,
         server_snapshot_unavailable: bool,
+        running_apps: Option<HashSet<AppInstanceId>>,
         snapshot_count: usize,
         observed_apply_count: usize,
         workspace_state: Option<crate::workspace::WorkspaceState>,
@@ -3989,8 +3858,10 @@ mod tests {
             Ok(observation)
         }
 
-        fn is_process_running(&mut self, _: &AppInstanceId) -> bool {
-            true
+        fn is_process_running(&mut self, app: &AppInstanceId) -> bool {
+            self.running_apps
+                .as_ref()
+                .is_none_or(|running| running.contains(app))
         }
 
         fn apply_observed(
@@ -4305,66 +4176,59 @@ mod tests {
     }
 
     #[test]
-    fn pending_actions_keep_only_the_latest_intent_without_cancelling_active_work() {
-        let mut pending = None;
-        let cancelled = AtomicBool::new(false);
+    fn pending_workspace_actions_preserve_arrival_order() {
+        let mut pending = InputQueue::default();
         let second = WorkspaceId::new(2).unwrap();
         let third = WorkspaceId::new(3).unwrap();
-        queue_latest(&mut pending, WorkerAction::SwitchWorkspace(second));
-        queue_latest(&mut pending, WorkerAction::SwitchWorkspace(third));
+        pending
+            .push(QueuedInput::Action(WorkerAction::SwitchWorkspace(second)))
+            .unwrap();
+        pending
+            .push(QueuedInput::Action(WorkerAction::SwitchWorkspace(third)))
+            .unwrap();
 
-        assert_eq!(pending.take(), Some(WorkerAction::SwitchWorkspace(third)));
-        assert_eq!(pending.take(), None);
-        assert!(!cancelled.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn every_exit_intent_restores_before_exiting() {
-        for intent in [
-            ExitIntent::Quit,
-            ExitIntent::Restart,
-            ExitIntent::Update,
-            ExitIntent::Terminate,
-        ] {
-            assert_eq!(exit_restore_plan(intent, false), RestorePlan::Now);
-            assert_eq!(exit_restore_plan(intent, true), RestorePlan::AfterWorker);
-        }
-    }
-
-    #[test]
-    fn hotkey_failure_restores_immediately_or_after_the_active_worker() {
-        assert_eq!(restore_plan(false), RestorePlan::Now);
-        assert_eq!(restore_plan(true), RestorePlan::AfterWorker);
+        assert_eq!(
+            pending.pop(),
+            Some(QueuedInput::Action(WorkerAction::SwitchWorkspace(second)))
+        );
+        assert_eq!(
+            pending.pop(),
+            Some(QueuedInput::Action(WorkerAction::SwitchWorkspace(third)))
+        );
+        assert_eq!(pending.pop(), None);
     }
 
     #[test]
     fn busy_preview_worker_queues_final_cross_display_drop() {
         let window = window(10);
-        let drop = FinalGesture::Drop(window, (1700, 400));
-        let mut pending = None;
-        let cancelled = AtomicBool::new(false);
-
+        let mut tracker = GestureTracker::default();
+        tracker.begin(Some((window.clone(), frame(50))));
+        assert!(tracker.preview(frame(500), Some((700, 400))).is_some());
+        let drop = tracker
+            .finish(Some(frame(1500)), Some((1700, 400)))
+            .unwrap();
+        let mut pending = InputQueue::default();
+        pending.push(QueuedInput::Gesture(drop)).unwrap();
         assert_eq!(
-            coordinate_final_gesture(true, &mut pending, drop.clone(), &cancelled),
-            None
+            pending.pop(),
+            Some(QueuedInput::Gesture(FinalGesture::Drop(
+                window,
+                (1700, 400)
+            )))
         );
-        assert_eq!(pending.take(), Some(drop));
-        assert!(cancelled.load(Ordering::Acquire));
     }
 
     #[test]
     fn mouse_up_uses_final_resize_frame_instead_of_losing_busy_preview() {
         let window = window(10);
-        let final_frame = frame(700);
-
+        let mut tracker = GestureTracker::default();
+        tracker.begin(Some((window.clone(), frame(50))));
+        let final_frame = crate::Rect {
+            width: 700,
+            ..frame(50)
+        };
         assert_eq!(
-            final_gesture(
-                Some(window.clone()),
-                true,
-                true,
-                Some(final_frame),
-                Some((1700, 400)),
-            ),
+            tracker.finish(Some(final_frame), Some((1700, 400))),
             Some(FinalGesture::Resize(window, final_frame))
         );
     }
@@ -4866,7 +4730,7 @@ mod tests {
     }
 
     #[test]
-    fn floating_rule_excludes_new_window_despite_unique_app_affinity() {
+    fn floating_rule_converts_existing_and_new_windows_to_floating_ownership() {
         let existing = window(10);
         let created = window(11);
         let mut backend = FakeBackend {
@@ -4892,11 +4756,16 @@ mod tests {
 
         runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
 
+        assert_eq!(runtime.workspaces.workspace_of(&existing), None);
         assert_eq!(
-            runtime.workspaces.workspace_of(&existing),
+            runtime.workspaces.floating_workspace_of(&existing),
             Some(WorkspaceId::ONE)
         );
         assert_eq!(runtime.workspaces.workspace_of(&created), None);
+        assert_eq!(
+            runtime.workspaces.floating_workspace_of(&created),
+            Some(WorkspaceId::SIX)
+        );
     }
 
     #[test]
@@ -5542,6 +5411,42 @@ mod tests {
     }
 
     #[test]
+    fn tiled_window_becoming_non_resizable_moves_to_floating_ownership() {
+        let window = window(10);
+        let normal = frame(50);
+        let mut observed = observation(&window, normal);
+        let crate::AppObservation::Complete { windows, .. } = &mut observed.applications[0] else {
+            unreachable!();
+        };
+        windows[0].resizable = false;
+        let mut backend = FakeBackend {
+            observation: Some(observed),
+            ..FakeBackend::default()
+        };
+        backend.frames.insert(window.clone(), normal);
+        let mut runtime = runtime(backend);
+        bind(&mut runtime, WorkspaceId::ONE, &window);
+        runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
+
+        runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+
+        assert_eq!(runtime.workspaces.workspace_of(&window), None);
+        assert_eq!(
+            runtime.workspaces.floating_workspace_of(&window),
+            Some(WorkspaceId::ONE)
+        );
+        assert!(
+            runtime
+                .workspaces
+                .engine(WorkspaceId::ONE)
+                .model()
+                .workspace
+                .slots
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn route_rule_moves_only_inserted_window_to_inactive_workspace() {
         let window = window(10);
         let normal = frame(50);
@@ -6171,6 +6076,48 @@ mod tests {
             runtime.workspaces.preferred_focus(WorkspaceId::ONE),
             Some(first)
         );
+    }
+
+    #[test]
+    fn restored_slots_for_a_dead_application_are_retired() {
+        let dead = window(10);
+        let mut persisted = Workspaces::default();
+        persisted.engine_mut(WorkspaceId::ONE).insert_slot(Slot {
+            id: SlotId(1),
+            weight: 1,
+            binding: BindingState::Bound(dead.clone()),
+        });
+        persisted.refresh_ownership(WorkspaceId::ONE);
+        let backend = FakeBackend {
+            observation: Some(crate::NativeObservation {
+                cycle: 0,
+                mouse_down: false,
+                applications: Vec::new(),
+            }),
+            running_apps: Some(HashSet::new()),
+            ..FakeBackend::default()
+        };
+        let mut runtime = WorkspaceRuntime::with_backend_config_state(
+            ManagementScope::Both,
+            backend,
+            HashMap::new(),
+            Config::default(),
+            Some(persisted.state()),
+        );
+
+        runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+
+        assert_eq!(runtime.workspaces.workspace_of(&dead), None);
+        assert!(
+            runtime
+                .workspaces
+                .engine(WorkspaceId::ONE)
+                .model()
+                .workspace
+                .slots
+                .is_empty()
+        );
+        assert!(runtime.backend.workspace_state.is_some());
     }
 
     #[test]

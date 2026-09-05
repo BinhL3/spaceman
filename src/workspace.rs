@@ -216,12 +216,17 @@ impl WorkspaceState {
                 }
             }
         }
-        let tiled: HashSet<_> = self
+        let mut tiled = HashSet::new();
+        for window in self
             .slots
             .iter()
             .flatten()
-            .filter_map(crate::Slot::bound_window)
-            .collect();
+            .map(crate::Slot::identity_window)
+        {
+            if !tiled.insert(window) {
+                return Err("tiled window is owned by multiple workspaces".into());
+            }
+        }
         let mut floating = HashSet::new();
         for (window, _) in &self.floating {
             if tiled.contains(window) {
@@ -327,6 +332,12 @@ impl Default for Workspaces {
 impl Workspaces {
     #[must_use]
     pub(crate) fn state(&self) -> WorkspaceState {
+        let workspace_count = self
+            .engines
+            .iter()
+            .rposition(|engine| !engine.model().workspace.slots.is_empty())
+            .map_or(WorkspaceId::NUMBERED_COUNT, |index| index + 1)
+            .max(WorkspaceId::NUMBERED_COUNT);
         let mut active: Vec<_> = self
             .active
             .iter()
@@ -346,11 +357,13 @@ impl Workspaces {
             layouts: self
                 .engines
                 .iter()
+                .take(workspace_count)
                 .map(|engine| engine.layout().clone())
                 .collect(),
             slots: self
                 .engines
                 .iter()
+                .take(workspace_count)
                 .map(|engine| engine.model().workspace.slots.clone())
                 .collect(),
             floating: {
@@ -382,7 +395,12 @@ impl Workspaces {
         } = state;
         for (index, slots) in slots.into_iter().take(WorkspaceId::COUNT).enumerate() {
             let workspace = WorkspaceId::from_index(index);
-            for slot in slots {
+            for mut slot in slots {
+                if let crate::BindingState::Unresolved { since, .. } = &mut slot.binding {
+                    // Reconciliation cycles are process-local, so restart the
+                    // bounded settling window when restoring persisted state.
+                    *since = 0;
+                }
                 self.engine_mut(workspace).insert_slot(slot);
             }
             let layout = layouts.get(index).cloned().unwrap_or_else(|| {
@@ -552,7 +570,7 @@ impl Workspaces {
                     .workspace
                     .slots
                     .iter()
-                    .any(|slot| slot.bound_window() == Some(window))
+                    .any(|slot| slot.identity_window() == window)
             })
             .map(WorkspaceId::from_index)
     }
@@ -580,6 +598,18 @@ impl Workspaces {
                 .map(|(window, _)| window.clone()),
         );
         windows
+    }
+
+    pub(crate) fn app_instances(
+        &self,
+        workspace: WorkspaceId,
+    ) -> impl Iterator<Item = &crate::AppInstanceId> {
+        self.engine(workspace)
+            .model()
+            .workspace
+            .slots
+            .iter()
+            .map(|slot| &slot.identity_window().app)
     }
 
     pub(crate) fn floating_windows_for_app(
@@ -614,11 +644,29 @@ impl Workspaces {
                     .workspace
                     .slots
                     .iter()
-                    .filter_map(crate::Slot::bound_window)
-                    .any(|window| &window.app == app)
+                    .any(|slot| slot.belongs_to(app))
         });
         let workspace = matches.next()?;
         matches.next().is_none().then_some(workspace)
+    }
+
+    /// Candidate evidence is reserved, not owned: only reconciliation may bind
+    /// it. More than one reserving workspace means adoption must be deferred.
+    pub(crate) fn replacement_workspaces<'a>(
+        &'a self,
+        window: &'a PhysicalWindowId,
+    ) -> impl Iterator<Item = WorkspaceId> + 'a {
+        WorkspaceId::all().filter(|workspace| {
+            self.engine(*workspace)
+                .model()
+                .workspace
+                .slots
+                .iter()
+                .any(|slot| {
+                    matches!(&slot.binding, crate::BindingState::Unresolved { candidates, .. }
+                    if candidates.contains(window))
+                })
+        })
     }
 
     #[must_use]
@@ -631,7 +679,15 @@ impl Workspaces {
 
     pub fn refresh_ownership(&mut self, workspace: WorkspaceId) {
         self.owners.retain(|_, owner| *owner != workspace);
-        for window in self.engine(workspace).bound_windows() {
+        let windows = self
+            .engine(workspace)
+            .model()
+            .workspace
+            .slots
+            .iter()
+            .map(|slot| slot.identity_window().clone())
+            .collect::<Vec<_>>();
+        for window in windows {
             self.owners.insert(window, workspace);
         }
         let index = workspace.index();
@@ -754,6 +810,43 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_affinity_reserves_candidates_without_owning_them() {
+        let old = window(10);
+        let replacement = window(11);
+        let other = window(20);
+        let mut workspaces = Workspaces::default();
+        workspaces.engine_mut(WorkspaceId::ONE).insert_slot(Slot {
+            id: SlotId(1),
+            weight: 1,
+            binding: BindingState::Unresolved {
+                previous: old.clone(),
+                candidates: vec![replacement.clone()],
+                since: 1,
+            },
+        });
+        workspaces.refresh_ownership(WorkspaceId::ONE);
+        assert_eq!(
+            workspaces.workspace_for_app(&old.app),
+            Some(WorkspaceId::ONE)
+        );
+        assert_eq!(workspaces.workspace_of(&replacement), None);
+        assert_eq!(
+            workspaces
+                .replacement_workspaces(&replacement)
+                .collect::<Vec<_>>(),
+            vec![WorkspaceId::ONE]
+        );
+        workspaces.engine_mut(WorkspaceId::SIX).insert_slot(Slot {
+            id: SlotId(1),
+            weight: 1,
+            binding: BindingState::Bound(other),
+        });
+        workspaces.refresh_ownership(WorkspaceId::SIX);
+        assert_eq!(workspaces.workspace_for_app(&old.app), None);
+        assert!(workspaces.state().validate().is_ok());
+    }
+
+    #[test]
     fn workspace_range_and_default_assignment_match_aerospace() {
         assert!(WorkspaceId::new(0).is_err());
         assert!(WorkspaceId::new(11).is_err());
@@ -770,6 +863,10 @@ mod tests {
             &DisplaySelector::Secondary
         );
         assert!(!Workspaces::default().is_enabled(WorkspaceId::named('D').unwrap()));
+        assert_eq!(
+            Workspaces::default().state().slots.len(),
+            WorkspaceId::NUMBERED_COUNT
+        );
     }
 
     #[test]
@@ -1108,6 +1205,58 @@ mod tests {
             crate::layout_tree::LayoutTree::flat(crate::Axis::Horizontal, [SlotId(1)]);
 
         assert!(state.validate().is_err());
+    }
+
+    #[test]
+    fn persisted_state_rejects_a_window_owned_by_multiple_workspaces() {
+        let mut state = Workspaces::default().state();
+        state.slots[0].push(Slot {
+            id: SlotId(1),
+            weight: 1,
+            binding: BindingState::Bound(window(10)),
+        });
+        state.slots[1].push(Slot {
+            id: SlotId(1),
+            weight: 1,
+            binding: BindingState::Unresolved {
+                previous: window(10),
+                candidates: vec![window(20)],
+                since: 1,
+            },
+        });
+        for index in [0, 1] {
+            state.layouts[index] =
+                crate::layout_tree::LayoutTree::flat(crate::Axis::Horizontal, [SlotId(1)]);
+        }
+
+        assert_eq!(
+            state.validate().unwrap_err(),
+            "tiled window is owned by multiple workspaces"
+        );
+    }
+
+    #[test]
+    fn restoring_unresolved_state_restarts_its_settling_window() {
+        let mut state = Workspaces::default().state();
+        state.slots[0].push(Slot {
+            id: SlotId(1),
+            weight: 1,
+            binding: BindingState::Unresolved {
+                previous: window(10),
+                candidates: vec![window(20)],
+                since: 10_000,
+            },
+        });
+        state.layouts[0] =
+            crate::layout_tree::LayoutTree::flat(crate::Axis::Horizontal, [SlotId(1)]);
+        let mut workspaces = Workspaces::default();
+
+        workspaces.restore(state);
+
+        assert!(matches!(
+            workspaces.engine(WorkspaceId::ONE).model().workspace.slots[0].binding,
+            BindingState::Unresolved { since: 0, .. }
+        ));
     }
 
     #[test]

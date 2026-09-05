@@ -23,7 +23,7 @@ body:
     id: sequence
     attributes:
       label: Safe reproduction sequence
-      description: Describe the sequence using generic app labels and disposable content. State the automatic/manual mode transitions.
+      description: Describe the sequence using generic app labels and disposable content. State the automatic/paused/restoring mode transitions.
     validations:
       required: true
   - type: textarea

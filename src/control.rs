@@ -2,7 +2,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
     os::unix::{
-        fs::PermissionsExt,
+        fs::{OpenOptionsExt, PermissionsExt},
         net::{UnixListener, UnixStream},
     },
     path::PathBuf,
@@ -14,6 +14,11 @@ use std::{
 use crate::{Direction, ResizeDirection, WorkspaceId};
 
 const MAX_REQUEST_BYTES: u64 = 4 * 1024;
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_millis(250);
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(6);
+
+pub const COMMAND_USAGE: &str = "status|debug|switch WORKSPACE|back-and-forth|move WORKSPACE|move-app ID WORKSPACE|focus DIR|move-direction DIR|layout|resize shrink|resize grow|balance|pause|resume|retile|restart|quit";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
@@ -66,12 +71,15 @@ fn listen_at(path: PathBuf, requests: Sender<Request>) -> Result<Server, String>
     let parent = path.parent().ok_or("control socket path has no parent")?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("failed to create control socket directory: {error}"))?;
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("failed to secure control socket directory: {error}"))?;
     let lock_path = path.with_extension("lock");
     let lock = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
+        .mode(0o600)
         .open(&lock_path)
         .map_err(|error| format!("failed to open control socket lock: {error}"))?;
     lock.try_lock()
@@ -101,11 +109,18 @@ fn listen_at(path: PathBuf, requests: Sender<Request>) -> Result<Server, String>
 }
 
 pub fn send(arguments: &[String]) -> Result<String, String> {
-    let command = parse(arguments)?;
+    let command = arguments.join(" ");
+    parse_line(&command)?;
     let path = socket_path()?;
     let mut stream =
         UnixStream::connect(&path).map_err(|_| "Spaceman agent is not running".to_string())?;
-    writeln!(stream, "{}", encode(&command))
+    stream
+        .set_write_timeout(Some(CLIENT_TIMEOUT))
+        .map_err(|error| format!("failed to configure control command: {error}"))?;
+    stream
+        .set_read_timeout(Some(CLIENT_TIMEOUT))
+        .map_err(|error| format!("failed to configure control response: {error}"))?;
+    writeln!(stream, "{command}")
         .map_err(|error| format!("failed to send control command: {error}"))?;
     stream
         .shutdown(std::net::Shutdown::Write)
@@ -128,7 +143,8 @@ fn serve(listener: UnixListener, requests: Sender<Request>) {
         let Ok(mut stream) = connection else {
             continue;
         };
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+        let _ = stream.set_read_timeout(Some(REQUEST_READ_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(REQUEST_READ_TIMEOUT));
         let response = match read_command(&stream) {
             Ok(line) => parse_line(line.trim()).and_then(|command| {
                 let (response, receiver) = channel();
@@ -164,16 +180,12 @@ fn read_command(reader: impl Read) -> Result<String, String> {
 
 fn receive_response(receiver: Receiver<Result<String, String>>) -> Result<String, String> {
     receiver
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(RESPONSE_TIMEOUT)
         .map_err(|_| "Spaceman did not respond to the control command".to_string())?
 }
 
 fn socket_path() -> Result<PathBuf, String> {
     crate::config::application_support_path("control.sock").ok_or("HOME is unavailable".into())
-}
-
-fn parse(arguments: &[String]) -> Result<Command, String> {
-    parse_line(&arguments.join(" "))
 }
 
 fn parse_line(line: &str) -> Result<Command, String> {
@@ -197,38 +209,12 @@ fn parse_line(line: &str) -> Result<Command, String> {
         ["retile"] => Ok(Command::Retile),
         ["restart"] => Ok(Command::Restart),
         ["quit"] => Ok(Command::Quit),
-        _ => Err(
-            "expected status, debug, switch <workspace>, back-and-forth, move <workspace>, move-app <bundle-id> <workspace>, focus <direction>, move-direction <direction>, layout, resize <shrink|grow>, balance, pause, resume, retile, restart, or quit".into(),
-        ),
+        _ => Err(format!("expected {COMMAND_USAGE}")),
     }
 }
 
 fn parse_workspace(value: &str) -> Result<WorkspaceId, String> {
     WorkspaceId::parse(value)
-}
-
-fn encode(command: &Command) -> String {
-    match command {
-        Command::Status => "status".into(),
-        Command::Debug => "debug".into(),
-        Command::Switch(workspace) => format!("switch {workspace}"),
-        Command::WorkspaceBackAndForth => "back-and-forth".into(),
-        Command::Move(workspace) => format!("move {workspace}"),
-        Command::MoveApp(bundle_id, workspace) => {
-            format!("move-app {bundle_id} {workspace}")
-        }
-        Command::Focus(direction) => format!("focus {direction}"),
-        Command::MoveDirection(direction) => format!("move-direction {direction}"),
-        Command::Layout => "layout".into(),
-        Command::Resize(ResizeDirection::Shrink) => "resize shrink".into(),
-        Command::Resize(ResizeDirection::Grow) => "resize grow".into(),
-        Command::Balance => "balance".into(),
-        Command::Pause => "pause".into(),
-        Command::Resume => "resume".into(),
-        Command::Retile => "retile".into(),
-        Command::Restart => "restart".into(),
-        Command::Quit => "quit".into(),
-    }
 }
 
 #[cfg(test)]
@@ -287,9 +273,25 @@ mod tests {
 
         assert!(listen_at(path.clone(), requests).is_err());
         assert!(UnixStream::connect(&path).is_ok());
+        let lock_path = path.with_extension("lock");
+        assert_eq!(
+            fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        for secured in [&path, &lock_path] {
+            assert_eq!(
+                fs::metadata(secured).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
 
         drop(server);
-        let _ = fs::remove_file(path.with_extension("lock"));
+        let _ = fs::remove_file(lock_path);
+        let _ = fs::remove_dir(path.parent().unwrap());
     }
 
     #[test]
@@ -299,14 +301,9 @@ mod tests {
             .set_read_timeout(Some(Duration::from_millis(20)))
             .unwrap();
         client.write_all(b"sta").unwrap();
-        let mut line = String::new();
+        let error = read_command(server).unwrap_err();
 
-        let error = BufReader::new(server).read_line(&mut line).unwrap_err();
-
-        assert!(matches!(
-            error.kind(),
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-        ));
+        assert!(error.contains("failed to read control command"));
     }
 
     #[test]
@@ -328,9 +325,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!(
-            "spaceman-{label}-{}-{nonce}.sock",
-            std::process::id()
-        ))
+        std::env::temp_dir()
+            .join(format!("spaceman-{label}-{}-{nonce}", std::process::id()))
+            .join("control.sock")
     }
 }

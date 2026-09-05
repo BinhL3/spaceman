@@ -2,6 +2,29 @@ use std::{ffi::c_void, fmt, slice};
 
 const VIRTUAL_KEY_CODES: std::ops::Range<u16> = 0..128;
 
+// Public Carbon Events.h keypad identities; intervening codes include non-keypad keys.
+const KEYPAD_KEY_CODES: [u16; 19] = [
+    0x41, // kVK_ANSI_KeypadDecimal
+    0x43, // kVK_ANSI_KeypadMultiply
+    0x45, // kVK_ANSI_KeypadPlus
+    0x47, // kVK_ANSI_KeypadClear
+    0x4b, // kVK_ANSI_KeypadDivide
+    0x4c, // kVK_ANSI_KeypadEnter
+    0x4e, // kVK_ANSI_KeypadMinus
+    0x51, // kVK_ANSI_KeypadEquals
+    0x52, // kVK_ANSI_Keypad0
+    0x53, // kVK_ANSI_Keypad1
+    0x54, // kVK_ANSI_Keypad2
+    0x55, // kVK_ANSI_Keypad3
+    0x56, // kVK_ANSI_Keypad4
+    0x57, // kVK_ANSI_Keypad5
+    0x58, // kVK_ANSI_Keypad6
+    0x59, // kVK_ANSI_Keypad7
+    0x5b, // kVK_ANSI_Keypad8
+    0x5c, // kVK_ANSI_Keypad9
+    0x5f, // kVK_JIS_KeypadComma
+];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SemanticKey {
     Tab,
@@ -150,7 +173,8 @@ fn reverse_lookup(outputs: &[KeyOutput], character: char) -> Result<KeyOutput, R
         .iter()
         .filter(|output| !output.dead && output.character == character)
         .filter(|output| !character.is_alphabetic() || !output.shift)
-        .min_by_key(|output| output.shift)
+        // Keep character shortcuts reachable on keyboards without a numeric keypad.
+        .min_by_key(|output| (KEYPAD_KEY_CODES.contains(&output.key_code), output.shift))
         .cloned()
         .ok_or(ResolveError::MissingCharacter(character))
 }
@@ -572,6 +596,70 @@ mod tests {
             reverse_lookup(&[dead], '='),
             Err(ResolveError::MissingCharacter('='))
         );
+    }
+
+    #[test]
+    fn main_keyboard_slash_precedes_keypad_even_when_shifted() {
+        // Russian-PC uses Shift+Backslash; Russian uses the unshifted Slash key.
+        for (key_code, shift) in [(0x2a, true), (0x2c, false)] {
+            let layout = LayoutSnapshot::for_test(
+                vec![
+                    (key_code, '/', shift, false),
+                    (0x4b, '/', false, false),
+                    (0x4b, '/', true, false),
+                    (0x4d, '/', true, false),
+                ],
+                vec![(0x2c, '/', false, false)],
+            );
+            assert_eq!(
+                layout.resolve(LogicalKey::Character('/')),
+                Ok(ResolvedKey {
+                    key_code: u32::from(key_code),
+                    shift
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn keypad_fallback_keeps_primary_precedence_and_rejects_dead_keys() {
+        for primary in [
+            vec![(0x4b, '/', true, false), (0x4b, '/', false, false)],
+            vec![(0x2a, '/', true, true), (0x4b, '/', false, false)],
+        ] {
+            let layout = LayoutSnapshot::for_test(primary, vec![(0x2c, '/', false, false)]);
+            assert_eq!(
+                layout.resolve(LogicalKey::Character('/')),
+                Ok(ResolvedKey {
+                    key_code: 0x4b,
+                    shift: false
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn non_keypad_candidates_still_prefer_unshifted_output() {
+        let layout = LayoutSnapshot::for_test(
+            vec![(0x2a, '/', true, false), (0x2c, '/', false, false)],
+            vec![],
+        );
+        assert_eq!(
+            layout.resolve(LogicalKey::Character('/')),
+            Ok(ResolvedKey {
+                key_code: 0x2c,
+                shift: false
+            })
+        );
+    }
+
+    #[test]
+    fn keypad_codes_exclude_function_media_and_jis_main_keys() {
+        // F17, volume up/down, mute, F18/F19/F20, JIS Yen and Underscore.
+        for key_code in [0x40, 0x48, 0x49, 0x4a, 0x4f, 0x50, 0x5a, 0x5d, 0x5e] {
+            assert!(!KEYPAD_KEY_CODES.contains(&key_code));
+        }
+        assert!(KEYPAD_KEY_CODES.contains(&0x5f)); // JIS KeypadComma
     }
 
     #[test]

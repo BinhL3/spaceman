@@ -8,6 +8,8 @@ This file is the current engineering contract. README and `docs/` describe curre
 - `src/bin/spaceman-agent.rs`, `src/app.rs`: owner-only capped logging, GPUI/AppKit foreground
   lifecycle, action queue, gestures, status, durable parking/restoration, restore-before-exit
   coordination, and the worker boundary.
+- `src/app/input.rs`: bounded ordered user input and geometry-based gesture tracking, independent
+  of preview-worker availability. Main-thread pointer sampling must not make synchronous AX calls.
 - `src/desktop_ui.rs`, `src/status_item.rs`, `src/settings.rs`, `src/login_item.rs`, `src/sparkle.rs`,
   `src/termination.rs`: main-thread UI primitives, menu/settings, login registration, signed updates,
   and asynchronous AppKit termination coordination.
@@ -97,11 +99,14 @@ This file is the current engineering contract. README and `docs/` describe curre
 
 ```sh
 cargo fmt --check
+scripts/validate-release.sh --metadata-only
 cargo check --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
+cargo test --locked --all-targets
+cargo audit
 cargo run --locked -- replay fixtures/ghostty-tab-replacement.json
 cargo run --locked -- config-check config.example.toml
+(cd website && bun install --frozen-lockfile && bun audit && bun run build)
 git diff --check
 ```
 

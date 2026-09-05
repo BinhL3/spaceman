@@ -13,7 +13,7 @@ use libloading::Library;
 use objc2::runtime::{AnyClass, AnyObject, Bool, NSObjectProtocol, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, msg_send, rc::Retained};
 use objc2_app_kit::NSApplication;
-use objc2_foundation::{NSNotification, NSNotificationCenter, NSObject, NSString};
+use objc2_foundation::{NSInteger, NSNotification, NSNotificationCenter, NSObject, NSString};
 
 use crate::app::Action;
 
@@ -40,6 +40,18 @@ objc2::define_class!(
     unsafe impl NSObjectProtocol for SparkleDelegate {}
 
     impl SparkleDelegate {
+        #[unsafe(method(updater:didFinishUpdateCycleForUpdateCheck:error:))]
+        fn did_finish_update_cycle(
+            &self,
+            _updater: &AnyObject,
+            _update_check: NSInteger,
+            _error: Option<&AnyObject>,
+        ) {
+            if status() == UpdateStatus::Checking {
+                set_status(UpdateStatus::Idle);
+            }
+        }
+
         #[unsafe(method(updater:shouldPostponeRelaunchForUpdate:untilInvokingBlock:))]
         fn should_postpone_relaunch(
             &self,

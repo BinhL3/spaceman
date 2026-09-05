@@ -290,7 +290,12 @@ fn draw_workspace_layouts(
                     let tile = NSRect::new(
                         NSPoint::new(
                             x + f64::from(tile.x) / f64::from(WORKSPACE_PREVIEW.width) * 15.0,
-                            2.5 + f64::from(tile.y) / f64::from(WORKSPACE_PREVIEW.height) * 11.0,
+                            // Preview frames are top-down; the image is unflipped.
+                            2.5 + (f64::from(WORKSPACE_PREVIEW.height)
+                                - f64::from(tile.y)
+                                - f64::from(tile.height))
+                                / f64::from(WORKSPACE_PREVIEW.height)
+                                * 11.0,
                         ),
                         NSSize::new(
                             f64::from(tile.width) / f64::from(WORKSPACE_PREVIEW.width) * 15.0,

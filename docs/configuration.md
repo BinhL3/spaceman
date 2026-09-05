@@ -7,7 +7,8 @@ Spaceman loads configuration once, when `spaceman-agent` starts, from:
 ```
 
 Set `SPACEMAN_CONFIG` in the agent's environment to replace that path. A missing file means default
-configuration. Invalid configuration is reported to stderr during recovery; Spaceman falls back to
+configuration. Invalid configuration is reported to stderr for terminal launches and to
+`~/Library/Application Support/Spaceman/agent.log` for app-bundle launches. Spaceman falls back to
 defaults and ignores workspace state so it can prioritize restoring parked windows.
 
 Validate a file before replacing or restarting the app:
@@ -82,7 +83,9 @@ visible again.
 Named workspaces are opt-in: reference a letter in a route or `[[workspaces]]` entry to enable it.
 They default to `main`. An enabled letter registers `Option+letter` to switch and
 `Option+Shift+letter` to move the focused window there. The named workspace shortcut takes
-precedence over a built-in letter shortcut when they overlap.
+precedence over a built-in letter shortcut when they overlap. A named workspace still referenced by
+persisted active/previous history, tiled or floating windows, or Fullscreen Layout remains enabled
+across config edits until that state no longer refers to it.
 
 ## Process Scope
 

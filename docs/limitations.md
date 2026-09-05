@@ -11,7 +11,7 @@ Spaceman is an experimental public preview, not a broadly qualified release.
 - Native-tab identity has no perfect public identifier. Ambiguous transitions intentionally defer
   replacement and may need another cycle.
 - Configuration supports ordered exact-match `float`/`route`/`ignore` rules and display assignment. It
-  does not support named app spaces, regex title matching, or the planned orthogonal rule schema.
+  intentionally does not support orthogonal named app spaces or regex title matching.
 - Configuration is loaded only at process startup. `ctl restart` exits safely but does not relaunch.
 - `secondary` selects the first non-main display; display ordering and duplicate names may surprise.
 - Global shortcuts may collide with other applications or fail on keyboard layouts that cannot

@@ -29,6 +29,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn invalidate(&mut self) -> u64 {
+        self.pending = None;
         self.revision = self.revision.saturating_add(1);
         self.revision
     }
@@ -111,7 +112,6 @@ impl Engine {
     pub(crate) fn toggle_axis(&mut self) {
         self.layout.toggle_root_axis();
         self.model.workspace.axis = self.layout.root_axis();
-        self.pending = None;
         self.invalidate();
     }
 
@@ -126,6 +126,7 @@ impl Engine {
         self.layout
             .sync(self.model.workspace.axis, &self.model.workspace.slots);
         self.evidence.previous_placements.remove(&slot.id);
+        self.invalidate();
         Some(slot)
     }
 
@@ -143,6 +144,7 @@ impl Engine {
         self.model.workspace.slots.push(slot);
         self.layout
             .sync(self.model.workspace.axis, &self.model.workspace.slots);
+        self.invalidate();
     }
 
     pub(crate) fn swap_windows(
@@ -159,7 +161,6 @@ impl Engine {
         if !self.layout.swap(first, second) {
             return false;
         }
-        self.pending = None;
         self.invalidate();
         true
     }
@@ -224,7 +225,6 @@ impl Engine {
             return false;
         }
         self.model.workspace.axis = self.layout.root_axis();
-        self.pending = None;
         self.invalidate();
         true
     }
@@ -245,7 +245,6 @@ impl Engine {
             return false;
         }
         self.model.workspace.axis = self.layout.root_axis();
-        self.pending = None;
         self.invalidate();
         true
     }
@@ -270,7 +269,6 @@ impl Engine {
         layout.sync(self.model.workspace.axis, &self.model.workspace.slots);
         self.model.workspace.axis = layout.root_axis();
         self.layout = layout;
-        self.pending = None;
         self.invalidate();
     }
 
@@ -289,7 +287,6 @@ impl Engine {
                 slot.weight = weight;
             }
         }
-        self.pending = None;
         self.invalidate();
     }
 }
@@ -465,5 +462,55 @@ mod tests {
                 .accept(pending, &observation(pending.cycle, 1), &settings())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn taking_a_slot_invalidates_pending_work() {
+        let window = PhysicalWindowId {
+            app: AppInstanceId {
+                pid: 1,
+                launched_at: 1,
+            },
+            window_id: 1,
+        };
+        let mut engine = Engine::default();
+        engine.insert_slot(Slot {
+            id: crate::SlotId(1),
+            weight: 1,
+            binding: crate::BindingState::Bound(window.clone()),
+        });
+        let pending = engine.begin_cycle();
+
+        assert!(engine.take_slot(&window).is_some());
+        assert!(
+            engine
+                .accept(pending, &observation(pending.cycle, 1), &settings())
+                .is_err()
+        );
+        assert!(engine.model().workspace.slots.is_empty());
+    }
+
+    #[test]
+    fn inserting_a_slot_invalidates_pending_work() {
+        let mut engine = Engine::default();
+        let pending = engine.begin_cycle();
+        engine.insert_slot(Slot {
+            id: crate::SlotId(1),
+            weight: 1,
+            binding: crate::BindingState::Bound(PhysicalWindowId {
+                app: AppInstanceId {
+                    pid: 1,
+                    launched_at: 1,
+                },
+                window_id: 1,
+            }),
+        });
+
+        assert!(
+            engine
+                .accept(pending, &observation(pending.cycle, 1), &settings())
+                .is_err()
+        );
+        assert_eq!(engine.model().workspace.slots.len(), 1);
     }
 }

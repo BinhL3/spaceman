@@ -41,8 +41,8 @@ Local files live under `~/Library/Application Support/Spaceman/`:
 - `control.lock`: single-agent lock, mode `0600`.
 
 State files contain application process/window identity and geometry, but no window titles. The code
-uses atomic replacement for both JSON state files. The directory itself follows the user's normal
-filesystem permissions; do not sync or publish recovery state without reviewing it.
+uses atomic replacement for both JSON state files and restricts the Application Support directory to
+mode `0700`; do not sync or publish recovery state without reviewing it.
 
 ## Native Interfaces
 

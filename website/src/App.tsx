@@ -8,8 +8,8 @@ import {
 } from "motion/react";
 import { useEffect, useId, useRef, useState } from "react";
 
-const DOWNLOAD_URL =
-  "https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.2-macos-arm64.zip";
+const RELEASE_VERSION = "0.1.2";
+const DOWNLOAD_URL = `https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v${RELEASE_VERSION}-macos-arm64.zip`;
 
 type Rect = { x: number; y: number; w: number; h: number };
 
@@ -81,7 +81,9 @@ export function App() {
         >
           Download
         </a>
-        <p className="text-[13px] text-[#5c5d63]">v0.1.2 · macOS 14+ · Apple silicon</p>
+        <p className="text-[13px] text-[#5c5d63]">
+          v{RELEASE_VERSION} · declares macOS 14+ · Apple silicon preview
+        </p>
       </footer>
     </main>
   );
@@ -915,10 +917,10 @@ function StarMapApp() {
 }
 
 const termScript = [
-  { cmd: "spaceman ctl focus right", out: "focused: Terminal" },
-  { cmd: "spaceman ctl move-to 4", out: "window → workspace 4" },
+  { cmd: "spaceman ctl focus right", out: "focus queued" },
+  { cmd: "spaceman ctl move 4", out: "move to workspace 4 queued" },
   { cmd: "open pod-bay-doors", out: "I'm afraid I can't do that" },
-  { cmd: "spaceman ctl balance", out: "windows balanced" },
+  { cmd: "spaceman ctl balance", out: "balance queued" },
 ];
 const CMD_PAUSE = 8;
 const OUT_PAUSE = 20;

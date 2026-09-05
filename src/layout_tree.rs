@@ -112,7 +112,7 @@ impl LayoutTree {
             return Err("layout slots contain duplicate IDs".into());
         }
         let mut leaves = HashSet::new();
-        validate_node(&self.root, &mut leaves)?;
+        validate_node(&self.root, true, &mut leaves)?;
         if leaves != expected || leaves.len() != slots.len() {
             return Err("layout leaves do not exactly match workspace slots".into());
         }
@@ -361,13 +361,7 @@ impl LayoutTree {
                 let weight = if children.is_empty() {
                     weight.max(1)
                 } else {
-                    let total = children
-                        .iter()
-                        .map(|child| u64::from(child.weight))
-                        .sum::<u64>();
-                    u32::try_from(total / children.len() as u64)
-                        .unwrap_or(u32::MAX)
-                        .max(1)
+                    average_weight(children)
                 };
                 children.push(Child {
                     weight,
@@ -394,7 +388,7 @@ impl LayoutTree {
     }
 }
 
-fn validate_node(node: &Node, leaves: &mut HashSet<SlotId>) -> Result<(), String> {
+fn validate_node(node: &Node, root: bool, leaves: &mut HashSet<SlotId>) -> Result<(), String> {
     match node {
         Node::Leaf(slot) => {
             if !leaves.insert(*slot) {
@@ -402,11 +396,14 @@ fn validate_node(node: &Node, leaves: &mut HashSet<SlotId>) -> Result<(), String
             }
         }
         Node::Split { children, .. } => {
+            if !root && children.is_empty() {
+                return Err("layout contains an empty nested split".into());
+            }
             for child in children {
                 if child.weight == 0 {
                     return Err("layout contains a zero-weight child".into());
                 }
-                validate_node(&child.node, leaves)?;
+                validate_node(&child.node, false, leaves)?;
             }
         }
     }
@@ -517,10 +514,13 @@ fn insert_relative(node: &mut Node, target: SlotId, moved: Node, direction: Dire
             if *parent_axis == axis
                 && matches!(children[index].node, Node::Leaf(existing) if existing == target)
             {
+                // Resize stores pixel-scale weights. A literal 1 here would
+                // collapse the inserted tile beside those larger siblings.
+                let weight = average_weight(children);
                 children.insert(
                     index + usize::from(!before),
                     Child {
-                        weight: 1,
+                        weight,
                         node: moved,
                     },
                 );
@@ -530,6 +530,16 @@ fn insert_relative(node: &mut Node, target: SlotId, moved: Node, direction: Dire
             }
         }
     }
+}
+
+fn average_weight(children: &[Child]) -> u32 {
+    let total = children
+        .iter()
+        .map(|child| u64::from(child.weight))
+        .sum::<u64>();
+    u32::try_from(total / children.len().max(1) as u64)
+        .unwrap_or(u32::MAX)
+        .max(1)
 }
 
 fn collect_slots(node: &Node, slots: &mut Vec<SlotId>) {
@@ -773,6 +783,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn edge_insertion_after_resize_uses_the_destination_weight_scale() {
+        let output = Rect {
+            width: 1000,
+            height: 800,
+            ..Rect::default()
+        };
+        for direction in [Direction::Left, Direction::Right] {
+            let mut tree = LayoutTree::flat(Axis::Horizontal, [SlotId(1), SlotId(2), SlotId(3)]);
+            assert!(tree.resize_by(SlotId(1), ResizeDirection::Grow, 50, output));
+            assert!(tree.move_relative(SlotId(3), SlotId(2), direction));
+            let placements = tree.placements(output);
+            assert!(
+                placements
+                    .iter()
+                    .all(|(_, frame)| frame.width >= MIN_TILE_EXTENT),
+                "{placements:?}"
+            );
+            let restored: LayoutTree =
+                serde_json::from_slice(&serde_json::to_vec(&tree).unwrap()).unwrap();
+            assert_eq!(restored.placements(output), placements);
+        }
+    }
+
+    #[test]
     fn implicit_split_preserves_the_remaining_layout() {
         let mut tree = LayoutTree::flat(Axis::Horizontal, [SlotId(1), SlotId(2), SlotId(3)]);
 
@@ -844,9 +878,24 @@ mod tests {
             ]}}
         }))
         .unwrap();
+        let nested_empty: LayoutTree = serde_json::from_value(serde_json::json!({
+            "root": {"Split": {"axis": "horizontal", "children": [
+                {"weight": 1, "node": {"Leaf": 1}},
+                {"weight": 1, "node": {"Split": {
+                    "axis": "vertical",
+                    "children": []
+                }}}
+            ]}}
+        }))
+        .unwrap();
 
         assert!(duplicate.validate(&slots).is_err());
         assert!(zero_weight.validate(&slots).is_err());
+        assert_eq!(
+            nested_empty.validate(&slots).unwrap_err(),
+            "layout contains an empty nested split"
+        );
+        assert!(LayoutTree::default().validate(&[]).is_ok());
     }
 
     #[test]

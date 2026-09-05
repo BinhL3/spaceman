@@ -44,50 +44,42 @@ impl Rect {
 
 #[must_use]
 pub fn parked_frame(output: Rect, displays: &[Rect], window: Rect) -> Rect {
-    let x_offset = output.width / 10;
-    let y_offset = output.height / 10;
-    let left_score = corner_score(
-        displays,
-        [
-            (output.x - 2, output.y + output.height - y_offset),
-            (output.x + x_offset, output.y + output.height + 2),
-            (output.x - 2, output.y + output.height + 2),
-        ],
-    );
-    let right_score = corner_score(
-        displays,
-        [
-            (
-                output.x + output.width + 2,
-                output.y + output.height - y_offset,
-            ),
-            (
-                output.x + output.width - x_offset,
-                output.y + output.height + 2,
-            ),
-            (output.x + output.width + 2, output.y + output.height + 2),
-        ],
-    );
-    Rect {
-        x: if left_score < right_score {
-            output.x - window.width + 1
-        } else {
-            output.x + output.width - 1
-        },
-        y: output.y + (output.height - window.height).max(0),
-        ..window
-    }
-}
-
-fn corner_score(displays: &[Rect], points: [(i32, i32); 3]) -> usize {
-    displays
-        .iter()
-        .map(|display| {
-            usize::from(display.contains(points[0].0, points[0].1))
-                + usize::from(display.contains(points[1].0, points[1].1))
-                + 10 * usize::from(display.contains(points[2].0, points[2].1))
+    // Keep a one-pixel strip at an actual display edge so macOS does not
+    // clamp the window back on-screen. Score whole rectangles, not corners:
+    // the nearest output may have a neighbor on both sides.
+    std::iter::once(&output)
+        .chain(displays)
+        .flat_map(|display| {
+            [true, false].map(|right| {
+                let strip = window.width.clamp(0, 2) / 2;
+                let frame = Rect {
+                    x: if right {
+                        display.x + display.width - strip
+                    } else {
+                        display.x - window.width + strip
+                    },
+                    y: display.y + (display.height - window.height).max(0),
+                    ..window
+                };
+                let distance = (i64::from(display.x) - i64::from(output.x)).abs()
+                    + (i64::from(display.y) - i64::from(output.y)).abs();
+                (frame, distance)
+            })
         })
-        .sum()
+        .filter(|(frame, _)| {
+            displays.iter().all(|display| {
+                let width = (i64::from(frame.x) + i64::from(frame.width))
+                    .min(i64::from(display.x) + i64::from(display.width))
+                    - i64::from(frame.x.max(display.x));
+                let height = (i64::from(frame.y) + i64::from(frame.height))
+                    .min(i64::from(display.y) + i64::from(display.height))
+                    - i64::from(frame.y.max(display.y));
+                (width <= 1 || height <= 0) && !display.contains_center(*frame)
+            })
+        })
+        .min_by_key(|(_, distance)| *distance)
+        .map(|(frame, _)| frame)
+        .expect("an outer display edge always provides a parking position")
 }
 
 #[must_use]
@@ -229,5 +221,46 @@ mod tests {
         assert_eq!(parked_frame(left, &[left, right], window).x, -399);
         assert_eq!(parked_frame(right, &[left, right], window).x, 1999);
         assert_eq!(parked_frame(left, &[left, right], window).y, 500);
+    }
+
+    #[test]
+    fn parking_avoids_neighbors_in_middle_and_staggered_display_topologies() {
+        for offsets in [[0, 0, 0], [-400, 0, 300], [0, 900, 0]] {
+            let displays = offsets
+                .into_iter()
+                .enumerate()
+                .map(|(index, y)| Rect {
+                    x: (index as i32 - 1) * 1000,
+                    y,
+                    width: 1000,
+                    height: 800,
+                })
+                .collect::<Vec<_>>();
+            for output in &displays {
+                for width in [100, 400, 1200, 3000] {
+                    for height in [100, 800, 1500] {
+                        let window = Rect {
+                            width,
+                            height,
+                            ..Rect::default()
+                        };
+                        let parked = parked_frame(*output, &displays, window);
+                        for display in &displays {
+                            let overlap_width = (parked.x + parked.width)
+                                .min(display.x + display.width)
+                                - parked.x.max(display.x);
+                            let overlap_height = (parked.y + parked.height)
+                                .min(display.y + display.height)
+                                - parked.y.max(display.y);
+                            assert!(
+                                overlap_width <= 1 || overlap_height <= 0,
+                                "parked {parked:?} overlaps {display:?}"
+                            );
+                            assert!(!display.contains_center(parked));
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -8,8 +8,10 @@ The source build requires:
 
 - Xcode command-line tools with `codesign` and `security`;
 - Rust 1.95.0 from `rust-toolchain.toml`;
-- a `Developer ID Application` signing identity;
-- an ANSI number-row keyboard for the documented physical workspace keys.
+- a `Developer ID Application` signing identity.
+
+The documented numbered-workspace shortcuts assume an ANSI number row. Other keyboard layouts may
+not produce every required physical shortcut.
 
 `Launch at Login` uses macOS Service Management's `SMAppService` and therefore requires a properly
 signed application bundle. macOS may require explicit approval under **System Settings > General >
@@ -37,9 +39,17 @@ Ghostty native tabs are the primary stable-logical-window target. Replacement is
 the evidence is ambiguous, Spaceman preserves existing logical state rather than guessing. Other apps
 with physical-window identity churn are not implicitly guaranteed to behave like Ghostty.
 
+Unresolved Ghostty slots still count toward application workspace affinity, and pending replacement
+candidates are reserved against adoption by another workspace while reconciliation settles.
+
 Multiple displays are supported dynamically. `secondary` means the first non-main display reported by
 macOS. Exact duplicate display names are ambiguous; prefer UUIDs. Missing assigned displays fall back
 to main until they reconnect.
+
+Parking checks the full window rectangle against all attached displays and chooses an exposed edge,
+including when the window's assigned display has neighbors on both sides. Empty gaps between
+staggered displays are not treated as a window reappearing on screen. Native clamping and application
+behavior still require live qualification on a particular display arrangement.
 
 Spaceman uses the private `_AXUIElementGetWindow` symbol. It requires no SIP change, but an OS update
 could remove or alter that symbol. Mac App Store distribution is not supported.

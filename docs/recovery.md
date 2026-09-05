@@ -1,6 +1,7 @@
 # Recovery And Uninstall
 
-Spaceman moves inactive-workspace windows beyond the visible display union. Before doing so, it
+Spaceman moves inactive-workspace windows beyond visible display edges, checking that no neighboring
+display is covered (apart from the one-pixel edge strip needed to avoid macOS clamping). Before doing so, it
 atomically records each original frame in:
 
 ```text
@@ -31,7 +32,10 @@ open "/Applications/Spaceman.app"
 
 If workspace state is absent or invalid, startup first attempts to restore every window recorded in
 `parked-windows.json`. If valid workspace state exists, the app resumes that persisted workspace
-model and restores windows as their workspaces become visible. Then use `spaceman ctl pause` if the
+model and restores windows as their workspaces become visible. Parked entries without an owner in
+that model are recovered before automatic reconciliation; this handles a crash between persisting a
+park and persisting its new workspace ownership. A failed or unconfirmed recovery retains its entry
+and prevents automatic reconciliation until a retry succeeds. Then use `spaceman ctl pause` if the
 goal is to return all windows and stop tiling. If Accessibility permission or startup hotkey
 registration is unavailable, startup remains paused and attempts to restore all parked windows.
 

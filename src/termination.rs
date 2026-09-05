@@ -7,7 +7,7 @@ use crate::app::Action;
 
 enum Gate {
     Idle(Sender<Action>),
-    Pending,
+    Pending(Sender<Action>),
     Allowed,
 }
 
@@ -61,6 +61,25 @@ pub(crate) fn reply(should_terminate: bool) {
     NSApplication::sharedApplication(marker).replyToApplicationShouldTerminate(should_terminate);
 }
 
+pub(crate) fn cancel_pending() {
+    let pending = GATE.with(|gate| {
+        let mut gate = gate.borrow_mut();
+        match gate.take() {
+            Some(Gate::Pending(actions)) => {
+                *gate = Some(Gate::Idle(actions));
+                true
+            }
+            state => {
+                *gate = state;
+                false
+            }
+        }
+    });
+    if pending {
+        reply(false);
+    }
+}
+
 unsafe extern "C-unwind" fn application_should_terminate(
     _delegate: *mut objc2::runtime::AnyObject,
     _selector: objc2::runtime::Sel,
@@ -72,13 +91,14 @@ unsafe extern "C-unwind" fn application_should_terminate(
             Some(Gate::Allowed) => NSApplicationTerminateReply::TerminateNow,
             Some(Gate::Idle(actions)) => {
                 let _ = actions.send(Action::Terminate);
-                *gate = Some(Gate::Pending);
+                *gate = Some(Gate::Pending(actions));
                 NSApplicationTerminateReply::TerminateLater
             }
-            Some(Gate::Pending) | None => {
-                *gate = Some(Gate::Pending);
+            Some(Gate::Pending(actions)) => {
+                *gate = Some(Gate::Pending(actions));
                 NSApplicationTerminateReply::TerminateLater
             }
+            None => NSApplicationTerminateReply::TerminateLater,
         }
     })
 }

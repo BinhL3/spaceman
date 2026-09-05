@@ -1,0 +1,273 @@
+use super::*;
+
+type DirectAction = fn(
+    &mut WorkspaceRuntime<FakeBackend>,
+    macos::DisplayOutputs,
+    &AtomicBool,
+) -> Result<CycleStatus, String>;
+
+fn actions() -> Vec<(WorkerAction, DirectAction)> {
+    vec![
+        (WorkerAction::Retile, |r, o, c| r.cycle(o, c)),
+        (
+            WorkerAction::SwitchWorkspace(WorkspaceId::new(2).unwrap()),
+            |r, o, c| r.switch(WorkspaceId::new(2).unwrap(), o, c),
+        ),
+        (WorkerAction::WorkspaceBackAndForth, |r, o, c| {
+            r.workspace_back_and_forth(o, c)
+        }),
+        (WorkerAction::MoveFocused(WorkspaceId::SIX), |r, o, c| {
+            r.move_focused(WorkspaceId::SIX, o, c)
+        }),
+        (
+            WorkerAction::MoveApp("com.example.Test".into(), WorkspaceId::SIX),
+            |r, o, c| r.move_app("com.example.Test", WorkspaceId::SIX, o, c),
+        ),
+        (WorkerAction::CycleFocus, |r, o, c| r.cycle_focus(o, c)),
+        (WorkerAction::Focus(Direction::Right), |r, o, c| {
+            r.focus_relative(Direction::Right, o, c)
+        }),
+        (WorkerAction::Reorder(Direction::Down), |r, o, c| {
+            r.reorder_focused(Direction::Down, o, c)
+        }),
+        (WorkerAction::ToggleLayout, |r, o, c| r.toggle_layout(o, c)),
+        (WorkerAction::Resize(ResizeDirection::Grow), |r, o, c| {
+            r.resize_focused(ResizeDirection::Grow, o, c)
+        }),
+        (WorkerAction::Balance, |r, o, c| r.balance_focused(o, c)),
+        (WorkerAction::ToggleFullscreenLayout, |r, o, c| {
+            r.toggle_fullscreen_layout(o, c)
+        }),
+    ]
+}
+
+fn fixture() -> WorkspaceRuntime<FakeBackend> {
+    let windows = [
+        (window(10), frame(50)),
+        (window(20), frame(500)),
+        (window(30), frame(1050)),
+    ];
+    let backend = FakeBackend {
+        frames: windows.iter().cloned().collect(),
+        focused: Some(window(10)),
+        frontmost: Some(window(10).app),
+        observation: Some(observation_for_windows(
+            "com.example.Test",
+            &window(10),
+            &windows,
+        )),
+        ..FakeBackend::default()
+    };
+    let mut runtime = runtime(backend);
+    bind(&mut runtime, WorkspaceId::ONE, &window(10));
+    bind(&mut runtime, WorkspaceId::ONE, &window(20));
+    bind(&mut runtime, WorkspaceId::SIX, &window(30));
+    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
+    runtime.workspaces.refresh_ownership(WorkspaceId::SIX);
+    runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+    runtime.backend.calls.clear();
+    runtime
+}
+
+fn compare_dispatch(
+    command: WorkerCommand,
+    direct: impl FnOnce(&mut WorkspaceRuntime<FakeBackend>) -> Result<CycleStatus, String>,
+) {
+    let mut dispatched = fixture();
+    let mut expected = fixture();
+    let expected_result = direct(&mut expected);
+    let Some(WorkerResult::Status { result, debug }) =
+        dispatched.execute(command, &AtomicBool::new(false))
+    else {
+        panic!("an action or gesture must return status, including on failure")
+    };
+    assert_eq!(result.as_ref().err(), expected_result.as_ref().err());
+    if let (Ok(actual), Ok(expected)) = (result, expected_result) {
+        assert_eq!(actual.failed, expected.failed);
+        assert_eq!(actual.active, expected.active);
+    }
+    assert_eq!(dispatched.workspaces.state(), expected.workspaces.state());
+    assert_eq!(dispatched.backend.frames, expected.backend.frames);
+    assert_eq!(
+        dispatched.backend.workspace_state,
+        expected.backend.workspace_state
+    );
+    assert_eq!(dispatched.backend.calls, expected.backend.calls);
+    assert_eq!(
+        serde_json::to_value(debug).unwrap(),
+        serde_json::to_value(expected.debug_state(&outputs())).unwrap()
+    );
+}
+
+#[test]
+fn action_dispatch_preserves_parameters_results_and_post_operation_debug() {
+    for (action, direct) in actions() {
+        compare_dispatch(WorkerCommand::Action(action, outputs()), |r| {
+            direct(r, outputs(), &AtomicBool::new(false))
+        });
+    }
+}
+
+#[test]
+fn gesture_dispatch_preserves_preview_and_final_semantics() {
+    for preview in [true, false] {
+        compare_dispatch(
+            WorkerCommand::Gesture(
+                FinalGesture::Drop(window(10), (1500, 100)),
+                preview,
+                outputs(),
+            ),
+            |r| {
+                r.drop_window(
+                    window(10),
+                    (1500, 100),
+                    preview,
+                    outputs(),
+                    &AtomicBool::new(false),
+                )
+            },
+        );
+        let resized = crate::Rect {
+            width: 600,
+            ..outputs().main().frame
+        };
+        compare_dispatch(
+            WorkerCommand::Gesture(
+                FinalGesture::Resize(window(10), resized),
+                preview,
+                outputs(),
+            ),
+            |r| {
+                r.resize_window(
+                    window(10),
+                    resized,
+                    preview,
+                    outputs(),
+                    &AtomicBool::new(false),
+                )
+            },
+        );
+    }
+}
+
+#[test]
+fn dispatch_classifies_cancellation_before_worker_receipt() {
+    let (sender, receiver) = channel();
+    let mut busy = false;
+    let mut interruptible = false;
+    let mut commands = actions()
+        .into_iter()
+        .map(|(action, _)| {
+            let expected = action == WorkerAction::Retile;
+            (WorkerCommand::Action(action, outputs()), expected)
+        })
+        .collect::<Vec<_>>();
+    for preview in [true, false] {
+        commands.push((
+            WorkerCommand::Gesture(FinalGesture::Drop(window(10), (50, 50)), preview, outputs()),
+            preview,
+        ));
+        commands.push((
+            WorkerCommand::Gesture(
+                FinalGesture::Resize(window(10), frame(50)),
+                preview,
+                outputs(),
+            ),
+            preview,
+        ));
+    }
+    commands.push((WorkerCommand::RestoreAll, false));
+    commands.push((WorkerCommand::Action(WorkerAction::Retile, outputs()), true));
+    commands.push((WorkerCommand::Stop, false));
+    for (command, expected) in commands {
+        assert!(send_worker_command(
+            &sender,
+            command,
+            &mut busy,
+            &mut interruptible
+        ));
+        assert!(busy);
+        assert_eq!(interruptible, expected);
+        assert!(receiver.try_recv().is_ok());
+        busy = false;
+    }
+    drop(receiver);
+    assert!(!send_worker_command(
+        &sender,
+        WorkerCommand::Action(WorkerAction::Retile, outputs()),
+        &mut busy,
+        &mut interruptible
+    ));
+    assert!(!busy);
+    assert!(!interruptible);
+}
+
+#[test]
+fn restoration_request_sends_now_or_waits_for_the_current_worker() {
+    for was_busy in [false, true] {
+        let (sender, receiver) = channel();
+        let mut busy = was_busy;
+        let mut interruptible = true;
+        let mut pending = false;
+        let mut restoring = false;
+        request_restore(
+            &sender,
+            &mut busy,
+            &mut interruptible,
+            &mut pending,
+            &mut restoring,
+        );
+        assert!(busy);
+        assert_eq!(pending, was_busy);
+        assert_eq!(restoring, !was_busy);
+        assert_eq!(interruptible, was_busy);
+        if was_busy {
+            assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+        } else {
+            assert!(matches!(receiver.try_recv(), Ok(WorkerCommand::RestoreAll)));
+        }
+    }
+}
+
+#[test]
+fn disconnected_worker_does_not_claim_restoration_is_running() {
+    let (sender, receiver) = channel();
+    drop(receiver);
+    let (mut busy, mut interruptible, mut pending, mut restoring) = (false, false, false, false);
+    request_restore(
+        &sender,
+        &mut busy,
+        &mut interruptible,
+        &mut pending,
+        &mut restoring,
+    );
+    assert!(!busy && !restoring && !pending);
+}
+
+#[test]
+fn restoration_and_stop_do_not_require_display_outputs() {
+    let mut runtime = fixture();
+    assert!(matches!(
+        runtime.execute(WorkerCommand::RestoreAll, &AtomicBool::new(false)),
+        Some(WorkerResult::Restored { failed: 0 })
+    ));
+    assert!(
+        runtime
+            .execute(WorkerCommand::Stop, &AtomicBool::new(false))
+            .is_none()
+    );
+}
+
+#[test]
+fn failure_count_keeps_all_non_applied_outcomes() {
+    use macos::ApplyOutcome::*;
+    for outcome in [Applied, Constrained, Gone, Unavailable, Deferred] {
+        let results = [macos::ApplyResult {
+            window: window(10),
+            target: frame(50),
+            actual: None,
+            outcome,
+        }];
+        assert_eq!(failed_results(&results), usize::from(outcome != Applied));
+    }
+}

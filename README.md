@@ -42,23 +42,12 @@ experimental; read [Known limitations](docs/limitations.md) before installing it
    and its [SHA-256 checksum](https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v0.1.2-macos-arm64.zip.sha256).
 3. In the download directory, run `shasum -a 256 -c Spaceman-v0.1.2-macos-arm64.zip.sha256`.
 4. Unzip it, move `Spaceman.app` to `/Applications`, and open it.
-5. Complete the Accessibility setup shown by Spaceman.
+5. Link the bundled CLI: `mkdir -p "$HOME/.local/bin" && ln -sf "/Applications/Spaceman.app/Contents/MacOS/spaceman" "$HOME/.local/bin/spaceman"`.
+6. Complete the Accessibility setup shown by Spaceman.
 
 Later preview updates are signed and delivered through Sparkle. Use Spaceman Settings for upgrades. If
 a manual replacement is necessary, pause and quit the running version and confirm that every parked
 window has returned before replacing its bundle.
-
-### Agent-Assisted Setup
-
-A coding agent (Claude Code, Cursor, Codex, OpenCode, and others) can walk through this setup with
-the [spaceman-setup](skills/spaceman-setup/SKILL.md) skill:
-
-```sh
-npx skills add kitlangton/spaceman
-```
-
-The skill encodes the safe install order, Accessibility steps, verification, configuration, and the
-recovery rules below.
 
 ## Install From Source
 
@@ -126,6 +115,11 @@ Character shortcuts follow the active macOS keyboard layout. Workspace digits re
 ANSI number row, and Tab remains physical Tab. See [Controls](docs/controls.md) for drag, resize,
 balance, CLI, and socket behavior.
 
+Commands and completed gestures wait in arrival order when the worker is busy; repeated resize or
+focus commands are not collapsed into one. Workspace switches keep the outgoing windows visible if
+incoming parked windows cannot finish restoring. Parking targets are checked against every attached
+display, including middle displays in three-display arrangements.
+
 ```sh
 spaceman ctl status
 spaceman ctl switch 2
@@ -149,9 +143,14 @@ spaceman displays
 
 ## Recover Or Remove
 
-Use `spaceman ctl pause` or `spaceman ctl quit` and wait for `ctl status`/process exit to confirm that
-restoration completed **before** removing the app or state. Do not delete `parked-windows.json` as an
-early troubleshooting step: it records where off-screen parked windows must return.
+Use `spaceman ctl pause` or `spaceman ctl quit` and wait for `spaceman ctl status` or process exit to
+confirm that restoration completed **before** removing the app or state. Do not delete
+`parked-windows.json` as an early troubleshooting step: it records where off-screen parked windows
+must return.
+
+After a crash, recorded parked windows missing from otherwise valid workspace state are restored
+before automatic reconciliation resumes. Recovery metadata stays intact until restoration and its
+durable removal succeed.
 
 Follow [Recovery](docs/recovery.md) for stuck or crashed processes and safe uninstall instructions.
 

@@ -1,11 +1,12 @@
 ---
 name: spaceman-setup
-description: Install, configure, verify, troubleshoot, or uninstall the Spaceman tiling window manager on macOS. Use when a user asks to set up Spaceman, configure workspaces or hotkeys, migrate from AeroSpace/yabai/Amethyst, recover off-screen windows, or remove Spaceman.
+description: Install, configure, verify, troubleshoot, or uninstall the Spaceman tiling window manager on macOS. Use when a user asks to set up Spaceman, configure window rules or workspaces, transition from another window manager, recover off-screen windows, or remove Spaceman.
 ---
 
 # Spaceman Setup
 
-Spaceman is a native macOS tiling window manager for Apple silicon (macOS 14+).
+Spaceman is an experimental native macOS tiling window manager for Apple silicon. The preview
+declares macOS 14.0 as its minimum; compatibility is not yet broadly qualified.
 
 ## Install
 
@@ -43,7 +44,7 @@ The CLI ships inside the bundle:
 ```sh
 mkdir -p "$HOME/.local/bin"
 ln -sf "/Applications/Spaceman.app/Contents/MacOS/spaceman" "$HOME/.local/bin/spaceman"
-spaceman ctl status   # healthy: "mode":"automatic" and "busy":false
+"$HOME/.local/bin/spaceman" ctl status   # healthy: "mode":"automatic" and "busy":false
 ```
 
 ## Controls
@@ -55,22 +56,23 @@ spaceman ctl status   # healthy: "mode":"automatic" and "busy":false
 | `Option+A` … `Option+Z` | Switch to a configured named workspace |
 | `Option+Shift+A` … `Option+Shift+Z` | Move focused window to a configured named workspace |
 | `Option+Tab` | Previous workspace on the focused display |
-| Option-backtick | Focus the next tiled window in workspace order |
+| `Option+backtick` | Focus the next tiled window in workspace order |
 | `Option+H/J/K/L` | Focus left/down/up/right |
 | `Option+Shift+H/J/K/L` | Move the focused tile |
 | `Option+/` | Toggle the root split axis |
 | `Option+-`, `Option+=` | Shrink/grow the focused tile |
 | `Option+Shift+F` | Toggle workspace-wide Fullscreen Layout |
 
-CLI: `spaceman ctl switch 2`, `ctl move 7`, `ctl back-and-forth`, `ctl layout`, `ctl balance`,
-`ctl pause`, `ctl resume`.
+CLI: `spaceman ctl switch 2`, `spaceman ctl move 7`, `spaceman ctl back-and-forth`,
+`spaceman ctl layout`, `spaceman ctl balance`, `spaceman ctl pause`, `spaceman ctl resume`.
 
 ## Configure
 
 Config lives at `~/Library/Application Support/Spaceman/config.toml`, read at startup
 (`SPACEMAN_CONFIG` overrides the path). Workspaces 1–5 prefer the main display, 6–10 the
 secondary; assignments accept `main`, `secondary`, a display UUID, or a display name. Schema
-reference: `config.example.toml` and `docs/configuration.md`. Rules are ordered, first-match.
+version is `1`; rules are ordered and first-match. A rule accepts exact `bundle_id` and/or `title`
+matching, with an `action` of `float`, `route`, or `ignore`; `route` also requires `workspace`.
 
 ```sh
 spaceman config-check "$HOME/Library/Application Support/Spaceman/config.toml"
@@ -82,7 +84,8 @@ spaceman displays
 - **Hotkeys do nothing**: another app owns the `Option` shortcuts, or Accessibility permission is
   missing — the menu bar item reports which.
 - **Windows off-screen after a crash**: reopen the same app, relaunch Spaceman, and let it restore.
-  Keep `parked-windows.json` — it records where those windows return. See `docs/recovery.md`.
+  Keep `parked-windows.json` — it records where those windows return. Do not remove recovery state
+  until pause or quit has restored every window.
 - **Windows keep moving on their own**: another window manager is running; quit it, then
   `spaceman ctl resume`.
 - **Updates**: signed and delivered through Sparkle in Spaceman Settings.
