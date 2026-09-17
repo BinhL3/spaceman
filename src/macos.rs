@@ -18,14 +18,13 @@ use objc2_application_services::{
     AXError, AXIsProcessTrusted, AXObserver, AXUIElement, AXValue, AXValueType,
 };
 use objc2_core_foundation::{
-    CFArray, CFBoolean, CFDictionary, CFNumber, CFNumberType, CFRetained, CFRunLoop,
-    CFRunLoopSource, CFString, CFType, CFUUID, CGPoint, CGSize, ConcreteType,
-    kCFRunLoopDefaultMode,
+    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFRunLoop, CFRunLoopSource, CFString,
+    CFType, CFUUID, CGPoint, CGRect, CGSize, ConcreteType, kCFRunLoopDefaultMode,
 };
 use objc2_core_graphics::{
-    CGEvent, CGEventSource, CGEventSourceStateID, CGMouseButton, CGWindowID,
-    CGWindowListCopyWindowInfo, CGWindowListOption, kCGWindowBounds, kCGWindowLayer,
-    kCGWindowNumber, kCGWindowOwnerPID,
+    CGEvent, CGEventSource, CGEventSourceStateID, CGMouseButton,
+    CGRectMakeWithDictionaryRepresentation, CGWindowID, CGWindowListCopyWindowInfo,
+    CGWindowListOption, kCGWindowBounds, kCGWindowLayer, kCGWindowNumber, kCGWindowOwnerPID,
 };
 use objc2_foundation::{NSNumber, NSString};
 
@@ -87,6 +86,8 @@ impl std::fmt::Display for SnapshotError {
 
 type WindowIdFunction = unsafe extern "C" fn(&AXUIElement, *mut CGWindowID) -> AXError;
 
+const AX_MESSAGING_TIMEOUT: f32 = 0.5;
+
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn CGDisplayCreateUUIDFromDisplayID(display: u32) -> *const CFUUID;
@@ -108,7 +109,7 @@ pub fn accessibility_trusted() -> bool {
     unsafe { AXIsProcessTrusted() }
 }
 
-pub fn main_output() -> Result<Rect, SnapshotError> {
+fn main_output() -> Result<Rect, SnapshotError> {
     Ok(outputs()?.main().frame)
 }
 
@@ -303,8 +304,7 @@ struct EventRegistration {
 
 impl EventRegistration {
     fn new(pid: i32, invalidation: &Arc<EventInvalidation>, run_loop: &CFRunLoop) -> Option<Self> {
-        let application = unsafe { AXUIElement::new_application(pid) };
-        let _ = unsafe { application.set_messaging_timeout(0.5) };
+        let application = application_element(pid);
         let mut raw_observer = ptr::null_mut();
         let result = unsafe {
             AXObserver::create(
@@ -378,13 +378,7 @@ fn subscribe_window_notifications(
     let Ok(windows) = attribute::<CFArray>(application, "AXWindows") else {
         return;
     };
-    for index in 0..windows.count() {
-        let raw = unsafe { windows.value_at_index(index) };
-        let Some(window) = (unsafe { raw.cast::<CFType>().as_ref() })
-            .and_then(|value| value.downcast_ref::<AXUIElement>())
-        else {
-            continue;
-        };
+    for window in cf_array_items::<AXUIElement>(&windows) {
         subscribe_one_window(observer, window, refcon);
     }
 }
@@ -507,7 +501,7 @@ pub fn snapshot_in_output(
     Ok((
         NativeObservation {
             cycle,
-            mouse_down: left_mouse_down(),
+            mouse_down: mouse_down(),
             applications,
         },
         Settings::for_output(output),
@@ -605,7 +599,7 @@ fn apply_managed_while_excluding(
                 .map(|window| (window, placement.frame))
         })
         .collect();
-    if left_mouse_down() && dragged.is_none() {
+    if mouse_down() && dragged.is_none() {
         return placements
             .into_iter()
             .map(|(window, target)| ApplyResult {
@@ -626,8 +620,7 @@ fn apply_managed_while_excluding(
             fill_missing_results(&placements, &indices, &mut results, ApplyOutcome::Gone);
             continue;
         }
-        let app = unsafe { AXUIElement::new_application(app_id.pid) };
-        let _ = unsafe { app.set_messaging_timeout(0.5) };
+        let app = application_element(app_id.pid);
         let windows = match attribute::<CFArray>(&app, "AXWindows") {
             Ok(windows) => windows,
             Err(AXError::InvalidUIElement) => {
@@ -653,13 +646,7 @@ fn apply_managed_while_excluding(
                 .push(*index);
         }
         let mut lookup_failed = false;
-        for index in 0..windows.count() {
-            let raw = unsafe { windows.value_at_index(index) };
-            let Some(window) = (unsafe { raw.cast::<CFType>().as_ref() })
-                .and_then(|value| value.downcast_ref::<AXUIElement>())
-            else {
-                continue;
-            };
+        for window in cf_array_items::<AXUIElement>(&windows) {
             let Some(window_id) = physical_window_id(&app_id, window) else {
                 lookup_failed = true;
                 continue;
@@ -667,7 +654,7 @@ fn apply_managed_while_excluding(
             let Some(placement_indices) = pending.remove(&window_id.window_id) else {
                 continue;
             };
-            let _ = unsafe { window.set_messaging_timeout(0.5) };
+            set_ax_timeout(window);
             for placement_index in placement_indices {
                 if !should_continue() {
                     break 'applications;
@@ -739,21 +726,11 @@ fn fill_missing_results(
 }
 
 pub fn frame(id: &PhysicalWindowId) -> Result<Rect, WindowAccessError> {
-    match with_managed_window_result(id, window_frame) {
-        Ok(Some(frame)) => Ok(frame),
-        Ok(None) => {
-            evict_managed_window(id);
-            match with_managed_window_result(id, window_frame) {
-                Ok(Some(frame)) => Ok(frame),
-                Ok(None) | Err(ManagedWindowError::Unavailable) => {
-                    Err(WindowAccessError::Unavailable)
-                }
-                Err(ManagedWindowError::Gone) => Err(WindowAccessError::Gone),
-            }
-        }
-        Err(ManagedWindowError::Gone) => Err(WindowAccessError::Gone),
-        Err(ManagedWindowError::Unavailable) => Err(WindowAccessError::Unavailable),
+    if let Some(frame) = with_managed_window_result(id, window_frame)? {
+        return Ok(frame);
     }
+    evict_managed_window(id);
+    with_managed_window_result(id, window_frame)?.ok_or(WindowAccessError::Unavailable)
 }
 
 /// Point file descriptor 2 (stderr) at the given open file so diagnostics from
@@ -778,8 +755,8 @@ pub fn set_position_only(id: &PhysicalWindowId, target: Rect) -> ApplyOutcome {
         }
     }) {
         Ok(outcome) => outcome,
-        Err(ManagedWindowError::Gone) => ApplyOutcome::Gone,
-        Err(ManagedWindowError::Unavailable) => ApplyOutcome::Unavailable,
+        Err(WindowAccessError::Gone) => ApplyOutcome::Gone,
+        Err(WindowAccessError::Unavailable) => ApplyOutcome::Unavailable,
     };
     if matches!(outcome, ApplyOutcome::Gone) {
         evict_managed_window(id);
@@ -797,8 +774,7 @@ pub fn focused_window() -> Option<PhysicalWindowId> {
         pid: application.processIdentifier(),
         launched_at: launch_time(&application),
     };
-    let element = unsafe { AXUIElement::new_application(id.pid) };
-    let _ = unsafe { element.set_messaging_timeout(0.5) };
+    let element = application_element(id.pid);
     let focused = attribute::<AXUIElement>(&element, "AXFocusedWindow").ok()?;
     physical_window_id(&id, &focused)
 }
@@ -828,12 +804,7 @@ pub fn raise_window(id: &PhysicalWindowId) -> bool {
 fn raise_window_with_focus(id: &PhysicalWindowId, focus: bool) -> bool {
     let raised = with_managed_window(id, |window| {
         if focus {
-            let _ = unsafe {
-                window.set_attribute_value(
-                    &CFString::from_static_str("AXFocused"),
-                    CFBoolean::new(true),
-                )
-            };
+            let _ = set_attribute(window, "AXFocused", CFBoolean::new(true));
         }
         (unsafe { window.perform_action(&CFString::from_static_str("AXRaise")) })
             == AXError::Success
@@ -851,7 +822,7 @@ fn apply_window(
     settings: &Settings,
     onscreen: &HashMap<i32, HashSet<CGWindowID>>,
 ) -> Option<ApplyResult> {
-    if left_mouse_down() {
+    if mouse_down() {
         return Some(ApplyResult {
             window: id.clone(),
             target,
@@ -871,17 +842,10 @@ fn apply_window(
             outcome: ApplyOutcome::Gone,
         });
     }
-    let app = unsafe { AXUIElement::new_application(id.app.pid) };
-    let _ = unsafe { app.set_messaging_timeout(0.5) };
+    let app = application_element(id.app.pid);
     let windows = attribute::<CFArray>(&app, "AXWindows").ok()?;
-    for index in 0..windows.count() {
-        let raw = unsafe { windows.value_at_index(index) };
-        let Some(window) = (unsafe { raw.cast::<CFType>().as_ref() })
-            .and_then(|value| value.downcast_ref::<AXUIElement>())
-        else {
-            continue;
-        };
-        let _ = unsafe { window.set_messaging_timeout(0.5) };
+    for window in cf_array_items::<AXUIElement>(&windows) {
+        set_ax_timeout(window);
         if physical_window_id(&id.app, window).as_ref() != Some(id) {
             continue;
         }
@@ -897,9 +861,8 @@ fn apply_window(
             });
         }
 
-        return Some(without_window_animations(&id.app, || {
-            apply_element(id, window, target, settings)
-        }));
+        let _animations = WindowAnimationGuard::new(&app);
+        return Some(apply_element(id, window, target, settings));
     }
     None
 }
@@ -939,8 +902,7 @@ fn apply_element(
 }
 
 fn without_window_animations<T>(app: &AppInstanceId, operation: impl FnOnce() -> T) -> T {
-    let application = unsafe { AXUIElement::new_application(app.pid) };
-    let _ = unsafe { application.set_messaging_timeout(0.5) };
+    let application = application_element(app.pid);
     let _animations = WindowAnimationGuard::new(&application);
     operation()
 }
@@ -956,12 +918,11 @@ impl<'a> WindowAnimationGuard<'a> {
             .ok()
             .unwrap_or(false);
         if restore_enhanced_ui {
-            let _ = unsafe {
-                application.set_attribute_value(
-                    &CFString::from_static_str("AXEnhancedUserInterface"),
-                    CFBoolean::new(false),
-                )
-            };
+            let _ = set_attribute(
+                application,
+                "AXEnhancedUserInterface",
+                CFBoolean::new(false),
+            );
         }
         Self {
             application,
@@ -973,12 +934,11 @@ impl<'a> WindowAnimationGuard<'a> {
 impl Drop for WindowAnimationGuard<'_> {
     fn drop(&mut self) {
         if self.restore_enhanced_ui {
-            let _ = unsafe {
-                self.application.set_attribute_value(
-                    &CFString::from_static_str("AXEnhancedUserInterface"),
-                    CFBoolean::new(true),
-                )
-            };
+            let _ = set_attribute(
+                self.application,
+                "AXEnhancedUserInterface",
+                CFBoolean::new(true),
+            );
         }
     }
 }
@@ -990,42 +950,30 @@ fn with_managed_window<T>(
     with_managed_window_result(id, operation).ok()
 }
 
-enum ManagedWindowError {
-    Gone,
-    Unavailable,
-}
-
 fn with_managed_window_result<T>(
     id: &PhysicalWindowId,
     mut operation: impl FnMut(&AXUIElement) -> T,
-) -> Result<T, ManagedWindowError> {
+) -> Result<T, WindowAccessError> {
     if let Some(window) = MANAGED_WINDOWS.with(|windows| windows.borrow().get(id).cloned()) {
         return Ok(operation(&window));
     }
     if !process_incarnation_matches(&id.app) {
         evict_managed_app(&id.app);
-        return Err(ManagedWindowError::Gone);
+        return Err(WindowAccessError::Gone);
     }
-    let app = unsafe { AXUIElement::new_application(id.app.pid) };
-    let _ = unsafe { app.set_messaging_timeout(0.5) };
+    let app = application_element(id.app.pid);
     let windows = attribute::<CFArray>(&app, "AXWindows").map_err(|error| match error {
-        AXError::InvalidUIElement => ManagedWindowError::Gone,
-        _ => ManagedWindowError::Unavailable,
+        AXError::InvalidUIElement => WindowAccessError::Gone,
+        _ => WindowAccessError::Unavailable,
     })?;
-    for index in 0..windows.count() {
-        let raw = unsafe { windows.value_at_index(index) };
-        let Some(window) = (unsafe { raw.cast::<CFType>().as_ref() })
-            .and_then(|value| value.downcast_ref::<AXUIElement>())
-        else {
-            continue;
-        };
-        let _ = unsafe { window.set_messaging_timeout(0.5) };
+    for window in cf_array_items::<AXUIElement>(&windows) {
+        set_ax_timeout(window);
         if physical_window_id(&id.app, window).as_ref() == Some(id) {
             cache_managed_window(id, window);
             return Ok(operation(window));
         }
     }
-    Err(ManagedWindowError::Gone)
+    Err(WindowAccessError::Gone)
 }
 
 fn cache_managed_window(id: &PhysicalWindowId, window: &AXUIElement) {
@@ -1055,12 +1003,8 @@ fn prune_managed_app(app: &AppInstanceId, current: &HashSet<PhysicalWindowId>) {
     });
 }
 
-fn left_mouse_down() -> bool {
-    CGEventSource::button_state(CGEventSourceStateID::HIDSystemState, CGMouseButton::Left)
-}
-
 pub fn mouse_down() -> bool {
-    left_mouse_down()
+    CGEventSource::button_state(CGEventSourceStateID::HIDSystemState, CGMouseButton::Left)
 }
 
 pub fn mouse_position() -> Option<(i32, i32)> {
@@ -1089,35 +1033,29 @@ fn launch_time(application: &NSRunningApplication) -> u64 {
 }
 
 fn set_position(window: &AXUIElement, frame: Rect) -> AXError {
-    let mut point = CGPoint {
-        x: f64::from(frame.x),
-        y: f64::from(frame.y),
-    };
-    let Some(value) = (unsafe {
-        AXValue::new(
-            AXValueType::CGPoint,
-            NonNull::from(&mut point).cast::<c_void>(),
-        )
-    }) else {
+    let Some(value) = ax_value(
+        AXValueType::CGPoint,
+        CGPoint {
+            x: f64::from(frame.x),
+            y: f64::from(frame.y),
+        },
+    ) else {
         return AXError::Failure;
     };
-    unsafe { window.set_attribute_value(&CFString::from_static_str("AXPosition"), &value) }
+    set_attribute(window, "AXPosition", &value)
 }
 
 fn set_size(window: &AXUIElement, frame: Rect) -> AXError {
-    let mut size = CGSize {
-        width: f64::from(frame.width),
-        height: f64::from(frame.height),
-    };
-    let Some(value) = (unsafe {
-        AXValue::new(
-            AXValueType::CGSize,
-            NonNull::from(&mut size).cast::<c_void>(),
-        )
-    }) else {
+    let Some(value) = ax_value(
+        AXValueType::CGSize,
+        CGSize {
+            width: f64::from(frame.width),
+            height: f64::from(frame.height),
+        },
+    ) else {
         return AXError::Failure;
     };
-    unsafe { window.set_attribute_value(&CFString::from_static_str("AXSize"), &value) }
+    set_attribute(window, "AXSize", &value)
 }
 
 fn window_frame(window: &AXUIElement) -> Option<Rect> {
@@ -1148,8 +1086,7 @@ fn observe_application(
     let bundle_id = application
         .bundleIdentifier()
         .map_or_else(|| "unknown".into(), |value| value.to_string());
-    let app_element = unsafe { AXUIElement::new_application(pid) };
-    let _ = unsafe { app_element.set_messaging_timeout(0.5) };
+    let app_element = application_element(pid);
 
     let windows = match attribute::<CFArray>(&app_element, "AXWindows") {
         Ok(windows) => windows,
@@ -1182,13 +1119,7 @@ fn observe_application(
     {
         return Some(AppObservation::Unavailable { app: id, error });
     }
-    for index in 0..windows.count() {
-        let raw = unsafe { windows.value_at_index(index) };
-        let Some(window) = (unsafe { raw.cast::<CFType>().as_ref() })
-            .and_then(|value| value.downcast_ref::<AXUIElement>())
-        else {
-            continue;
-        };
+    for window in cf_array_items::<AXUIElement>(&windows) {
         if let Some(window_id) = physical_window_id(&id, window) {
             current_windows.insert(window_id);
         }
@@ -1219,7 +1150,7 @@ fn collect_window(
     output: Rect,
     observed: &mut Vec<ObservedWindow>,
 ) -> Result<(), String> {
-    let _ = unsafe { window.set_messaging_timeout(0.5) };
+    set_ax_timeout(window);
     if let WindowObservation::Observed(observation) = observe_window(app, window, onscreen, output)?
         && !observed
             .iter()
@@ -1291,19 +1222,8 @@ fn onscreen_windows() -> Option<HashMap<i32, HashSet<CGWindowID>>> {
         0,
     )?;
     let mut windows = HashMap::<i32, HashSet<CGWindowID>>::new();
-    for index in 0..list.count() {
-        let entry = unsafe { list.value_at_index(index) };
-        let Some(entry) = (unsafe { entry.cast::<CFType>().as_ref() })
-            .and_then(|value| value.downcast_ref::<CFDictionary>())
-        else {
-            continue;
-        };
-        if dictionary_number(entry, unsafe { kCGWindowLayer }) == Some(0)
-            && let Some(id) = dictionary_number(entry, unsafe { kCGWindowNumber })
-            && let Ok(id) = u32::try_from(id)
-            && let Some(pid) = dictionary_number(entry, unsafe { kCGWindowOwnerPID })
-            && let Ok(pid) = i32::try_from(pid)
-        {
+    for entry in cf_array_items::<CFDictionary>(&list) {
+        if let Some((pid, id)) = window_server_identity(entry) {
             windows.entry(pid).or_default().insert(id);
         }
     }
@@ -1360,97 +1280,76 @@ fn top_window_at_point(
 /// Window-server frames for every ordinary window in one list copy. Use this
 /// instead of [`window_server_frame`] when checking more than one window.
 pub fn window_server_frames() -> Option<HashMap<CGWindowID, Rect>> {
-    Some(
-        window_server_windows(CGWindowListOption::OptionAll)?
-            .into_iter()
-            .map(|window| (window.id, window.frame))
-            .collect(),
-    )
+    window_server_frame_map(CGWindowListOption::OptionAll)
 }
 
 /// Window-server frames for every ordinary window currently on screen. A
 /// window listed here exists and is visible even when an app's Accessibility
 /// snapshot momentarily omits it.
 pub fn onscreen_window_frames() -> Option<HashMap<CGWindowID, Rect>> {
-    Some(
-        window_server_windows(CGWindowListOption::OptionOnScreenOnly)?
-            .into_iter()
-            .map(|window| (window.id, window.frame))
-            .collect(),
-    )
+    window_server_frame_map(CGWindowListOption::OptionOnScreenOnly)
 }
 
 fn window_server_windows(options: CGWindowListOption) -> Option<Vec<WindowServerWindow>> {
     let mut windows = Vec::new();
     let list = CGWindowListCopyWindowInfo(options | CGWindowListOption::ExcludeDesktopElements, 0)?;
-    for index in 0..list.count() {
-        let entry = unsafe { list.value_at_index(index) };
-        let Some(entry) = (unsafe { entry.cast::<CFType>().as_ref() })
-            .and_then(|value| value.downcast_ref::<CFDictionary>())
-        else {
+    for entry in cf_array_items::<CFDictionary>(&list) {
+        let Some((pid, id)) = window_server_identity(entry) else {
             continue;
         };
-        if dictionary_number(entry, unsafe { kCGWindowLayer }) != Some(0) {
-            continue;
-        }
-        let Some(id) = dictionary_number(entry, unsafe { kCGWindowNumber })
-            .and_then(|id| u32::try_from(id).ok())
-        else {
+        let Some(frame) = window_server_bounds(entry) else {
             continue;
         };
-        let Some(pid) = dictionary_number(entry, unsafe { kCGWindowOwnerPID })
-            .and_then(|pid| i32::try_from(pid).ok())
-        else {
-            continue;
-        };
-        let raw = unsafe { entry.value((kCGWindowBounds as *const CFString).cast::<c_void>()) };
-        let Some(bounds) = (unsafe { raw.cast::<CFType>().as_ref() })
-            .and_then(|value| value.downcast_ref::<CFDictionary>())
-        else {
-            continue;
-        };
-        let field = |name: &'static str| {
-            dictionary_double(bounds, &CFString::from_static_str(name))
-                .map(|value| value.round() as i32)
-        };
-        if let (Some(x), Some(y), Some(width), Some(height)) =
-            (field("X"), field("Y"), field("Width"), field("Height"))
-        {
-            windows.push(WindowServerWindow {
-                id,
-                pid,
-                frame: Rect {
-                    x,
-                    y,
-                    width,
-                    height,
-                },
-            });
-        }
+        windows.push(WindowServerWindow { pid, id, frame });
     }
     Some(windows)
 }
 
-fn dictionary_double(dictionary: &CFDictionary, key: &CFString) -> Option<f64> {
-    let raw = unsafe { dictionary.value(key as *const CFString as *const c_void) };
-    let number = unsafe { raw.cast::<CFType>().as_ref() }?.downcast_ref::<CFNumber>()?;
-    let mut value = 0_f64;
-    unsafe {
-        number
-            .value(CFNumberType::Float64Type, ptr::from_mut(&mut value).cast())
-            .then_some(value)
+fn window_server_frame_map(options: CGWindowListOption) -> Option<HashMap<CGWindowID, Rect>> {
+    let list = CGWindowListCopyWindowInfo(options | CGWindowListOption::ExcludeDesktopElements, 0)?;
+    Some(
+        cf_array_items::<CFDictionary>(&list)
+            .filter_map(|entry| {
+                let (_, id) = window_server_identity(entry)?;
+                Some((id, window_server_bounds(entry)?))
+            })
+            .collect(),
+    )
+}
+
+fn window_server_identity(entry: &CFDictionary) -> Option<(i32, u32)> {
+    if dictionary_number(entry, unsafe { kCGWindowLayer }) != Some(0) {
+        return None;
     }
+    let id = dictionary_number(entry, unsafe { kCGWindowNumber })
+        .and_then(|id| u32::try_from(id).ok())?;
+    let pid = dictionary_number(entry, unsafe { kCGWindowOwnerPID })
+        .and_then(|pid| i32::try_from(pid).ok())?;
+    Some((pid, id))
+}
+
+fn window_server_bounds(entry: &CFDictionary) -> Option<Rect> {
+    let bounds = dictionary_value::<CFDictionary>(entry, unsafe { kCGWindowBounds })?;
+    let mut frame = CGRect::ZERO;
+    unsafe { CGRectMakeWithDictionaryRepresentation(Some(bounds), ptr::from_mut(&mut frame)) }
+        .then_some(Rect {
+            x: frame.origin.x.round() as i32,
+            y: frame.origin.y.round() as i32,
+            width: frame.size.width.round() as i32,
+            height: frame.size.height.round() as i32,
+        })
+}
+
+fn dictionary_value<'a, T: ConcreteType>(
+    dictionary: &'a CFDictionary,
+    key: &CFString,
+) -> Option<&'a T> {
+    let raw = unsafe { dictionary.value((key as *const CFString).cast::<c_void>()) };
+    unsafe { raw.cast::<CFType>().as_ref() }?.downcast_ref::<T>()
 }
 
 fn dictionary_number(dictionary: &CFDictionary, key: &CFString) -> Option<i64> {
-    let raw = unsafe { dictionary.value(key as *const CFString as *const c_void) };
-    let number = unsafe { raw.cast::<CFType>().as_ref() }?.downcast_ref::<CFNumber>()?;
-    let mut value = 0_i64;
-    unsafe {
-        number
-            .value(CFNumberType::SInt64Type, ptr::from_mut(&mut value).cast())
-            .then_some(value)
-    }
+    dictionary_value::<CFNumber>(dictionary, key)?.as_i64()
 }
 
 fn physical_window_id(app: &AppInstanceId, element: &AXUIElement) -> Option<PhysicalWindowId> {
@@ -1479,12 +1378,8 @@ fn is_settable(element: &AXUIElement, name: &'static str) -> Result<bool, AXErro
         .ok_or(error)
 }
 
-fn bool_attribute(element: &AXUIElement, name: &'static str) -> Result<bool, AXError> {
-    attribute::<CFBoolean>(element, name).map(|value| value.value())
-}
-
 fn optional_bool_attribute(element: &AXUIElement, name: &'static str) -> Result<bool, AXError> {
-    match bool_attribute(element, name) {
+    match attribute::<CFBoolean>(element, name).map(|value| value.value()) {
         Ok(value) => Ok(value),
         Err(AXError::NoValue | AXError::AttributeUnsupported) => Ok(false),
         Err(error) => Err(error),
@@ -1509,30 +1404,53 @@ fn attribute<T: ConcreteType>(
         .map_err(|_| AXError::IllegalArgument)
 }
 
-fn ax_point(element: &AXUIElement, name: &'static str) -> Option<CGPoint> {
+fn cf_array_items<'a, T: ConcreteType + 'a>(
+    array: &'a CFArray,
+) -> impl Iterator<Item = &'a T> + 'a {
+    (0..array.count()).filter_map(move |index| {
+        let raw = unsafe { array.value_at_index(index) };
+        unsafe { raw.cast::<CFType>().as_ref() }?.downcast_ref::<T>()
+    })
+}
+
+fn application_element(pid: i32) -> CFRetained<AXUIElement> {
+    let application = unsafe { AXUIElement::new_application(pid) };
+    set_ax_timeout(&application);
+    application
+}
+
+fn set_ax_timeout(element: &AXUIElement) {
+    let _ = unsafe { element.set_messaging_timeout(AX_MESSAGING_TIMEOUT) };
+}
+
+fn set_attribute(element: &AXUIElement, name: &'static str, value: &CFType) -> AXError {
+    unsafe { element.set_attribute_value(&CFString::from_static_str(name), value) }
+}
+
+fn ax_value<T>(kind: AXValueType, mut value: T) -> Option<CFRetained<AXValue>> {
+    unsafe { AXValue::new(kind, NonNull::from(&mut value).cast::<c_void>()) }
+}
+
+fn ax_value_get<T: Copy>(
+    element: &AXUIElement,
+    name: &'static str,
+    kind: AXValueType,
+    mut zero: T,
+) -> Option<T> {
     let value = attribute::<AXValue>(element, name).ok()?;
-    let mut result = CGPoint::ZERO;
     unsafe {
         value
-            .value(
-                AXValueType::CGPoint,
-                NonNull::from(&mut result).cast::<c_void>(),
-            )
-            .then_some(result)
+            .value(kind, NonNull::from(&mut zero).cast::<c_void>())
+            .then_some(zero)
     }
 }
 
+fn ax_point(element: &AXUIElement, name: &'static str) -> Option<CGPoint> {
+    ax_value_get(element, name, AXValueType::CGPoint, CGPoint::ZERO)
+}
+
 fn ax_size(element: &AXUIElement, name: &'static str) -> Option<CGSize> {
-    let value = attribute::<AXValue>(element, name).ok()?;
-    let mut result = CGSize::ZERO;
-    unsafe {
-        value
-            .value(
-                AXValueType::CGSize,
-                NonNull::from(&mut result).cast::<c_void>(),
-            )
-            .then_some(result)
-    }
+    ax_value_get(element, name, AXValueType::CGSize, CGSize::ZERO)
 }
 
 #[cfg(test)]
