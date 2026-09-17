@@ -5,9 +5,13 @@ This file is the current engineering contract. README and `docs/` describe curre
 
 ## Architecture Map
 
-- `src/bin/spaceman-agent.rs`, `src/app.rs`: owner-only capped logging, GPUI/AppKit foreground
-  lifecycle, action queue, gestures, status, durable parking/restoration, restore-before-exit
-  coordination, and the worker boundary.
+- `src/bin/spaceman-agent.rs`, `src/app.rs`, `src/app/app_loop.rs`: owner-only capped logging,
+  GPUI/AppKit foreground lifecycle, action queue, status, restore-before-exit coordination, and the
+  worker boundary.
+- `src/app/runtime.rs`, `src/app/cycle.rs`, `src/app/switching.rs`, `src/app/parking.rs`,
+  `src/app/commands.rs`, `src/app/backend.rs`: the worker-thread `WorkspaceRuntime` — observation
+  cycles and affinity, workspace switches, durable parking/restoration, focused-window commands, and
+  the native/persistence backend seam. Tests live in `src/app/tests/`.
 - `src/app/input.rs`: bounded ordered user input and geometry-based gesture tracking, independent
   of preview-worker availability. Main-thread pointer sampling must not make synchronous AX calls.
 - `src/desktop_ui.rs`, `src/status_item.rs`, `src/settings.rs`, `src/login_item.rs`, `src/sparkle.rs`,

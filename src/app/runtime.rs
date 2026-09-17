@@ -1,0 +1,579 @@
+use super::*;
+
+pub(super) struct CycleStatus {
+    pub(super) active: Vec<WorkspaceId>,
+    pub(super) layouts: Vec<status_item::WorkspaceLayout>,
+    pub(super) failed: usize,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub(super) struct RuntimeDebug {
+    frontmost: Option<AppInstanceId>,
+    focused: Option<crate::PhysicalWindowId>,
+    active_workspaces: Vec<WorkspaceId>,
+    displays: Vec<DebugDisplay>,
+    tiles: Vec<NavigationTile>,
+    floating: Vec<DebugFloatingWindow>,
+    /// Quarantined windows left unmanaged because they un-park themselves.
+    ignored: Vec<crate::PhysicalWindowId>,
+    targets: DebugTargets,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct DebugFloatingWindow {
+    window: crate::PhysicalWindowId,
+    workspace: WorkspaceId,
+    /// Present exactly when the window is parked off-screen.
+    parked_original_frame: Option<crate::Rect>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct DebugDisplay {
+    id: String,
+    name: String,
+    frame: crate::Rect,
+    workspace: WorkspaceId,
+    axis: crate::Axis,
+    fullscreen_layout: bool,
+    layout: Vec<crate::Rect>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct DebugTargets {
+    left: Option<crate::PhysicalWindowId>,
+    down: Option<crate::PhysicalWindowId>,
+    up: Option<crate::PhysicalWindowId>,
+    right: Option<crate::PhysicalWindowId>,
+}
+
+pub(super) struct LayoutStatus {
+    pub(super) failed: usize,
+    pub(super) blocked: bool,
+}
+
+#[derive(Clone)]
+pub(super) struct ResolvedWorkspace {
+    pub(super) workspace: WorkspaceId,
+    pub(super) selector: DisplaySelector,
+    pub(super) display_id: String,
+    pub(super) output: crate::Rect,
+}
+
+pub(super) struct WorkspaceRuntime<B = MacWorkspaceBackend> {
+    pub(super) backend: B,
+    pub(super) scope: ManagementScope,
+    pub(super) workspaces: Workspaces,
+    pub(super) known_apps: [HashMap<AppInstanceId, String>; WorkspaceId::COUNT],
+    pub(super) constrained:
+        [HashMap<crate::PhysicalWindowId, (crate::Rect, crate::Rect)>; WorkspaceId::COUNT],
+    pub(super) parked: HashMap<crate::PhysicalWindowId, crate::Rect>,
+    /// When each window was last parked. Apps apply position writes
+    /// asynchronously, so a fresh park must settle before an on-screen
+    /// observation may be trusted as a genuine reappearance.
+    pub(super) recently_parked: HashMap<crate::PhysicalWindowId, Instant>,
+    /// When each window last un-parked itself (confirmed by the window server).
+    pub(super) recent_heals: HashMap<crate::PhysicalWindowId, Instant>,
+    /// Consecutive re-parks undone by the app; past the limit the window's
+    /// reappearance is honored instead of fought.
+    pub(super) repark_attempts: HashMap<crate::PhysicalWindowId, u8>,
+    /// Windows that repeatedly un-park themselves; left unmanaged for the session.
+    pub(super) quarantined: HashSet<crate::PhysicalWindowId>,
+    /// Bound windows the window server shows on screen while the app's
+    /// Accessibility snapshot omits them, and when the omission began.
+    pub(super) omitted_windows: HashMap<crate::PhysicalWindowId, Instant>,
+    pub(super) config: Config,
+    pub(super) foreground_lanes: HashMap<String, DisplaySelector>,
+    pub(super) suppressed_focus: Option<crate::PhysicalWindowId>,
+    pub(super) pending_fullscreen_focus_restore: HashSet<WorkspaceId>,
+    pub(super) persisted_workspace_state: crate::workspace::WorkspaceState,
+}
+
+impl WorkspaceRuntime<MacWorkspaceBackend> {
+    pub(super) fn new(
+        scope: ManagementScope,
+        parked: HashMap<crate::PhysicalWindowId, crate::Rect>,
+        config: Config,
+        workspace_state: Option<crate::workspace::WorkspaceState>,
+    ) -> Self {
+        Self::with_backend_config_state(scope, MacWorkspaceBackend, parked, config, workspace_state)
+    }
+}
+
+impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
+    pub(super) fn execute(
+        &mut self,
+        command: WorkerCommand,
+        cancelled: &AtomicBool,
+    ) -> Option<WorkerResult> {
+        if let WorkerCommand::Action(_, outputs) | WorkerCommand::Gesture(_, _, outputs) = &command
+        {
+            self.synchronize_foreground(outputs);
+        }
+        let (result, outputs) = match command {
+            WorkerCommand::Action(action, outputs) => {
+                let result = self.execute_action(action, outputs.clone(), cancelled);
+                (result, outputs)
+            }
+            WorkerCommand::Gesture(gesture, preview, outputs) => {
+                let result = match gesture {
+                    FinalGesture::Drop(window, point) => {
+                        self.drop_window(window, point, preview, outputs.clone(), cancelled)
+                    }
+                    FinalGesture::Resize(window, frame) => {
+                        self.resize_window(window, frame, preview, outputs.clone(), cancelled)
+                    }
+                };
+                (result, outputs)
+            }
+            WorkerCommand::RestoreAll => {
+                return Some(WorkerResult::Restored {
+                    failed: self.restore_all(),
+                });
+            }
+            WorkerCommand::Stop => return None,
+        };
+        Some(WorkerResult::Status {
+            result,
+            debug: Box::new(self.debug_state(&outputs)),
+        })
+    }
+
+    fn execute_action(
+        &mut self,
+        action: WorkerAction,
+        outputs: macos::DisplayOutputs,
+        cancelled: &AtomicBool,
+    ) -> Result<CycleStatus, String> {
+        match action {
+            WorkerAction::Retile => self.cycle(outputs, cancelled),
+            WorkerAction::SwitchWorkspace(workspace) => self.switch(workspace, outputs, cancelled),
+            WorkerAction::WorkspaceBackAndForth => {
+                self.workspace_back_and_forth(outputs, cancelled)
+            }
+            WorkerAction::MoveFocused(workspace) => {
+                self.move_focused(workspace, outputs, cancelled)
+            }
+            WorkerAction::MoveApp(bundle_id, workspace) => {
+                self.move_app(&bundle_id, workspace, outputs, cancelled)
+            }
+            WorkerAction::CycleFocus => self.cycle_focus(outputs, cancelled),
+            WorkerAction::Focus(direction) => self.focus_relative(direction, outputs, cancelled),
+            WorkerAction::Reorder(direction) => self.reorder_focused(direction, outputs, cancelled),
+            WorkerAction::ToggleLayout => self.toggle_layout(outputs, cancelled),
+            WorkerAction::Resize(direction) => self.resize_focused(direction, outputs, cancelled),
+            WorkerAction::Balance => self.balance_focused(outputs, cancelled),
+            WorkerAction::ToggleFullscreenLayout => {
+                self.toggle_fullscreen_layout(outputs, cancelled)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_backend(
+        scope: ManagementScope,
+        backend: B,
+        parked: HashMap<crate::PhysicalWindowId, crate::Rect>,
+    ) -> Self {
+        Self::with_backend_and_config(scope, backend, parked, Config::default())
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_backend_and_config(
+        scope: ManagementScope,
+        backend: B,
+        parked: HashMap<crate::PhysicalWindowId, crate::Rect>,
+        config: Config,
+    ) -> Self {
+        Self::with_backend_config_state(scope, backend, parked, config, None)
+    }
+
+    pub(super) fn with_backend_config_state(
+        scope: ManagementScope,
+        backend: B,
+        parked: HashMap<crate::PhysicalWindowId, crate::Rect>,
+        config: Config,
+        workspace_state: Option<crate::workspace::WorkspaceState>,
+    ) -> Self {
+        let restored_workspace_state = workspace_state.is_some();
+        let mut workspaces = Workspaces::default();
+        config.configure_workspaces(&mut workspaces);
+        if let Some(state) = workspace_state {
+            workspaces.restore(state);
+        }
+        let pending_fullscreen_focus_restore = if restored_workspace_state {
+            WorkspaceId::all()
+                .filter(|workspace| {
+                    workspaces.uses_fullscreen_layout(*workspace)
+                        && scope.manages_selector(workspaces.assignment(*workspace))
+                })
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let known_apps = std::array::from_fn(|index| {
+            workspaces
+                .app_instances(WorkspaceId::from_index(index))
+                .map(|app| (app.clone(), String::new()))
+                .collect()
+        });
+        let persisted_workspace_state = workspaces.state();
+        Self {
+            backend,
+            scope,
+            workspaces,
+            known_apps,
+            constrained: std::array::from_fn(|_| HashMap::new()),
+            parked,
+            recently_parked: HashMap::new(),
+            recent_heals: HashMap::new(),
+            repark_attempts: HashMap::new(),
+            quarantined: HashSet::new(),
+            omitted_windows: HashMap::new(),
+            config,
+            foreground_lanes: HashMap::new(),
+            suppressed_focus: None,
+            pending_fullscreen_focus_restore,
+            persisted_workspace_state,
+        }
+    }
+
+    pub(super) fn visible_workspaces(
+        &self,
+        outputs: &macos::DisplayOutputs,
+    ) -> Vec<ResolvedWorkspace> {
+        outputs
+            .displays()
+            .iter()
+            .filter_map(|display| {
+                let candidates = || {
+                    self.workspaces
+                        .active_lanes()
+                        .filter(|(selector, _)| outputs.resolve(selector).id == display.id)
+                };
+                let selected = self
+                    .foreground_lanes
+                    .get(&display.id)
+                    .and_then(|foreground| {
+                        candidates().find(|(selector, _)| *selector == foreground)
+                    })
+                    .or_else(|| {
+                        candidates()
+                            .filter(|(selector, _)| selector_available(selector, outputs))
+                            .min_by_key(|(_, workspace)| *workspace)
+                    })
+                    .or_else(|| candidates().min_by_key(|(_, workspace)| *workspace))?;
+                Some(ResolvedWorkspace {
+                    workspace: selected.1,
+                    selector: selected.0.clone(),
+                    display_id: display.id.clone(),
+                    output: display.frame,
+                })
+            })
+            .collect()
+    }
+
+    pub(super) fn is_visible(
+        &self,
+        workspace: WorkspaceId,
+        outputs: &macos::DisplayOutputs,
+    ) -> bool {
+        self.visible_workspaces(outputs)
+            .iter()
+            .any(|resolved| resolved.workspace == workspace)
+    }
+
+    pub(super) fn synchronize_foreground(&mut self, outputs: &macos::DisplayOutputs) {
+        let disconnected: Vec<_> = self
+            .foreground_lanes
+            .iter()
+            .filter(|(display_id, _)| {
+                !outputs
+                    .displays()
+                    .iter()
+                    .any(|display| &display.id == *display_id)
+            })
+            .map(|(display_id, selector)| (display_id.clone(), selector.clone()))
+            .collect();
+        for (display_id, selector) in disconnected {
+            self.foreground_lanes.remove(&display_id);
+            self.foreground_lanes
+                .insert(outputs.resolve(&selector).id.clone(), selector);
+        }
+    }
+
+    pub(super) fn spatial_target(
+        &self,
+        focused: &crate::PhysicalWindowId,
+        direction: Direction,
+        outputs: &macos::DisplayOutputs,
+    ) -> Option<(WorkspaceId, crate::PhysicalWindowId)> {
+        let tiles = self.navigation_tiles(outputs);
+        crate::navigation::target(&tiles, focused, direction)
+            .map(|target| (target.workspace, target.window.clone()))
+    }
+
+    pub(super) fn navigation_tiles(&self, outputs: &macos::DisplayOutputs) -> Vec<NavigationTile> {
+        let mut tiles = Vec::new();
+        for resolved in self.visible_workspaces(outputs) {
+            let mut placements = self
+                .workspaces
+                .engine(resolved.workspace)
+                .placements(&Settings::for_output(resolved.output));
+            if self.workspaces.uses_fullscreen_layout(resolved.workspace) {
+                for placement in &mut placements {
+                    placement.frame = resolved.output;
+                }
+            }
+            tiles.extend(placements.into_iter().filter_map(|placement| {
+                placement.window.map(|window| NavigationTile {
+                    workspace: resolved.workspace,
+                    window,
+                    frame: placement.frame,
+                })
+            }));
+        }
+        tiles
+    }
+
+    pub(super) fn debug_state(&mut self, outputs: &macos::DisplayOutputs) -> RuntimeDebug {
+        let tiles = self.navigation_tiles(outputs);
+        let focused = self.backend.focused_window();
+        let target = |direction| {
+            focused.as_ref().and_then(|focused| {
+                crate::navigation::target(&tiles, focused, direction)
+                    .map(|tile| tile.window.clone())
+            })
+        };
+        let targets = DebugTargets {
+            left: target(Direction::Left),
+            down: target(Direction::Down),
+            up: target(Direction::Up),
+            right: target(Direction::Right),
+        };
+        let visible = self.visible_workspaces(outputs);
+        let floating = self
+            .workspaces
+            .floating_entries()
+            .map(|(window, workspace)| DebugFloatingWindow {
+                parked_original_frame: self.parked.get(window).copied(),
+                window: window.clone(),
+                workspace,
+            })
+            .collect();
+        RuntimeDebug {
+            frontmost: self.backend.frontmost_application(),
+            focused,
+            active_workspaces: visible.iter().map(|resolved| resolved.workspace).collect(),
+            displays: visible
+                .into_iter()
+                .filter_map(|resolved| {
+                    let display = outputs
+                        .displays()
+                        .iter()
+                        .find(|display| display.id == resolved.display_id)?;
+                    Some(DebugDisplay {
+                        id: display.id.clone(),
+                        name: display.name.clone(),
+                        frame: display.frame,
+                        workspace: resolved.workspace,
+                        axis: self
+                            .workspaces
+                            .engine(resolved.workspace)
+                            .model()
+                            .workspace
+                            .axis,
+                        fullscreen_layout: self
+                            .workspaces
+                            .uses_fullscreen_layout(resolved.workspace),
+                        layout: self
+                            .preview_layout(resolved.workspace, status_item::WORKSPACE_PREVIEW),
+                    })
+                })
+                .collect(),
+            tiles,
+            floating,
+            ignored: {
+                let mut ignored: Vec<_> = self.quarantined.iter().cloned().collect();
+                ignored.sort_by_key(|window| (window.app.pid, window.window_id));
+                ignored
+            },
+            targets,
+        }
+    }
+
+    pub(super) fn layout_workspace(
+        &mut self,
+        workspace: WorkspaceId,
+        output: crate::Rect,
+        cancelled: &AtomicBool,
+    ) -> LayoutStatus {
+        self.layout_workspace_during_drag(workspace, output, None, cancelled)
+    }
+
+    pub(super) fn layout_workspace_during_drag(
+        &mut self,
+        workspace: WorkspaceId,
+        output: crate::Rect,
+        dragged: Option<&crate::PhysicalWindowId>,
+        cancelled: &AtomicBool,
+    ) -> LayoutStatus {
+        let settings = Settings::for_output(output);
+        let mut placements = self.workspaces.engine(workspace).placements(&settings);
+        self.apply_fullscreen_layout(workspace, &mut placements, output);
+        let results = match dragged {
+            Some(dragged) => {
+                self.backend
+                    .apply_managed_during_drag(&placements, &settings, dragged, cancelled)
+            }
+            None => self
+                .backend
+                .apply_managed(&placements, &settings, cancelled),
+        };
+        // Managed layout runs without a fresh observation; the next cycle validates readback.
+        self.record_results(workspace, &results);
+        let failed = failed_results(&results);
+        let expected = placements
+            .iter()
+            .filter(|placement| placement.window.is_some())
+            .count();
+        // Deferred means a drag is in progress and layout retries next cycle;
+        // it must not be treated as a failure that rolls back a switch.
+        let blocked = results.len() != expected
+            || results.iter().any(|result| {
+                matches!(
+                    result.outcome,
+                    macos::ApplyOutcome::Gone | macos::ApplyOutcome::Unavailable
+                )
+            });
+        LayoutStatus { failed, blocked }
+    }
+
+    pub(super) fn forget_window(
+        &mut self,
+        workspace: WorkspaceId,
+        window: &crate::PhysicalWindowId,
+    ) {
+        self.workspaces.forget_window(workspace, window);
+        self.clear_fullscreen_restore_if_inactive(workspace);
+        self.workspaces.forget_floating(window);
+        self.constrained[workspace.index()].remove(window);
+        self.recently_parked.remove(window);
+        self.recent_heals.remove(window);
+        self.repark_attempts.remove(window);
+    }
+
+    pub(super) fn clear_fullscreen_restore_if_inactive(&mut self, workspace: WorkspaceId) {
+        if !self.workspaces.uses_fullscreen_layout(workspace) {
+            self.pending_fullscreen_focus_restore.remove(&workspace);
+        }
+    }
+
+    pub(super) fn apply_fullscreen_layout(
+        &mut self,
+        workspace: WorkspaceId,
+        placements: &mut [crate::Placement],
+        output: crate::Rect,
+    ) {
+        if !self.workspaces.uses_fullscreen_layout(workspace) {
+            return;
+        }
+        for placement in placements {
+            placement.frame = output;
+            self.workspaces
+                .engine_mut(workspace)
+                .record_placement_target(placement.slot, output);
+        }
+    }
+
+    pub(super) fn record_results(
+        &mut self,
+        workspace: WorkspaceId,
+        results: &[macos::ApplyResult],
+    ) {
+        let evidence = &mut self.constrained[workspace.index()];
+        for result in results {
+            match (result.outcome, result.actual) {
+                (macos::ApplyOutcome::Constrained, Some(actual)) => {
+                    evidence.insert(result.window.clone(), (result.target, actual));
+                }
+                (macos::ApplyOutcome::Applied | macos::ApplyOutcome::Gone, _) => {
+                    evidence.remove(&result.window);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub(super) fn status(&self, failed: usize, outputs: &macos::DisplayOutputs) -> CycleStatus {
+        self.status_for_visible(failed, &self.visible_workspaces(outputs))
+    }
+
+    pub(super) fn persist_workspace_state_if_changed(&mut self) -> Result<(), String> {
+        let state = self.workspaces.state();
+        if state == self.persisted_workspace_state {
+            return Ok(());
+        }
+        self.backend.persist_workspace_state(&state)?;
+        self.persisted_workspace_state = state;
+        Ok(())
+    }
+
+    fn preview_layout(&self, workspace: WorkspaceId, output: crate::Rect) -> Vec<crate::Rect> {
+        let mut layout = self.workspaces.engine(workspace).preview(output);
+        if self.workspaces.uses_fullscreen_layout(workspace) {
+            layout.fill(output);
+        }
+        layout
+    }
+
+    pub(super) fn status_for_visible(
+        &self,
+        failed: usize,
+        visible: &[ResolvedWorkspace],
+    ) -> CycleStatus {
+        let active: Vec<_> = visible
+            .iter()
+            .filter(|resolved| self.scope.manages_selector(&resolved.selector))
+            .map(|resolved| resolved.workspace)
+            .collect();
+        CycleStatus {
+            layouts: active
+                .iter()
+                .map(|workspace| {
+                    let mode = if self.workspaces.uses_fullscreen_layout(*workspace) {
+                        status_item::WorkspaceLayoutMode::Fullscreen
+                    } else {
+                        status_item::WorkspaceLayoutMode::Split(
+                            self.preview_layout(*workspace, status_item::WORKSPACE_PREVIEW),
+                        )
+                    };
+                    status_item::WorkspaceLayout {
+                        workspace: workspace.to_string(),
+                        mode,
+                    }
+                })
+                .collect(),
+            active,
+            failed,
+        }
+    }
+}
+
+pub(super) fn output_for(
+    workspaces: &Workspaces,
+    workspace: WorkspaceId,
+    outputs: &macos::DisplayOutputs,
+) -> crate::Rect {
+    outputs.resolve(workspaces.assignment(workspace)).frame
+}
+
+fn selector_available(selector: &DisplaySelector, outputs: &macos::DisplayOutputs) -> bool {
+    outputs.resolve_exact(selector).is_some()
+}
+
+pub(super) fn failed_results(results: &[macos::ApplyResult]) -> usize {
+    results
+        .iter()
+        .filter(|result| result.outcome != macos::ApplyOutcome::Applied)
+        .count()
+}
