@@ -62,6 +62,12 @@ const RESTORE_CONFIRM_TOLERANCE: i32 = 64;
 /// After this many undone re-parks in a row the window's reappearance is
 /// honored (re-homed) instead of fought; repeated honors quarantine it.
 const REPARK_ATTEMPT_LIMIT: u8 = 3;
+/// How long a bound window may be missing from its app's Accessibility snapshot
+/// while the window server still shows it on screen before the omission is
+/// believed. Electron apps rebuild their accessibility tree under load (Slack
+/// starting a huddle) and briefly report a partial window list; one such
+/// snapshot must not retire a slot.
+const OMISSION_SETTLE: Duration = Duration::from_secs(2);
 /// How long a workspace switch waits for slow applications to actually move
 /// their windows on screen before the outgoing workspace is hidden. Keeps the
 /// bare desktop from ever showing during a switch.
@@ -302,6 +308,7 @@ struct ReconcileDisplayContext<'a> {
     observation: &'a mut crate::NativeObservation,
     affinity_policy: &'a FrozenAffinityPolicy,
     server_frames: Option<&'a HashMap<u32, crate::Rect>>,
+    onscreen_frames: Option<&'a HashMap<u32, crate::Rect>>,
     cancelled: &'a AtomicBool,
     failed: &'a mut usize,
 }
@@ -340,6 +347,9 @@ trait WorkspaceBackend {
     /// Authoritative window-server frames for all windows in one snapshot.
     /// Use for per-cycle checks instead of repeated single-window queries.
     fn window_server_frames(&mut self) -> Option<HashMap<u32, crate::Rect>>;
+    /// Window-server frames for windows currently on screen; proves a window
+    /// still exists when an Accessibility snapshot omits it.
+    fn onscreen_window_frames(&mut self) -> Option<HashMap<u32, crate::Rect>>;
     fn set_position(
         &mut self,
         window: &crate::PhysicalWindowId,
@@ -400,6 +410,10 @@ impl WorkspaceBackend for MacWorkspaceBackend {
 
     fn window_server_frames(&mut self) -> Option<HashMap<u32, crate::Rect>> {
         macos::window_server_frames()
+    }
+
+    fn onscreen_window_frames(&mut self) -> Option<HashMap<u32, crate::Rect>> {
+        macos::onscreen_window_frames()
     }
 
     fn set_position(
@@ -1382,6 +1396,9 @@ struct WorkspaceRuntime<B = MacWorkspaceBackend> {
     repark_attempts: HashMap<crate::PhysicalWindowId, u8>,
     /// Windows that repeatedly un-park themselves; left unmanaged for the session.
     quarantined: HashSet<crate::PhysicalWindowId>,
+    /// Bound windows the window server shows on screen while the app's
+    /// Accessibility snapshot omits them, and when the omission began.
+    omitted_windows: HashMap<crate::PhysicalWindowId, Instant>,
     config: Config,
     foreground_lanes: HashMap<String, DisplaySelector>,
     suppressed_focus: Option<crate::PhysicalWindowId>,
@@ -1521,6 +1538,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             recent_heals: HashMap::new(),
             repark_attempts: HashMap::new(),
             quarantined: HashSet::new(),
+            omitted_windows: HashMap::new(),
             config,
             foreground_lanes: HashMap::new(),
             suppressed_focus: None,
@@ -1676,6 +1694,12 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     .iter()
                     .any(|resolved| resolved.workspace == workspace)
             {
+                log_event!(
+                    "focus follow: {:?} (frontmost {:?}) -> workspace {}",
+                    focused,
+                    frontmost,
+                    workspace
+                );
                 return self.switch(workspace, outputs, cancelled);
             }
         }
@@ -1699,6 +1723,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .map_err(|error| format!("Observation error: {error}"))?;
         let affinity_policy =
             self.freeze_window_affinities(&observation, &visible, server_frames)?;
+        // Taken after the Accessibility snapshot so a window listed here was
+        // on screen no earlier than the snapshot that may have omitted it.
+        let onscreen_snapshot = self.backend.onscreen_window_frames();
         for resolved in &visible {
             if !self.scope.manages_selector(&resolved.selector) {
                 continue;
@@ -1710,6 +1737,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     observation: &mut observation,
                     affinity_policy: &affinity_policy,
                     server_frames: server_snapshot.as_ref(),
+                    onscreen_frames: onscreen_snapshot.as_ref(),
                     cancelled,
                     failed: &mut failed,
                 },
@@ -1923,6 +1951,68 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         self.honor_reappearance(&window.id, frame, original, target);
     }
 
+    /// A bound window the window server still shows on screen inside this
+    /// output, but which the app's Accessibility snapshot omitted, has not
+    /// gone anywhere: the snapshot is incomplete for that app. Downgrade the
+    /// app to `Unavailable` so reconciliation keeps its slots instead of
+    /// retiring one and re-adopting the window as new a cycle later. The
+    /// omission is believed once it outlasts [`OMISSION_SETTLE`].
+    fn guard_omitted_windows(
+        &mut self,
+        workspace: WorkspaceId,
+        output: crate::Rect,
+        observation: &mut crate::NativeObservation,
+        onscreen_frames: Option<&HashMap<u32, crate::Rect>>,
+    ) {
+        let Some(onscreen_frames) = onscreen_frames else {
+            return;
+        };
+        let bound = self.workspaces.engine(workspace).bound_windows();
+        let observed: HashSet<_> = live::observed_frames(observation).into_keys().collect();
+        self.omitted_windows
+            .retain(|window, _| match self.workspaces.workspace_of(window) {
+                Some(owner) => owner != workspace || !observed.contains(window),
+                None => false,
+            });
+        let now = Instant::now();
+        for app_observation in &mut observation.applications {
+            let crate::AppObservation::Complete { app, .. } = app_observation else {
+                continue;
+            };
+            let settling = bound
+                .iter()
+                .filter(|window| window.app == app.id && !observed.contains(*window))
+                .filter(|window| {
+                    onscreen_frames
+                        .get(&window.window_id)
+                        .is_some_and(|frame| output.contains_center(*frame))
+                })
+                .filter(|window| {
+                    let since = *self
+                        .omitted_windows
+                        .entry((*window).clone())
+                        .or_insert_with(|| {
+                            log_event!(
+                                "observation omitted {:?}: window server shows it on screen; keeping its slot",
+                                window
+                            );
+                            now
+                        });
+                    now.duration_since(since) < OMISSION_SETTLE
+                })
+                .count();
+            if settling == 0 {
+                continue;
+            }
+            *app_observation = crate::AppObservation::Unavailable {
+                app: app.id.clone(),
+                error: format!(
+                    "accessibility snapshot omitted {settling} on-screen bound window(s)"
+                ),
+            };
+        }
+    }
+
     /// Honor a window that will not stay parked: drop the recovery frame and
     /// re-home it to the workspace it insists on appearing on. A second honor
     /// within [`QUARANTINE_WINDOW`] quarantines the window for the session.
@@ -2003,6 +2093,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             observation,
             affinity_policy,
             server_frames,
+            onscreen_frames,
             cancelled,
             failed,
         } = context;
@@ -2055,6 +2146,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 }
             }
         }
+        self.guard_omitted_windows(workspace, output, &mut scoped_observation, onscreen_frames);
         let mut apps_with_window_server_evidence = HashSet::new();
         if let Some(server_frames) = server_frames {
             for slot in &self.workspaces.engine(workspace).model().workspace.slots {
@@ -2089,6 +2181,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .engine_mut(workspace)
             .accept(ticket, &scoped_observation, &settings)
             .map_err(|error| format!("stale workspace cycle: {error:?}"))?;
+        log_binding_decisions(workspace, &reconciliation.decisions);
         let routes: Vec<_> = reconciliation
             .decisions
             .iter()
@@ -3659,6 +3752,34 @@ fn update_observed_frames(
     }
 }
 
+/// Slot-identity changes are the events that explain "my window moved"; the
+/// steady-state decisions (unavailable, deferred) would only add noise.
+fn log_binding_decisions(workspace: WorkspaceId, decisions: &[Decision]) {
+    for decision in decisions {
+        match decision {
+            Decision::WindowInserted { slot, window } => {
+                log_event!("workspace {workspace}: bound {window:?} to slot {slot:?}");
+            }
+            Decision::WindowRemoved { slot, window } => {
+                log_event!("workspace {workspace}: retired slot {slot:?} ({window:?} absent)");
+            }
+            Decision::NativeTabReplaced {
+                slot,
+                previous,
+                current,
+            } => {
+                log_event!("workspace {workspace}: slot {slot:?} {previous:?} -> {current:?}");
+            }
+            Decision::ApplicationTerminated { app } => {
+                log_event!("workspace {workspace}: {app:?} terminated");
+            }
+            Decision::NativeTabAmbiguous { .. }
+            | Decision::ObservationUnavailable { .. }
+            | Decision::MouseDownDeferred => {}
+        }
+    }
+}
+
 fn failed_results(results: &[macos::ApplyResult]) -> usize {
     results
         .iter()
@@ -3907,6 +4028,10 @@ mod tests {
                 frames.insert(window.window_id, *frame);
             }
             Some(frames)
+        }
+
+        fn onscreen_window_frames(&mut self) -> Option<HashMap<u32, crate::Rect>> {
+            self.window_server_frames()
         }
 
         fn set_position(
@@ -5318,6 +5443,72 @@ mod tests {
             !outputs()
                 .union()
                 .contains_center(runtime.backend.frames[&created])
+        );
+    }
+
+    #[test]
+    fn on_screen_window_omitted_from_one_snapshot_keeps_its_slot() {
+        let kept = window(10);
+        let closed = window(11);
+        let mut backend = FakeBackend {
+            observation: Some(observation_for_windows("com.example.Test", &kept, &[])),
+            ..FakeBackend::default()
+        };
+        backend.frames.insert(kept.clone(), frame(50));
+        let mut runtime = runtime(backend);
+        bind(&mut runtime, WorkspaceId::ONE, &kept);
+        bind(&mut runtime, WorkspaceId::ONE, &closed);
+        runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
+
+        runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+
+        assert_eq!(
+            runtime.workspaces.workspace_of(&kept),
+            Some(WorkspaceId::ONE),
+            "the window server still shows the window on screen"
+        );
+        assert_eq!(
+            runtime.workspaces.workspace_of(&closed),
+            Some(WorkspaceId::ONE),
+            "the app's whole snapshot is distrusted while an omission settles"
+        );
+
+        runtime
+            .omitted_windows
+            .insert(kept.clone(), Instant::now() - OMISSION_SETTLE * 2);
+        runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+
+        assert_eq!(
+            runtime.workspaces.workspace_of(&kept),
+            None,
+            "an omission that outlasts the settle window is believed"
+        );
+        assert_eq!(runtime.workspaces.workspace_of(&closed), None);
+        assert!(runtime.omitted_windows.is_empty());
+    }
+
+    #[test]
+    fn omission_settling_ends_when_the_window_is_observed_again() {
+        let window = window(10);
+        let mut backend = FakeBackend {
+            observation: Some(observation_for_windows("com.example.Test", &window, &[])),
+            ..FakeBackend::default()
+        };
+        backend.frames.insert(window.clone(), frame(50));
+        let mut runtime = runtime(backend);
+        bind(&mut runtime, WorkspaceId::ONE, &window);
+        runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
+
+        runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+        assert!(runtime.omitted_windows.contains_key(&window));
+
+        runtime.backend.observation = Some(observation(&window, frame(50)));
+        runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+
+        assert!(runtime.omitted_windows.is_empty());
+        assert_eq!(
+            runtime.workspaces.workspace_of(&window),
+            Some(WorkspaceId::ONE)
         );
     }
 

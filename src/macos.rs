@@ -1368,6 +1368,18 @@ pub fn window_server_frames() -> Option<HashMap<CGWindowID, Rect>> {
     )
 }
 
+/// Window-server frames for every ordinary window currently on screen. A
+/// window listed here exists and is visible even when an app's Accessibility
+/// snapshot momentarily omits it.
+pub fn onscreen_window_frames() -> Option<HashMap<CGWindowID, Rect>> {
+    Some(
+        window_server_windows(CGWindowListOption::OptionOnScreenOnly)?
+            .into_iter()
+            .map(|window| (window.id, window.frame))
+            .collect(),
+    )
+}
+
 fn window_server_windows(options: CGWindowListOption) -> Option<Vec<WindowServerWindow>> {
     let mut windows = Vec::new();
     let list = CGWindowListCopyWindowInfo(options | CGWindowListOption::ExcludeDesktopElements, 0)?;
