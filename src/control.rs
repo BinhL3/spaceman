@@ -193,10 +193,10 @@ fn parse_line(line: &str) -> Result<Command, String> {
     match parts.as_slice() {
         ["status"] => Ok(Command::Status),
         ["debug"] => Ok(Command::Debug),
-        ["switch", workspace] => parse_workspace(workspace).map(Command::Switch),
+        ["switch", workspace] => WorkspaceId::parse(workspace).map(Command::Switch),
         ["back-and-forth"] => Ok(Command::WorkspaceBackAndForth),
-        ["move", workspace] => parse_workspace(workspace).map(Command::Move),
-        ["move-app", bundle_id, workspace] => parse_workspace(workspace)
+        ["move", workspace] => WorkspaceId::parse(workspace).map(Command::Move),
+        ["move-app", bundle_id, workspace] => WorkspaceId::parse(workspace)
             .map(|workspace| Command::MoveApp((*bundle_id).into(), workspace)),
         ["focus", direction] => direction.parse().map(Command::Focus),
         ["move-direction", direction] => direction.parse().map(Command::MoveDirection),
@@ -211,10 +211,6 @@ fn parse_line(line: &str) -> Result<Command, String> {
         ["quit"] => Ok(Command::Quit),
         _ => Err(format!("expected {COMMAND_USAGE}")),
     }
-}
-
-fn parse_workspace(value: &str) -> Result<WorkspaceId, String> {
-    WorkspaceId::parse(value)
 }
 
 #[cfg(test)]

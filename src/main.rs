@@ -53,82 +53,54 @@ fn main() -> ExitCode {
         print_usage(&executable);
         return ExitCode::from(2);
     };
+    let arguments = args.collect::<Vec<_>>();
+    let rest = arguments.iter().map(String::as_str).collect::<Vec<_>>();
 
-    let result = match command.as_str() {
-        "replay" => match (args.next(), args.next()) {
-            (Some(path), None) => run_replay(&path).and_then(to_json),
-            _ => {
-                print_usage(&executable);
-                return ExitCode::from(2);
-            }
-        },
+    let result = match (command.as_str(), rest.as_slice()) {
+        ("replay", [path]) => run_replay(path).and_then(to_json),
         #[cfg(target_os = "macos")]
-        "snapshot" if args.next().is_none() => run_snapshot().and_then(to_json),
+        ("snapshot", []) => run_retile(false).and_then(to_json),
         #[cfg(target_os = "macos")]
-        "displays" if args.next().is_none() => spaceman::macos::outputs()
+        ("displays", []) => spaceman::macos::outputs()
             .map(|outputs| outputs.displays().to_vec())
             .map_err(|error| error.to_string())
             .and_then(to_json),
-        "config-check" => match (args.next(), args.next()) {
-            (Some(path), None) => spaceman::config::load_path(std::path::Path::new(&path))
-                .map(|_| "configuration is valid".into()),
-            _ => {
-                print_usage(&executable);
-                return ExitCode::from(2);
-            }
-        },
+        ("config-check", [path]) => spaceman::config::load_path(std::path::Path::new(path))
+            .map(|_| "configuration is valid".into()),
         #[cfg(target_os = "macos")]
-        "ctl" => spaceman::control::send(&args.collect::<Vec<_>>()),
+        ("ctl", _) => spaceman::control::send(&arguments),
         #[cfg(target_os = "macos")]
-        "hud" if args.next().is_none() => run_hud(),
+        ("hud", []) => run_hud(),
         #[cfg(target_os = "macos")]
-        "retile" => match (args.next(), args.next()) {
-            (None, None) => run_retile(false).and_then(to_json),
-            (Some(flag), None) if flag == "--apply" => run_retile(true).and_then(to_json),
-            _ => {
-                print_usage(&executable);
-                return ExitCode::from(2);
-            }
-        },
+        ("retile", []) => run_retile(false).and_then(to_json),
         #[cfg(target_os = "macos")]
-        "watch" => match (args.next(), args.next(), args.next()) {
-            (Some(cycles), None, None) => parse_cycles(&cycles)
-                .and_then(|cycles| run_watch(cycles, false, None))
-                .and_then(to_json),
-            (Some(cycles), Some(flag), None) if flag == "--apply" => parse_cycles(&cycles)
-                .and_then(|cycles| run_watch(cycles, true, None))
-                .and_then(to_json),
-            _ => {
-                print_usage(&executable);
-                return ExitCode::from(2);
-            }
-        },
+        ("retile", ["--apply"]) => run_retile(true).and_then(to_json),
         #[cfg(target_os = "macos")]
-        "watch-window" => match (args.next(), args.next(), args.next(), args.next()) {
-            (Some(window_id), Some(cycles), None, None) => parse_window_id(&window_id)
-                .and_then(|window_id| parse_cycles(&cycles).map(|cycles| (window_id, cycles)))
-                .and_then(|(window_id, cycles)| run_watch(cycles, false, Some(window_id)))
-                .and_then(to_json),
-            (Some(window_id), Some(cycles), Some(flag), None) if flag == "--apply" => {
-                parse_window_id(&window_id)
-                    .and_then(|window_id| parse_cycles(&cycles).map(|cycles| (window_id, cycles)))
-                    .and_then(|(window_id, cycles)| run_watch(cycles, true, Some(window_id)))
-                    .and_then(to_json)
-            }
-            _ => {
-                print_usage(&executable);
-                return ExitCode::from(2);
-            }
-        },
+        ("watch", [cycles]) => parse_cycles(cycles)
+            .and_then(|cycles| run_watch(cycles, false, None))
+            .and_then(to_json),
         #[cfg(target_os = "macos")]
-        "run" => match (args.next(), args.next()) {
-            (None, None) => run_persistent(false),
-            (Some(flag), None) if flag == "--apply" => run_persistent(true),
-            _ => {
-                print_usage(&executable);
-                return ExitCode::from(2);
-            }
-        },
+        ("watch", [cycles, "--apply"]) => parse_cycles(cycles)
+            .and_then(|cycles| run_watch(cycles, true, None))
+            .and_then(to_json),
+        #[cfg(target_os = "macos")]
+        ("watch-window", [window_id, cycles]) => parse_window_id(window_id)
+            .and_then(|window_id| parse_cycles(cycles).map(|cycles| (window_id, cycles)))
+            .and_then(|(window_id, cycles)| run_watch(cycles, false, Some(window_id)))
+            .and_then(to_json),
+        #[cfg(target_os = "macos")]
+        ("watch-window", [window_id, cycles, "--apply"]) => parse_window_id(window_id)
+            .and_then(|window_id| parse_cycles(cycles).map(|cycles| (window_id, cycles)))
+            .and_then(|(window_id, cycles)| run_watch(cycles, true, Some(window_id)))
+            .and_then(to_json),
+        #[cfg(target_os = "macos")]
+        ("run", []) => run_persistent(false),
+        #[cfg(target_os = "macos")]
+        ("run", ["--apply"]) => run_persistent(true),
+        (known, _) if KNOWN_COMMANDS.contains(&known) => {
+            print_usage(&executable);
+            return ExitCode::from(2);
+        }
         _ => {
             eprintln!("unknown command: {command}");
             print_usage(&executable);
@@ -147,6 +119,27 @@ fn main() -> ExitCode {
         }
     }
 }
+
+const KNOWN_COMMANDS: &[&str] = &[
+    "replay",
+    "config-check",
+    #[cfg(target_os = "macos")]
+    "snapshot",
+    #[cfg(target_os = "macos")]
+    "displays",
+    #[cfg(target_os = "macos")]
+    "ctl",
+    #[cfg(target_os = "macos")]
+    "hud",
+    #[cfg(target_os = "macos")]
+    "retile",
+    #[cfg(target_os = "macos")]
+    "watch",
+    #[cfg(target_os = "macos")]
+    "watch-window",
+    #[cfg(target_os = "macos")]
+    "run",
+];
 
 fn print_usage(executable: &str) {
     eprintln!("usage: {executable} replay <fixture.json>");
@@ -264,11 +257,6 @@ fn parse_cycles(value: &str) -> Result<u64, String> {
 fn to_json(value: impl Serialize) -> Result<String, String> {
     serde_json::to_string_pretty(&value)
         .map_err(|error| format!("failed to encode output: {error}"))
-}
-
-#[cfg(target_os = "macos")]
-fn run_snapshot() -> Result<SnapshotOutput, String> {
-    run_retile(false)
 }
 
 #[cfg(target_os = "macos")]

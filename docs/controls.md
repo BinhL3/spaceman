@@ -94,9 +94,9 @@ spaceman ctl layout
 spaceman ctl resize shrink
 spaceman ctl resize grow
 spaceman ctl balance
-spaceman ctl retile
 spaceman ctl pause
 spaceman ctl resume
+spaceman ctl retile
 spaceman ctl restart
 spaceman ctl quit
 spaceman hud

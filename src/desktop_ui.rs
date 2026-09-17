@@ -1,15 +1,15 @@
 use gpui::{AnyElement, Div, FontWeight, IntoElement, Rgba, div, prelude::*, px, rgb};
 
-pub(crate) const CANVAS: u32 = 0x111111;
-pub(crate) const SURFACE: u32 = 0x171717;
-pub(crate) const SURFACE_HOVER: u32 = 0x1d1d1d;
-pub(crate) const LINE: u32 = 0x292929;
-pub(crate) const ACCENT: u32 = 0x3b5cf6;
-pub(crate) const SUCCESS: u32 = 0x69d89f;
+const CANVAS: u32 = 0x111111;
+const SURFACE: u32 = 0x171717;
+const SURFACE_HOVER: u32 = 0x1d1d1d;
+const LINE: u32 = 0x292929;
+const ACCENT: u32 = 0x3b5cf6;
+const SUCCESS: u32 = 0x69d89f;
 const SUCCESS_SURFACE: u32 = 0x183026;
-pub(crate) const TEXT: u32 = 0xeeeeee;
-pub(crate) const TEXT_SOFT: u32 = 0xb8b8b8;
-pub(crate) const MUTED: u32 = 0x858585;
+const TEXT: u32 = 0xeeeeee;
+const TEXT_SOFT: u32 = 0xb8b8b8;
+const MUTED: u32 = 0x858585;
 
 pub(crate) fn window_frame() -> Div {
     div().size_full().bg(rgb(CANVAS)).text_color(rgb(TEXT))

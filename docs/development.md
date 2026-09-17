@@ -55,13 +55,13 @@ AeroSpace to be enabled initially so they can capture a baseline, then they disa
 ./scripts/live-workspaces.sh
 ```
 
-These harnesses require a current signed bundle at `target/Spaceman.app`; build it with
-`./scripts/build-app.sh` first. `live-workspaces.sh` isolates control and recovery files with
-`SPACEMAN_APPLICATION_SUPPORT`; `live-ghostty-tabs.sh` uses a scoped, non-persistent `watch-window`
-process. Both restore their baseline but still exercise live Accessibility writes. Start them with
-AeroSpace enabled, read each script, preserve unrelated windows, and confirm its expected display and
-Ghostty assumptions. Never run a destructive live test on a user's normal workspace merely because
-unit tests pass.
+`live-workspaces.sh` requires a current signed bundle at `target/Spaceman.app`; build it with
+`./scripts/build-app.sh` first. It isolates control and recovery files with
+`SPACEMAN_APPLICATION_SUPPORT`. `live-ghostty-tabs.sh` instead uses `cargo run` to start a scoped,
+non-persistent `watch-window` process. Both restore their baseline but still exercise live
+Accessibility writes. Start them with AeroSpace enabled, read each script, preserve unrelated
+windows, and confirm its expected display and Ghostty assumptions. Never run a destructive live test
+on a user's normal workspace merely because unit tests pass.
 
 ## Documentation Checks
 

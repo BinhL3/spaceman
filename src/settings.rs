@@ -243,10 +243,6 @@ struct ToggleSpring {
 impl ToggleSpring {
     fn new(enabled: bool) -> Self {
         let position = if enabled { 1.0 } else { 0.0 };
-        Self::at(position)
-    }
-
-    fn at(position: f32) -> Self {
         Self {
             position,
             velocity: 0.0,

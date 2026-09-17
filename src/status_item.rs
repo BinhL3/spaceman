@@ -50,11 +50,6 @@ objc2::define_class!(
             let _ = self.ivars().actions.send(Action::ToggleAutomatic);
         }
 
-        #[unsafe(method(retile:))]
-        fn retile(&self, _sender: &NSObject) {
-            let _ = self.ivars().actions.send(Action::Retile);
-        }
-
         #[unsafe(method(openSettings:))]
         fn open_settings(&self, _sender: &NSObject) {
             let _ = self.ivars().actions.send(Action::OpenSettings);

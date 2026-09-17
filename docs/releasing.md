@@ -32,8 +32,12 @@ skill, and website. Commit and push a clean release revision, then prepare the e
 
 The script auto-detects the first `Developer ID Application` identity and uses the
 `spaceman-notary` Keychain profile. Override those choices with `SPACEMAN_CODESIGN_IDENTITY` and
-`SPACEMAN_NOTARY_KEYCHAIN_PROFILE`. Preparation builds, signs, notarizes, staples, validates, archives,
-checksums, and signs a local Sparkle appcast. Artifacts are written to `dist/` but are not uploaded.
+`SPACEMAN_NOTARY_KEYCHAIN_PROFILE`. Preparation requires release notes at
+`docs/releases/<version>.md`; set `SPACEMAN_RELEASE_NOTES` to use another file.
+`SPACEMAN_RELEASE_ARCH` defaults to the host architecture, must be `arm64` or `x86_64`, and cannot
+request a cross-architecture build. Preparation builds, signs, notarizes, staples, validates,
+archives, checksums, and signs a local Sparkle appcast. Artifacts are written to `dist/` but are not
+uploaded.
 
 After testing the prepared archive, publish it and its appcast:
 

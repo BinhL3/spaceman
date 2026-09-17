@@ -20,6 +20,21 @@ latest_artifact="Spaceman-latest-macos-$arch.zip"
 checksum="$artifact.sha256"
 submission="$dist/.Spaceman-v$version-macos-$arch-notarization.zip"
 
+verify_prepared_appcast() {
+  grep -Fq "$base_url/releases/$artifact" "$updates/appcast.xml" || {
+    echo "The prepared appcast does not reference $artifact." >&2
+    exit 1
+  }
+  grep -Fq 'sparkle:edSignature=' "$updates/appcast.xml" || {
+    echo "The prepared appcast has no signed update archive." >&2
+    exit 1
+  }
+  grep -Fq '<!-- sparkle-signatures:' "$updates/appcast.xml" || {
+    echo "The prepared appcast feed is not signed." >&2
+    exit 1
+  }
+}
+
 if [ "$mode" != prepare ] && [ "$mode" != publish ]; then
   echo "usage: $0 [prepare|publish]" >&2
   exit 2
@@ -85,18 +100,7 @@ if [ "$mode" = publish ]; then
     echo "Prepare and validate version $version before publishing it." >&2
     exit 1
   }
-  grep -Fq "$base_url/releases/$artifact" "$updates/appcast.xml" || {
-    echo "The prepared appcast does not reference $artifact." >&2
-    exit 1
-  }
-  grep -Fq 'sparkle:edSignature=' "$updates/appcast.xml" || {
-    echo "The prepared appcast has no signed update archive." >&2
-    exit 1
-  }
-  grep -Fq '<!-- sparkle-signatures:' "$updates/appcast.xml" || {
-    echo "The prepared appcast feed is not signed." >&2
-    exit 1
-  }
+  verify_prepared_appcast
   (cd "$dist" && /usr/bin/shasum -a 256 -c "$checksum")
   wrangler r2 object put "$bucket/releases/$artifact" --remote \
     --file "$dist/$artifact" --content-type application/zip
@@ -167,9 +171,7 @@ security find-generic-password -s 'https://sparkle-project.org' -a ed25519 -w \
     --maximum-deltas 0 \
     --maximum-versions 5 \
     "$updates"
-grep -Fq "$base_url/releases/$artifact" "$updates/appcast.xml"
-grep -Fq 'sparkle:edSignature=' "$updates/appcast.xml"
-grep -Fq '<!-- sparkle-signatures:' "$updates/appcast.xml"
+verify_prepared_appcast
 
 rm -f "$submission"
 trap 'rm -f "$published_appcast" "$downloaded"' EXIT HUP INT TERM

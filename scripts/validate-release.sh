@@ -25,6 +25,7 @@ cargo_version=$(awk -F ' *= *' '
 plist_version=$(plist_value CFBundleShortVersionString "$plist")
 plist_build=$(plist_value CFBundleVersion "$plist")
 bundle_id=$(plist_value CFBundleIdentifier "$plist")
+bundle_executable=$(plist_value CFBundleExecutable "$plist")
 deployment_target=$(plist_value LSMinimumSystemVersion "$plist")
 feed_url=$(plist_value SUFeedURL "$plist")
 sparkle_key=$(plist_value SUPublicEDKey "$plist")
@@ -35,6 +36,8 @@ signed_feed=$(plist_value SURequireSignedFeed "$plist")
   fail "Cargo version $cargo_version does not match Info.plist version $plist_version"
 [ "$bundle_id" = "$expected_bundle_id" ] || \
   fail "unexpected bundle identifier $bundle_id (expected $expected_bundle_id)"
+[ "$bundle_executable" = spaceman-agent ] || \
+  fail "source Info.plist has an unexpected main executable"
 case "$plist_build" in
   ''|*[!0-9]*) fail "CFBundleVersion must be a positive integer" ;;
   0) fail "CFBundleVersion must be greater than zero" ;;
@@ -67,20 +70,8 @@ esac
 
 [ -d "$bundle" ] || fail "app bundle not found: $bundle"
 [ -f "$archive" ] || fail "ZIP artifact not found: $archive"
-[ "$(plist_value CFBundleShortVersionString "$bundle/Contents/Info.plist")" = "$cargo_version" ] || \
-  fail "built bundle version does not match Cargo"
-[ "$(plist_value CFBundleIdentifier "$bundle/Contents/Info.plist")" = "$expected_bundle_id" ] || \
-  fail "built bundle identifier is incorrect"
-[ "$(plist_value LSMinimumSystemVersion "$bundle/Contents/Info.plist")" = "$deployment_target" ] || \
-  fail "built bundle deployment target differs from source Info.plist"
-[ "$(plist_value CFBundleExecutable "$bundle/Contents/Info.plist")" = "spaceman-agent" ] || \
-  fail "built bundle has an unexpected main executable"
-[ "$(plist_value SUFeedURL "$bundle/Contents/Info.plist")" = "$expected_feed_url" ] || \
-  fail "built bundle has an unexpected Sparkle feed"
-[ "$(plist_value SUPublicEDKey "$bundle/Contents/Info.plist")" = "$expected_sparkle_key" ] || \
-  fail "built bundle has an unexpected Sparkle public key"
-[ "$(plist_value SURequireSignedFeed "$bundle/Contents/Info.plist")" = true ] || \
-  fail "built bundle does not require signed Sparkle feeds"
+/usr/bin/cmp "$plist" "$bundle/Contents/Info.plist" || \
+  fail "built bundle Info.plist differs from source Info.plist"
 [ -s "$bundle/Contents/Resources/AppIcon.icns" ] || fail "built bundle is missing AppIcon.icns"
 [ -s "$bundle/Contents/Resources/Assets.car" ] || fail "built bundle is missing Assets.car"
 [ -s "$bundle/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" ] || \
