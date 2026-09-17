@@ -246,19 +246,6 @@ impl WorkspaceState {
             .chain(&self.previous)
             .map(|(_, workspace)| *workspace)
             .chain(self.floating.iter().map(|(_, workspace)| *workspace))
-            .chain(
-                self.fullscreen_layout
-                    .iter()
-                    .enumerate()
-                    .filter(|(index, fullscreen_layout)| {
-                        **fullscreen_layout
-                            && self
-                                .slots
-                                .get(*index)
-                                .is_some_and(|slots| !slots.is_empty())
-                    })
-                    .map(|(index, _)| WorkspaceId::from_index(index)),
-            )
             .filter(|workspace| workspace.letter().is_some())
             .collect::<HashSet<_>>();
         for (index, slots) in self.slots.iter().enumerate() {
@@ -294,7 +281,6 @@ impl From<DisplayRole> for DisplaySelector {
 #[derive(Clone, Debug)]
 pub struct Workspaces {
     engines: [Engine; WorkspaceId::COUNT],
-    owners: HashMap<PhysicalWindowId, WorkspaceId>,
     assignments: [DisplaySelector; WorkspaceId::COUNT],
     active: HashMap<DisplaySelector, WorkspaceId>,
     previous: HashMap<DisplaySelector, WorkspaceId>,
@@ -308,7 +294,6 @@ impl Default for Workspaces {
     fn default() -> Self {
         Self {
             engines: std::array::from_fn(|_| Engine::default()),
-            owners: HashMap::new(),
             assignments: std::array::from_fn(|index| {
                 if !(5..WorkspaceId::NUMBERED_COUNT).contains(&index) {
                     DisplaySelector::Main
@@ -374,8 +359,8 @@ impl Workspaces {
                 floating.sort();
                 floating
             },
-            last_focused: trimmed_intents(&self.last_focused),
-            fullscreen_layout: trimmed_flags(&self.fullscreen_layout),
+            last_focused: trimmed(&self.last_focused, Option::is_some),
+            fullscreen_layout: trimmed(&self.fullscreen_layout, |enabled| *enabled),
             maximized: Vec::new(),
         }
     }
@@ -429,7 +414,11 @@ impl Workspaces {
                 self.floating_owners.insert(window, workspace);
             }
         }
-        for (index, slot) in last_focused.into_iter().enumerate() {
+        for (index, slot) in last_focused
+            .into_iter()
+            .take(WorkspaceId::COUNT)
+            .enumerate()
+        {
             self.last_focused[index] =
                 slot.filter(|slot| self.has_slot(WorkspaceId::from_index(index), *slot));
         }
@@ -464,11 +453,6 @@ impl Workspaces {
     #[must_use]
     pub fn active_for(&self, display: &DisplaySelector) -> Option<WorkspaceId> {
         self.active.get(display).copied()
-    }
-
-    #[must_use]
-    pub fn active_workspace(&self, workspace: WorkspaceId) -> Option<WorkspaceId> {
-        self.active_for(self.assignment(workspace))
     }
 
     pub fn active_lanes(&self) -> impl Iterator<Item = (&DisplaySelector, WorkspaceId)> {
@@ -548,20 +532,13 @@ impl Workspaces {
             (&mut after[0], &mut before[target_index])
         };
         let slot = source_engine.take_slot(window)?;
-        if self.last_focused[source_index] == Some(slot.id) {
-            self.last_focused[source_index] = None;
-        }
         target_engine.insert_slot(slot);
-        self.owners.insert(window.clone(), target);
-        self.clear_fullscreen_layout_if_empty(source);
+        self.prune_intents(source);
         Some(source)
     }
 
     #[must_use]
     pub fn workspace_of(&self, window: &PhysicalWindowId) -> Option<WorkspaceId> {
-        if let Some(workspace) = self.owners.get(window) {
-            return Some(*workspace);
-        }
         self.engines
             .iter()
             .position(|engine| {
@@ -671,42 +648,17 @@ impl Workspaces {
 
     #[must_use]
     pub fn owned_by_other(&self, workspace: WorkspaceId, window: &PhysicalWindowId) -> bool {
-        self.owners
-            .get(window)
-            .copied()
+        self.workspace_of(window)
             .is_some_and(|owner| owner != workspace)
     }
 
     pub fn refresh_ownership(&mut self, workspace: WorkspaceId) {
-        self.owners.retain(|_, owner| *owner != workspace);
-        let windows = self
-            .engine(workspace)
-            .model()
-            .workspace
-            .slots
-            .iter()
-            .map(|slot| slot.identity_window().clone())
-            .collect::<Vec<_>>();
-        for window in windows {
-            self.owners.insert(window, workspace);
-        }
-        let index = workspace.index();
-        if self.last_focused[index].is_some_and(|slot| !self.has_slot(workspace, slot)) {
-            self.last_focused[index] = None;
-        }
-        self.clear_fullscreen_layout_if_empty(workspace);
+        self.prune_intents(workspace);
     }
 
     pub fn forget_window(&mut self, workspace: WorkspaceId, window: &PhysicalWindowId) {
-        let removed = self.engine_mut(workspace).take_slot(window);
-        if let Some(slot) = removed {
-            let index = workspace.index();
-            if self.last_focused[index] == Some(slot.id) {
-                self.last_focused[index] = None;
-            }
-        }
-        self.owners.remove(window);
-        self.clear_fullscreen_layout_if_empty(workspace);
+        self.engine_mut(workspace).take_slot(window);
+        self.prune_intents(workspace);
     }
 
     pub(crate) fn remember_focus(&mut self, workspace: WorkspaceId, window: &PhysicalWindowId) {
@@ -729,11 +681,15 @@ impl Workspaces {
             enabled && !self.engine(workspace).model().workspace.slots.is_empty();
     }
 
-    fn clear_fullscreen_layout_if_empty(&mut self, workspace: WorkspaceId) {
-        if self.fullscreen_layout[workspace.index()]
+    fn prune_intents(&mut self, workspace: WorkspaceId) {
+        let index = workspace.index();
+        if self.last_focused[index].is_some_and(|slot| !self.has_slot(workspace, slot)) {
+            self.last_focused[index] = None;
+        }
+        if self.fullscreen_layout[index]
             && self.engine(workspace).model().workspace.slots.is_empty()
         {
-            self.fullscreen_layout[workspace.index()] = false;
+            self.fullscreen_layout[index] = false;
         }
     }
 
@@ -775,22 +731,9 @@ impl Workspaces {
     }
 }
 
-fn trimmed_intents(
-    intents: &[Option<crate::SlotId>; WorkspaceId::COUNT],
-) -> Vec<Option<crate::SlotId>> {
-    let length = intents
-        .iter()
-        .rposition(Option::is_some)
-        .map_or(0, |index| index + 1);
-    intents[..length].to_vec()
-}
-
-fn trimmed_flags(flags: &[bool; WorkspaceId::COUNT]) -> Vec<bool> {
-    let length = flags
-        .iter()
-        .rposition(|fullscreen_layout| *fullscreen_layout)
-        .map_or(0, |index| index + 1);
-    flags[..length].to_vec()
+fn trimmed<T: Clone>(items: &[T; WorkspaceId::COUNT], keep: impl Fn(&T) -> bool) -> Vec<T> {
+    let length = items.iter().rposition(keep).map_or(0, |index| index + 1);
+    items[..length].to_vec()
 }
 
 #[cfg(test)]

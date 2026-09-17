@@ -139,35 +139,10 @@ impl LayoutTree {
     }
 
     pub(crate) fn create_implicit_split(&mut self, slot: SlotId, direction: Direction) -> bool {
-        let placeholder = Node::Split {
-            axis: direction_axis(direction),
-            children: Vec::new(),
+        let Some((remaining, moved)) = self.take_slot(slot) else {
+            return false;
         };
-        let previous = std::mem::replace(&mut self.root, placeholder);
-        let (remaining, moved) = extract(previous, slot);
-        let (remaining, moved) = match (remaining, moved) {
-            (Some(remaining), Some(moved)) => (remaining, moved),
-            (remaining, moved) => {
-                self.root = moved.or(remaining).unwrap_or(Node::Leaf(slot));
-                return false;
-            }
-        };
-        let moved = Child {
-            weight: 1,
-            node: moved,
-        };
-        let remaining = Child {
-            weight: 1,
-            node: remaining,
-        };
-        self.root = Node::Split {
-            axis: direction_axis(direction),
-            children: if matches!(direction, Direction::Left | Direction::Up) {
-                vec![moved, remaining]
-            } else {
-                vec![remaining, moved]
-            },
-        };
+        self.root = split_pair(direction, moved, remaining);
         true
     }
 
@@ -180,18 +155,8 @@ impl LayoutTree {
         if moved == target || !self.root.contains(target) {
             return false;
         }
-        let placeholder = Node::Split {
-            axis: self.root_axis(),
-            children: Vec::new(),
-        };
-        let previous = std::mem::replace(&mut self.root, placeholder);
-        let (remaining, extracted) = extract(previous, moved);
-        let (mut remaining, extracted) = match (remaining, extracted) {
-            (Some(remaining), Some(extracted)) => (remaining, extracted),
-            (remaining, extracted) => {
-                self.root = remaining.or(extracted).unwrap_or(Node::Leaf(moved));
-                return false;
-            }
+        let Some((mut remaining, extracted)) = self.take_slot(moved) else {
+            return false;
         };
         if !insert_relative(&mut remaining, target, extracted, direction) {
             self.root = remaining;
@@ -226,9 +191,7 @@ impl LayoutTree {
         if candidate.delta.abs() <= 2 {
             return false;
         }
-        let split_frame = output_at(&self.root, output, &candidate.path);
-        let Some(Node::Split { axis, children }) = node_at_mut(&mut self.root, &candidate.path)
-        else {
+        let Some((split_frame, axis, children)) = self.split_at_mut(output, &candidate.path) else {
             return false;
         };
         let frames = partition_children(split_frame, *axis, children);
@@ -244,11 +207,13 @@ impl LayoutTree {
         let boundary = candidate
             .coordinate
             .clamp(pair_start + before_minimum, pair_end - after_minimum);
-        for (child, frame) in children.iter_mut().zip(frames) {
-            child.weight = u32::try_from(extent(frame, *axis)).unwrap_or(1).max(1);
-        }
-        children[before].weight = u32::try_from(boundary - pair_start).unwrap_or(1).max(1);
-        children[after].weight = u32::try_from(pair_end - boundary).unwrap_or(1).max(1);
+        set_pair_extents(
+            children,
+            &frames,
+            *axis,
+            (before, boundary - pair_start),
+            (after, pair_end - boundary),
+        );
         true
     }
 
@@ -262,8 +227,7 @@ impl LayoutTree {
         let Some((path, index)) = immediate_parent(&self.root, slot, Vec::new()) else {
             return false;
         };
-        let split_frame = output_at(&self.root, output, &path);
-        let Some(Node::Split { axis, children }) = node_at_mut(&mut self.root, &path) else {
+        let Some((split_frame, axis, children)) = self.split_at_mut(output, &path) else {
             return false;
         };
         let neighbor = if index + 1 < children.len() {
@@ -289,13 +253,13 @@ impl LayoutTree {
         if focused_extent == extent(frames[index], *axis) {
             return false;
         }
-        for (child, frame) in children.iter_mut().zip(&frames) {
-            child.weight = u32::try_from(extent(*frame, *axis)).unwrap_or(1).max(1);
-        }
-        children[index].weight = u32::try_from(focused_extent).unwrap_or(1).max(1);
-        children[neighbor].weight = u32::try_from(pair_extent - focused_extent)
-            .unwrap_or(1)
-            .max(1);
+        set_pair_extents(
+            children,
+            &frames,
+            *axis,
+            (index, focused_extent),
+            (neighbor, pair_extent - focused_extent),
+        );
         true
     }
 
@@ -303,8 +267,7 @@ impl LayoutTree {
         let Some((path, _)) = immediate_parent(&self.root, slot, Vec::new()) else {
             return false;
         };
-        let split_frame = output_at(&self.root, output, &path);
-        let Some(Node::Split { axis, children }) = node_at_mut(&mut self.root, &path) else {
+        let Some((split_frame, axis, children)) = self.split_at_mut(output, &path) else {
             return false;
         };
         let total = extent(split_frame, *axis);
@@ -350,9 +313,36 @@ impl LayoutTree {
             return false;
         }
         for (child, extent) in children.iter_mut().zip(extents) {
-            child.weight = u32::try_from(extent).unwrap_or(1).max(1);
+            child.weight = pixel_weight(extent);
         }
         true
+    }
+
+    fn take_slot(&mut self, slot: SlotId) -> Option<(Node, Node)> {
+        let placeholder = Node::Split {
+            axis: self.root_axis(),
+            children: Vec::new(),
+        };
+        let previous = std::mem::replace(&mut self.root, placeholder);
+        match extract(previous.clone(), slot) {
+            (Some(remaining), Some(moved)) => Some((remaining, moved)),
+            _ => {
+                self.root = previous;
+                None
+            }
+        }
+    }
+
+    fn split_at_mut(
+        &mut self,
+        output: Rect,
+        path: &[usize],
+    ) -> Option<(Rect, &mut Axis, &mut Vec<Child>)> {
+        let frame = output_at(&self.root, output, path);
+        let Node::Split { axis, children } = node_at_mut(&mut self.root, path)? else {
+            return None;
+        };
+        Some((frame, axis, children))
     }
 
     fn append(&mut self, axis: Axis, slot: SlotId, weight: u32) {
@@ -414,6 +404,25 @@ const fn direction_axis(direction: Direction) -> Axis {
     match direction {
         Direction::Left | Direction::Right => Axis::Horizontal,
         Direction::Down | Direction::Up => Axis::Vertical,
+    }
+}
+
+fn split_pair(direction: Direction, moved: Node, anchor: Node) -> Node {
+    let moved = Child {
+        weight: 1,
+        node: moved,
+    };
+    let anchor = Child {
+        weight: 1,
+        node: anchor,
+    };
+    Node::Split {
+        axis: direction_axis(direction),
+        children: if matches!(direction, Direction::Left | Direction::Up) {
+            vec![moved, anchor]
+        } else {
+            vec![anchor, moved]
+        },
     }
 }
 
@@ -482,22 +491,7 @@ fn insert_relative(node: &mut Node, target: SlotId, moved: Node, direction: Dire
     match node {
         Node::Leaf(existing) if *existing == target => {
             let target = std::mem::replace(node, Node::Leaf(target));
-            let moved = Child {
-                weight: 1,
-                node: moved,
-            };
-            let target = Child {
-                weight: 1,
-                node: target,
-            };
-            *node = Node::Split {
-                axis,
-                children: if before {
-                    vec![moved, target]
-                } else {
-                    vec![target, moved]
-                },
-            };
+            *node = split_pair(direction, moved, target);
             true
         }
         Node::Leaf(_) => false,
@@ -679,6 +673,24 @@ fn partition_children(frame: Rect, axis: Axis, children: &[Child]) -> Vec<Rect> 
             result
         })
         .collect()
+}
+
+fn pixel_weight(extent: i32) -> u32 {
+    u32::try_from(extent).unwrap_or(1).max(1)
+}
+
+fn set_pair_extents(
+    children: &mut [Child],
+    frames: &[Rect],
+    axis: Axis,
+    first: (usize, i32),
+    second: (usize, i32),
+) {
+    for (child, frame) in children.iter_mut().zip(frames) {
+        child.weight = pixel_weight(extent(*frame, axis));
+    }
+    children[first.0].weight = pixel_weight(first.1);
+    children[second.0].weight = pixel_weight(second.1);
 }
 
 fn output_at(root: &Node, output: Rect, path: &[usize]) -> Rect {

@@ -111,8 +111,7 @@ impl Engine {
 
     pub(crate) fn toggle_axis(&mut self) {
         self.layout.toggle_root_axis();
-        self.model.workspace.axis = self.layout.root_axis();
-        self.invalidate();
+        self.commit_layout();
     }
 
     pub(crate) fn take_slot(&mut self, window: &PhysicalWindowId) -> Option<Slot> {
@@ -171,14 +170,7 @@ impl Engine {
         current: crate::Rect,
         output: crate::Rect,
     ) -> bool {
-        let Some(slot) = self.slot_for_window(window) else {
-            return false;
-        };
-        if !self.layout.resize(slot, current, output) {
-            return false;
-        }
-        self.layout_changed();
-        true
+        self.edit_slot(window, |layout, slot| layout.resize(slot, current, output))
     }
 
     pub(crate) fn resize_focused_tile(
@@ -188,14 +180,9 @@ impl Engine {
         amount: i32,
         output: crate::Rect,
     ) -> bool {
-        let Some(slot) = self.slot_for_window(window) else {
-            return false;
-        };
-        if !self.layout.resize_by(slot, direction, amount, output) {
-            return false;
-        }
-        self.layout_changed();
-        true
+        self.edit_slot(window, |layout, slot| {
+            layout.resize_by(slot, direction, amount, output)
+        })
     }
 
     pub(crate) fn balance_focused_parent(
@@ -203,14 +190,7 @@ impl Engine {
         window: &PhysicalWindowId,
         output: crate::Rect,
     ) -> bool {
-        let Some(slot) = self.slot_for_window(window) else {
-            return false;
-        };
-        if !self.layout.balance(slot, output) {
-            return false;
-        }
-        self.layout_changed();
-        true
+        self.edit_slot(window, |layout, slot| layout.balance(slot, output))
     }
 
     pub(crate) fn create_implicit_split(
@@ -218,15 +198,9 @@ impl Engine {
         window: &PhysicalWindowId,
         direction: crate::Direction,
     ) -> bool {
-        let Some(slot) = self.slot_for_window(window) else {
-            return false;
-        };
-        if !self.layout.create_implicit_split(slot, direction) {
-            return false;
-        }
-        self.model.workspace.axis = self.layout.root_axis();
-        self.invalidate();
-        true
+        self.edit_slot(window, |layout, slot| {
+            layout.create_implicit_split(slot, direction)
+        })
     }
 
     pub(crate) fn move_window_relative(
@@ -235,18 +209,12 @@ impl Engine {
         target: &PhysicalWindowId,
         direction: crate::Direction,
     ) -> bool {
-        let Some((moved, target)) = self
-            .slot_for_window(moved)
-            .zip(self.slot_for_window(target))
-        else {
+        let Some(target) = self.slot_for_window(target) else {
             return false;
         };
-        if !self.layout.move_relative(moved, target, direction) {
-            return false;
-        }
-        self.model.workspace.axis = self.layout.root_axis();
-        self.invalidate();
-        true
+        self.edit_slot(moved, |layout, moved| {
+            layout.move_relative(moved, target, direction)
+        })
     }
 
     pub(crate) fn layout(&self) -> &LayoutTree {
@@ -267,9 +235,8 @@ impl Engine {
 
     pub(crate) fn restore_layout(&mut self, mut layout: LayoutTree) {
         layout.sync(self.model.workspace.axis, &self.model.workspace.slots);
-        self.model.workspace.axis = layout.root_axis();
         self.layout = layout;
-        self.invalidate();
+        self.commit_layout();
     }
 
     pub(crate) fn slot_for_window(&self, window: &PhysicalWindowId) -> Option<crate::SlotId> {
@@ -281,7 +248,23 @@ impl Engine {
             .map(|slot| slot.id)
     }
 
-    fn layout_changed(&mut self) {
+    fn edit_slot(
+        &mut self,
+        window: &PhysicalWindowId,
+        op: impl FnOnce(&mut LayoutTree, crate::SlotId) -> bool,
+    ) -> bool {
+        let Some(slot) = self.slot_for_window(window) else {
+            return false;
+        };
+        if !op(&mut self.layout, slot) {
+            return false;
+        }
+        self.commit_layout();
+        true
+    }
+
+    fn commit_layout(&mut self) {
+        self.model.workspace.axis = self.layout.root_axis();
         for slot in &mut self.model.workspace.slots {
             if let Some(weight) = self.layout.weight(slot.id) {
                 slot.weight = weight;
@@ -289,6 +272,22 @@ impl Engine {
         }
         self.invalidate();
     }
+}
+
+pub(crate) fn flat_placements(
+    output: crate::Rect,
+    axis: crate::Axis,
+    slots: &[Slot],
+) -> Vec<Placement> {
+    slots
+        .iter()
+        .zip(LayoutTree::weighted_flat(axis, slots.iter()).placements(output))
+        .map(|(slot, (slot_id, frame))| Placement {
+            slot: slot_id,
+            window: slot.bound_window().cloned(),
+            frame,
+        })
+        .collect()
 }
 
 fn placements_for(layout: &LayoutTree, model: &Model, output: crate::Rect) -> Vec<Placement> {
@@ -320,6 +319,111 @@ mod tests {
     };
 
     use super::*;
+
+    fn slot(id: u64, weight: u32) -> Slot {
+        Slot {
+            id: crate::SlotId(id),
+            weight,
+            binding: crate::BindingState::Bound(PhysicalWindowId {
+                app: AppInstanceId {
+                    pid: 1,
+                    launched_at: 1,
+                },
+                window_id: id as u32,
+            }),
+        }
+    }
+
+    #[test]
+    fn flat_placements_partition_without_gaps_or_rounding_loss() {
+        let placements = flat_placements(
+            Rect {
+                x: 10,
+                y: 20,
+                width: 101,
+                height: 50,
+            },
+            crate::Axis::Horizontal,
+            &[slot(1, 1), slot(2, 1), slot(3, 1)],
+        );
+
+        assert_eq!(placements[0].frame.width, 33);
+        assert_eq!(placements[1].frame.x, 43);
+        assert_eq!(placements[1].frame.width, 34);
+        assert_eq!(placements[2].frame.x, 77);
+        assert_eq!(placements[2].frame.width, 34);
+        assert_eq!(placements[2].frame.x + placements[2].frame.width, 111);
+    }
+
+    #[test]
+    fn flat_placements_reserve_unresolved_slots() {
+        let mut unresolved = slot(2, 1);
+        unresolved.binding = crate::BindingState::Unresolved {
+            previous: unresolved.bound_window().unwrap().clone(),
+            candidates: Vec::new(),
+            since: 4,
+        };
+
+        let placements = flat_placements(
+            Rect {
+                width: 100,
+                height: 50,
+                ..Rect::default()
+            },
+            crate::Axis::Horizontal,
+            &[slot(1, 1), unresolved],
+        );
+        assert_eq!(placements.len(), 2);
+        assert_eq!(placements[0].frame.width, 50);
+        assert_eq!(placements[1].frame.width, 50);
+        assert_eq!(placements[1].window, None);
+    }
+
+    #[test]
+    fn flat_placements_preserve_cumulative_weight_rounding() {
+        let placements = flat_placements(
+            Rect {
+                x: 10,
+                y: 20,
+                width: 50,
+                height: 101,
+            },
+            crate::Axis::Vertical,
+            &[slot(1, 2), slot(2, 3), slot(3, 5)],
+        );
+
+        assert_eq!(placements[0].frame.height, 20);
+        assert_eq!(placements[1].frame.y, 40);
+        assert_eq!(placements[1].frame.height, 30);
+        assert_eq!(placements[2].frame.y, 70);
+        assert_eq!(placements[2].frame.height, 51);
+        assert_eq!(placements[2].frame.y + placements[2].frame.height, 121);
+    }
+
+    #[test]
+    fn structural_layout_edits_commit_axis_and_slot_weights() {
+        let mut engine = Engine::default();
+        let slots = [slot(1, 1), slot(2, 1), slot(3, 1)];
+        let windows = slots
+            .iter()
+            .map(|slot| slot.bound_window().unwrap().clone())
+            .collect::<Vec<_>>();
+        for slot in slots {
+            engine.insert_slot(slot);
+        }
+        let output = Rect {
+            width: 1000,
+            height: 800,
+            ..Rect::default()
+        };
+        assert!(engine.resize_focused_tile(&windows[0], crate::ResizeDirection::Grow, 50, output));
+        assert!(engine.create_implicit_split(&windows[1], crate::Direction::Up));
+        assert_eq!(engine.model().workspace.axis, crate::Axis::Vertical);
+        assert_eq!(engine.model().workspace.slots[1].weight, 1);
+
+        assert!(engine.move_window_relative(&windows[2], &windows[0], crate::Direction::Right));
+        assert_eq!(engine.model().workspace.slots[2].weight, 1);
+    }
 
     fn observation(cycle: u64, window_id: u32) -> NativeObservation {
         let app = AppInstanceId {

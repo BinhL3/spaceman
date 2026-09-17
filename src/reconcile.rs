@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AppInstanceId, AppObservation, BindingState, Model, NativeObservation, PhysicalWindowId, Rect,
-    Slot, SlotId, geometry,
+    Slot, SlotId, runtime::flat_placements,
 };
 
 const GHOSTTY_REPLACEMENT_SETTLE_CYCLES: u64 = 3;
@@ -90,9 +90,9 @@ pub fn reconcile(
 ) -> Reconciliation {
     if observation.mouse_down {
         let mut model = model.clone();
-        reset_all_unresolved_settling(&mut model, observation.cycle);
+        reset_settling(&mut model, observation.cycle, None);
         return Reconciliation {
-            placements: geometry::partition(
+            placements: flat_placements(
                 settings.output,
                 model.workspace.axis,
                 &model.workspace.slots,
@@ -108,7 +108,7 @@ pub fn reconcile(
     for app_observation in &observation.applications {
         match app_observation {
             AppObservation::Unavailable { app, error } => {
-                reset_unresolved_settling(&mut next, app, observation.cycle);
+                reset_settling(&mut next, observation.cycle, Some(app));
                 decisions.push(Decision::ObservationUnavailable {
                     app: app.clone(),
                     error: error.clone(),
@@ -124,18 +124,14 @@ pub fn reconcile(
                 focused,
                 windows,
             } => {
-                if reconcile_unresolved(
-                    &mut next,
-                    &app.id,
-                    AppReconcileContext {
-                        focused: focused.as_ref(),
-                        windows,
-                        cycle: observation.cycle,
-                        evidence,
-                        settings,
-                    },
-                    &mut decisions,
-                ) {
+                let context = AppReconcileContext {
+                    focused: focused.as_ref(),
+                    windows,
+                    cycle: observation.cycle,
+                    evidence,
+                    settings,
+                };
+                if reconcile_unresolved(&mut next, &app.id, &context, &mut decisions) {
                     next.continuity
                         .entry(app.id.clone())
                         .or_default()
@@ -154,15 +150,7 @@ pub fn reconcile(
                 let new: Vec<_> = current.difference(&existing).cloned().collect();
 
                 let replacement = app.bundle_id == "com.mitchellh.ghostty"
-                    && replacement_candidate(
-                        &next,
-                        focused.as_ref(),
-                        windows,
-                        &stale,
-                        &new,
-                        evidence,
-                        settings,
-                    );
+                    && replacement_candidate(&next, &stale, &new, &context);
 
                 if replacement {
                     let previous = &stale[0];
@@ -213,8 +201,7 @@ pub fn reconcile(
         }
     }
 
-    let placements =
-        geometry::partition(settings.output, next.workspace.axis, &next.workspace.slots);
+    let placements = flat_placements(settings.output, next.workspace.axis, &next.workspace.slots);
     Reconciliation {
         model: next,
         placements,
@@ -233,7 +220,7 @@ struct AppReconcileContext<'a> {
 fn reconcile_unresolved(
     model: &mut Model,
     app: &AppInstanceId,
-    context: AppReconcileContext<'_>,
+    context: &AppReconcileContext<'_>,
     decisions: &mut Vec<Decision>,
 ) -> bool {
     let unresolved: Vec<_> = model
@@ -267,22 +254,7 @@ fn reconcile_unresolved(
     if unresolved.len() == 1 && candidates.len() == 1 && context.focused == candidates.first() {
         let index = unresolved[0];
         let slot = &model.workspace.slots[index];
-        let matches_target = context
-            .evidence
-            .previous_placements
-            .get(&slot.id)
-            .is_some_and(|target| {
-                context
-                    .windows
-                    .iter()
-                    .find(|window| window.id == candidates[0])
-                    .is_some_and(|window| {
-                        window
-                            .frame
-                            .approximately_equals(*target, context.settings.frame_tolerance)
-                    })
-            });
-        if matches_target {
+        if candidate_matches_target(slot.id, &candidates[0], context) {
             let slot_id = slot.id;
             let previous = match &slot.binding {
                 BindingState::Unresolved { previous, .. } => previous.clone(),
@@ -339,20 +311,12 @@ fn reconcile_unresolved(
     true
 }
 
-fn reset_all_unresolved_settling(model: &mut Model, cycle: u64) {
-    for slot in &mut model.workspace.slots {
-        if let BindingState::Unresolved { since, .. } = &mut slot.binding {
-            *since = cycle;
-        }
-    }
-}
-
-fn reset_unresolved_settling(model: &mut Model, app: &AppInstanceId, cycle: u64) {
+fn reset_settling(model: &mut Model, cycle: u64, app: Option<&AppInstanceId>) {
     for slot in model
         .workspace
         .slots
         .iter_mut()
-        .filter(|slot| slot.belongs_to(app))
+        .filter(|slot| app.is_none_or(|app| slot.belongs_to(app)))
     {
         if let BindingState::Unresolved { since, .. } = &mut slot.binding {
             *since = cycle;
@@ -362,14 +326,11 @@ fn reset_unresolved_settling(model: &mut Model, app: &AppInstanceId, cycle: u64)
 
 fn replacement_candidate(
     model: &Model,
-    focused: Option<&PhysicalWindowId>,
-    windows: &[crate::ObservedWindow],
     stale: &[PhysicalWindowId],
     new: &[PhysicalWindowId],
-    evidence: &ReconciliationEvidence,
-    settings: &Settings,
+    context: &AppReconcileContext<'_>,
 ) -> bool {
-    if stale.len() != 1 || new.len() != 1 || focused != new.first() {
+    if stale.len() != 1 || new.len() != 1 || context.focused != new.first() {
         return false;
     }
     if model
@@ -388,16 +349,28 @@ fn replacement_candidate(
     else {
         return false;
     };
-    let Some(previous_target) = evidence.previous_placements.get(&slot.id) else {
-        return false;
-    };
-    windows
-        .iter()
-        .find(|window| window.id == new[0])
-        .is_some_and(|window| {
-            window
-                .frame
-                .approximately_equals(*previous_target, settings.frame_tolerance)
+    candidate_matches_target(slot.id, &new[0], context)
+}
+
+fn candidate_matches_target(
+    slot: SlotId,
+    candidate: &PhysicalWindowId,
+    context: &AppReconcileContext<'_>,
+) -> bool {
+    context
+        .evidence
+        .previous_placements
+        .get(&slot)
+        .is_some_and(|target| {
+            context
+                .windows
+                .iter()
+                .find(|window| &window.id == candidate)
+                .is_some_and(|window| {
+                    window
+                        .frame
+                        .approximately_equals(*target, context.settings.frame_tolerance)
+                })
         })
 }
 
