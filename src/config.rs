@@ -60,6 +60,7 @@ struct RawWorkspace {
 
 impl Config {
     #[must_use]
+    #[cfg(test)]
     pub fn has_rules(&self) -> bool {
         !self.rules.is_empty()
     }
@@ -131,7 +132,7 @@ impl Config {
             .map_or(WindowDisposition::Managed, |rule| rule.action)
     }
 
-    pub fn workspace_monitors(&self) -> impl Iterator<Item = (WorkspaceId, &str)> {
+    fn workspace_monitors(&self) -> impl Iterator<Item = (WorkspaceId, &str)> {
         self.workspace_monitors
             .iter()
             .map(|(workspace, monitor)| (*workspace, monitor.as_str()))

@@ -94,6 +94,22 @@ enum ManagementScope {
 }
 
 impl ManagementScope {
+    fn initial_workspaces(self) -> &'static [WorkspaceId] {
+        match self {
+            Self::Both => &[WorkspaceId::ONE, WorkspaceId::SIX],
+            Self::Main => &[WorkspaceId::ONE],
+            Self::Secondary => &[WorkspaceId::SIX],
+        }
+    }
+
+    fn automatic_status(self) -> &'static str {
+        match self {
+            Self::Both => "Automatic tiling enabled · Workspaces 1 / 6",
+            Self::Main => "Automatic tiling enabled · Workspace 1",
+            Self::Secondary => "Automatic tiling enabled · Workspace 6",
+        }
+    }
+
     fn from_environment() -> Result<Self, String> {
         match std::env::var("SPACEMAN_MANAGED_DISPLAY") {
             Ok(value) => Self::parse(&value),
@@ -224,6 +240,17 @@ enum ExitIntent {
     Restart,
     Update,
     Terminate,
+}
+
+impl ExitIntent {
+    fn mode_label(self) -> &'static str {
+        match self {
+            Self::Quit => "quitting",
+            Self::Restart => "restarting",
+            Self::Update => "updating",
+            Self::Terminate => "terminating",
+        }
+    }
 }
 
 struct CycleStatus {
@@ -577,11 +604,12 @@ pub fn run() -> Result<(), String> {
             Ok(status) => status_item::set_launch_at_login(status),
             Err(error) => status_item::set_status(&format!("Launch at Login unavailable: {error}")),
         }
-        match scope {
-            ManagementScope::Both => status_item::set_workspace_numbers(&[1, 6]),
-            ManagementScope::Main => status_item::set_workspace_numbers(&[1]),
-            ManagementScope::Secondary => status_item::set_workspace_numbers(&[6]),
-        }
+        let workspace_numbers = scope
+            .initial_workspaces()
+            .iter()
+            .filter_map(|workspace| workspace.number())
+            .collect::<Vec<_>>();
+        status_item::set_workspace_numbers(&workspace_numbers);
         if !macos::accessibility_trusted() {
             status_item::set_status("Paused · Accessibility required");
             if let Err(error) = settings::open(actions_sender.clone(), cx) {
@@ -617,6 +645,13 @@ fn quit_app(cx: &mut gpui::App) {
     cx.quit();
 }
 
+fn queue(actions: &Sender<Action>, action: Action, ack: &str) -> Result<String, String> {
+    actions
+        .send(action)
+        .map(|()| ack.into())
+        .map_err(|_| "Spaceman agent is stopping".into())
+}
+
 async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
     let AppLoop {
         actions,
@@ -647,11 +682,7 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
     let mut restore_pending = false;
     let mut restoring = false;
     let mut next_restore_retry = None;
-    let mut active_workspaces = match scope {
-        ManagementScope::Both => vec![WorkspaceId::ONE, WorkspaceId::SIX],
-        ManagementScope::Main => vec![WorkspaceId::ONE],
-        ManagementScope::Secondary => vec![WorkspaceId::SIX],
-    };
+    let mut active_workspaces = scope.initial_workspaces().to_vec();
     let mut last_error = hotkey_error;
     let mut latest_debug: Option<RuntimeDebug> = None;
     let mut pending_inputs = InputQueue::default();
@@ -791,14 +822,8 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
         for request in controls.try_iter() {
             let response = match request.command {
                 ControlCommand::Status => Ok(serde_json::json!({
-                    "mode": if exit_intent == Some(ExitIntent::Restart) {
-                        "restarting"
-                    } else if exit_intent == Some(ExitIntent::Quit) {
-                        "quitting"
-                    } else if exit_intent == Some(ExitIntent::Update) {
-                        "updating"
-                    } else if exit_intent == Some(ExitIntent::Terminate) {
-                        "terminating"
+                    "mode": if let Some(intent) = exit_intent {
+                        intent.mode_label()
                     } else if restoring || restore_pending {
                         "restoring"
                     } else if automatic {
@@ -817,70 +842,66 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                     .and_then(|debug| {
                         serde_json::to_string(debug).map_err(|error| error.to_string())
                     }),
-                ControlCommand::Switch(workspace) if automatic => actions_sender
-                    .send(Action::SwitchWorkspace(workspace))
-                    .map(|()| format!("switch to workspace {workspace} queued"))
-                    .map_err(|_| "Spaceman agent is stopping".into()),
-                ControlCommand::WorkspaceBackAndForth if automatic => actions_sender
-                    .send(Action::WorkspaceBackAndForth)
-                    .map(|()| "workspace back-and-forth queued".into())
-                    .map_err(|_| "Spaceman agent is stopping".into()),
-                ControlCommand::Move(workspace) if automatic => actions_sender
-                    .send(Action::MoveFocused(workspace))
-                    .map(|()| format!("move to workspace {workspace} queued"))
-                    .map_err(|_| "Spaceman agent is stopping".into()),
-                ControlCommand::MoveApp(ref bundle_id, workspace) if automatic => actions_sender
-                    .send(Action::MoveApp(bundle_id.clone(), workspace))
-                    .map(|()| format!("move app to workspace {workspace} queued"))
-                    .map_err(|_| "Spaceman agent is stopping".into()),
-                ControlCommand::Focus(direction) if automatic => actions_sender
-                    .send(Action::Focus(direction))
-                    .map(|()| "focus queued".into())
-                    .map_err(|_| "Spaceman agent is stopping".into()),
-                ControlCommand::MoveDirection(direction) if automatic => actions_sender
-                    .send(Action::Reorder(direction))
-                    .map(|()| "directional move queued".into())
-                    .map_err(|_| "Spaceman agent is stopping".into()),
-                ControlCommand::Layout if automatic => actions_sender
-                    .send(Action::ToggleLayout)
-                    .map(|()| "layout toggle queued".into())
-                    .map_err(|_| "Spaceman agent is stopping".into()),
-                ControlCommand::Resize(direction) if automatic => actions_sender
-                    .send(Action::Resize(direction))
-                    .map(|()| "resize queued".into())
-                    .map_err(|_| "Spaceman agent is stopping".into()),
-                ControlCommand::Balance if automatic => actions_sender
-                    .send(Action::Balance)
-                    .map(|()| "balance queued".into())
-                    .map_err(|_| "Spaceman agent is stopping".into()),
-                ControlCommand::Retile if automatic => actions_sender
-                    .send(Action::Retile)
-                    .map(|()| "retile queued".into())
-                    .map_err(|_| "Spaceman agent is stopping".into()),
+                ControlCommand::Switch(workspace) if automatic => queue(
+                    &actions_sender,
+                    Action::SwitchWorkspace(workspace),
+                    &format!("switch to workspace {workspace} queued"),
+                ),
+                ControlCommand::WorkspaceBackAndForth if automatic => queue(
+                    &actions_sender,
+                    Action::WorkspaceBackAndForth,
+                    "workspace back-and-forth queued",
+                ),
+                ControlCommand::Move(workspace) if automatic => queue(
+                    &actions_sender,
+                    Action::MoveFocused(workspace),
+                    &format!("move to workspace {workspace} queued"),
+                ),
+                ControlCommand::MoveApp(ref bundle_id, workspace) if automatic => queue(
+                    &actions_sender,
+                    Action::MoveApp(bundle_id.clone(), workspace),
+                    &format!("move app to workspace {workspace} queued"),
+                ),
+                ControlCommand::Focus(direction) if automatic => {
+                    queue(&actions_sender, Action::Focus(direction), "focus queued")
+                }
+                ControlCommand::MoveDirection(direction) if automatic => queue(
+                    &actions_sender,
+                    Action::Reorder(direction),
+                    "directional move queued",
+                ),
+                ControlCommand::Layout if automatic => queue(
+                    &actions_sender,
+                    Action::ToggleLayout,
+                    "layout toggle queued",
+                ),
+                ControlCommand::Resize(direction) if automatic => {
+                    queue(&actions_sender, Action::Resize(direction), "resize queued")
+                }
+                ControlCommand::Balance if automatic => {
+                    queue(&actions_sender, Action::Balance, "balance queued")
+                }
+                ControlCommand::Retile if automatic => {
+                    queue(&actions_sender, Action::Retile, "retile queued")
+                }
                 ControlCommand::Restart if worker_busy => {
                     Err("Spaceman is busy; retry restart".into())
                 }
-                ControlCommand::Restart => actions_sender
-                    .send(Action::Restart)
-                    .map(|()| "restart queued".into())
-                    .map_err(|_| "Spaceman agent is stopping".into()),
-                ControlCommand::Pause if automatic => actions_sender
-                    .send(Action::ToggleAutomatic)
-                    .map(|()| "pause queued".into())
-                    .map_err(|_| "Spaceman agent is stopping".into()),
+                ControlCommand::Restart => {
+                    queue(&actions_sender, Action::Restart, "restart queued")
+                }
+                ControlCommand::Pause if automatic => {
+                    queue(&actions_sender, Action::ToggleAutomatic, "pause queued")
+                }
                 ControlCommand::Pause => Ok("already paused".into()),
                 ControlCommand::Resume if restoring || restore_pending => {
                     Err("windows are still being restored".into())
                 }
                 ControlCommand::Resume if automatic => Ok("already automatic".into()),
-                ControlCommand::Resume => actions_sender
-                    .send(Action::ToggleAutomatic)
-                    .map(|()| "resume queued".into())
-                    .map_err(|_| "Spaceman agent is stopping".into()),
-                ControlCommand::Quit => actions_sender
-                    .send(Action::Quit)
-                    .map(|()| "quit queued".into())
-                    .map_err(|_| "Spaceman agent is stopping".into()),
+                ControlCommand::Resume => {
+                    queue(&actions_sender, Action::ToggleAutomatic, "resume queued")
+                }
+                ControlCommand::Quit => queue(&actions_sender, Action::Quit, "quit queued"),
                 ControlCommand::Switch(_)
                 | ControlCommand::WorkspaceBackAndForth
                 | ControlCommand::Move(_)
@@ -941,15 +962,7 @@ async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                             cancelled.store(false, Ordering::Release);
                             events.invalidate();
                             status_item::set_automatic(true);
-                            status_item::set_status(match scope {
-                                ManagementScope::Both => {
-                                    "Automatic tiling enabled · Workspaces 1 / 6"
-                                }
-                                ManagementScope::Main => "Automatic tiling enabled · Workspace 1",
-                                ManagementScope::Secondary => {
-                                    "Automatic tiling enabled · Workspace 6"
-                                }
-                            });
+                            status_item::set_status(scope.automatic_status());
                         }
                         Err(error) => {
                             let error = format!("Hotkeys unavailable: {error}");
@@ -1419,6 +1432,10 @@ impl WorkspaceRuntime<MacWorkspaceBackend> {
 
 impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     fn execute(&mut self, command: WorkerCommand, cancelled: &AtomicBool) -> Option<WorkerResult> {
+        if let WorkerCommand::Action(_, outputs) | WorkerCommand::Gesture(_, _, outputs) = &command
+        {
+            self.synchronize_foreground(outputs);
+        }
         let (result, outputs) = match command {
             WorkerCommand::Action(action, outputs) => {
                 let result = self.execute_action(action, outputs.clone(), cancelled);
@@ -1823,11 +1840,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             let app_workspace = self.workspaces.workspace_for_app(&app.id);
             for window in windows {
                 self.heal_reappeared_window(window, visible, server_frames);
-                let disposition = if self.config.has_rules() {
-                    self.config.disposition(&app.bundle_id, window)
-                } else {
-                    WindowDisposition::Managed
-                };
+                let disposition = self.config.disposition(&app.bundle_id, window);
                 if self.quarantined.contains(&window.id)
                     || disposition == WindowDisposition::Ignored
                 {
@@ -2123,8 +2136,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     match affinity {
                         FrozenWindowAffinity::Owned(owner)
                         | FrozenWindowAffinity::PendingReplacement(owner) => owner == workspace,
-                        FrozenWindowAffinity::AmbiguousReplacement => false,
-                        FrozenWindowAffinity::Floating | FrozenWindowAffinity::Ignored => false,
+                        FrozenWindowAffinity::AmbiguousReplacement
+                        | FrozenWindowAffinity::Floating
+                        | FrozenWindowAffinity::Ignored => false,
                         FrozenWindowAffinity::Inferred(target)
                             if affinity_policy.visible_workspaces.contains(&target) =>
                         {
@@ -2204,23 +2218,22 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .collect();
         let mut routed_targets = HashSet::new();
         for (window, target) in &routes {
-            let source_fullscreen = self.workspaces.uses_fullscreen_layout(workspace);
-            if self.workspaces.move_window(window, *target).is_none() {
-                continue;
-            }
             if !affinity_policy.visible_workspaces.contains(target) {
                 let target_output = output_for(&self.workspaces, *target, outputs);
                 match self.park_window(window, target_output, outputs) {
                     macos::ApplyOutcome::Applied => {}
-                    macos::ApplyOutcome::Gone => self.forget_window(*target, window),
+                    macos::ApplyOutcome::Gone => {
+                        self.forget_window(workspace, window);
+                        continue;
+                    }
                     _ => {
-                        let _ = self.workspaces.move_window(window, workspace);
-                        self.workspaces
-                            .set_fullscreen_layout(workspace, source_fullscreen);
                         *failed += 1;
                         continue;
                     }
                 }
+            }
+            if self.workspaces.move_window(window, *target).is_none() {
+                continue;
             }
             routed_targets.insert(*target);
         }
@@ -2329,20 +2342,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 self.persist_workspace_state_if_changed()?;
                 return Ok(self.status(0, &outputs));
             }
-            let workspace_focus = self
-                .workspaces
-                .preferred_focus(workspace)
-                .filter(|window| windows.contains(window))
-                .or_else(|| windows.first().cloned());
-            if let Some(window) = workspace_focus {
-                let focused_window = self.backend.focus_window(&window);
-                if focused_window {
-                    self.pending_fullscreen_focus_restore.remove(&workspace);
-                }
-                self.suppressed_focus = (!focused_window).then_some(focused).flatten();
-            } else {
-                self.suppressed_focus = focused;
-            }
+            self.focus_workspace_entry(workspace, &windows, focused);
             return Ok(self.status(0, &outputs));
         }
         let switch_started = Instant::now();
@@ -2440,20 +2440,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         }
         self.workspaces.switch(workspace);
         self.foreground_lanes.insert(display_id, selector);
-        let incoming_focus = self
-            .workspaces
-            .preferred_focus(workspace)
-            .filter(|window| incoming.contains(window))
-            .or_else(|| incoming.first().cloned());
-        if let Some(window) = incoming_focus {
-            let focused_window = self.backend.focus_window(&window);
-            if focused_window {
-                self.pending_fullscreen_focus_restore.remove(&workspace);
-            }
-            self.suppressed_focus = (!focused_window).then_some(outgoing_focus).flatten();
-        } else {
-            self.suppressed_focus = outgoing_focus;
-        }
+        self.focus_workspace_entry(workspace, &incoming, outgoing_focus);
         self.persist_workspace_state_if_changed()?;
         log_event!(
             "switch complete: workspace {} in {}ms",
@@ -2461,6 +2448,29 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             switch_started.elapsed().as_millis()
         );
         Ok(self.status(layout.failed, &outputs))
+    }
+
+    fn focus_workspace_entry(
+        &mut self,
+        workspace: WorkspaceId,
+        windows: &[crate::PhysicalWindowId],
+        fallback: Option<crate::PhysicalWindowId>,
+    ) {
+        let workspace_focus = self
+            .workspaces
+            .preferred_focus(workspace)
+            .filter(|window| windows.contains(window))
+            .or_else(|| windows.first().cloned());
+        let Some(window) = workspace_focus else {
+            self.suppressed_focus = fallback;
+            return;
+        };
+        if self.backend.focus_window(&window) {
+            self.pending_fullscreen_focus_restore.remove(&workspace);
+            self.suppressed_focus = None;
+        } else {
+            self.suppressed_focus = fallback;
+        }
     }
 
     /// Bounded wait until every incoming window's restore is confirmed by the
@@ -2619,7 +2629,6 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         outputs: macos::DisplayOutputs,
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
-        self.synchronize_foreground(&outputs);
         if !self.workspaces.is_enabled(target) {
             return Err(format!("Workspace {target} is not configured"));
         }
@@ -2630,14 +2639,13 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 target
             ));
         }
-        let source = match self.workspaces.workspace_of(&window) {
-            Some(source) => source,
-            None => {
-                self.cycle(outputs.clone(), cancelled)?;
-                self.workspaces
-                    .workspace_of(&window)
-                    .ok_or("Window is not managed by Spaceman")?
-            }
+        let source = if let Some(source) = self.workspaces.workspace_of(&window) {
+            source
+        } else {
+            self.cycle(outputs.clone(), cancelled)?;
+            self.workspaces
+                .workspace_of(&window)
+                .ok_or("Window is not managed by Spaceman")?
         };
         if source == target {
             return Ok(self.status(0, &outputs));
@@ -2689,23 +2697,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         outputs: macos::DisplayOutputs,
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
-        self.synchronize_foreground(&outputs);
-        let window = self
-            .backend
-            .focused_window()
-            .ok_or("Focused window is unavailable")?;
-        let workspace = match self.workspaces.workspace_of(&window) {
-            Some(workspace) => workspace,
-            None => {
-                self.cycle(outputs.clone(), cancelled)?;
-                self.workspaces
-                    .workspace_of(&window)
-                    .ok_or("Focused window is not managed by Spaceman")?
-            }
-        };
-        if !self.is_visible(workspace, &outputs) {
-            return Err("Focused window is not on an active workspace".into());
-        }
+        let (window, workspace) = self.focused_active_workspace(&outputs, cancelled, true)?;
         if self.workspaces.uses_fullscreen_layout(workspace) {
             return Err("Exit Fullscreen Layout before reordering the split layout".into());
         }
@@ -2729,13 +2721,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             {
                 return Ok(self.status(0, &outputs));
             }
-            let layout = self.layout_workspace(
-                workspace,
-                output_for(&self.workspaces, workspace, &outputs),
-                cancelled,
-            );
-            self.persist_workspace_state_if_changed()?;
-            return Ok(self.status(layout.failed, &outputs));
+            return self.relayout_persist(workspace, &outputs, cancelled);
         }
         if windows.len() >= 2
             && perpendicular
@@ -2744,13 +2730,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 .engine_mut(workspace)
                 .create_implicit_split(&window, direction)
         {
-            let layout = self.layout_workspace(
-                workspace,
-                output_for(&self.workspaces, workspace, &outputs),
-                cancelled,
-            );
-            self.persist_workspace_state_if_changed()?;
-            return Ok(self.status(layout.failed, &outputs));
+            return self.relayout_persist(workspace, &outputs, cancelled);
         }
         let Some((target_workspace, target_window)) =
             self.spatial_target(&window, direction, &outputs)
@@ -2767,13 +2747,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         {
             return Ok(self.status(0, &outputs));
         }
-        let layout = self.layout_workspace(
-            workspace,
-            output_for(&self.workspaces, workspace, &outputs),
-            cancelled,
-        );
-        self.persist_workspace_state_if_changed()?;
-        Ok(self.status(layout.failed, &outputs))
+        self.relayout_persist(workspace, &outputs, cancelled)
     }
 
     fn drop_window(
@@ -2887,23 +2861,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         outputs: macos::DisplayOutputs,
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
-        self.synchronize_foreground(&outputs);
-        let focused = self
-            .backend
-            .focused_window()
-            .ok_or("Focused window is unavailable")?;
-        let workspace = match self.workspaces.workspace_of(&focused) {
-            Some(workspace) => workspace,
-            None => {
-                self.cycle(outputs.clone(), cancelled)?;
-                self.workspaces
-                    .workspace_of(&focused)
-                    .ok_or("Focused window is not managed by Spaceman")?
-            }
-        };
-        if !self.is_visible(workspace, &outputs) {
-            return Err("Focused window is not on an active workspace".into());
-        }
+        let (focused, workspace) = self.focused_active_workspace(&outputs, cancelled, true)?;
         let Some((_, target)) = self.spatial_target(&focused, direction, &outputs) else {
             return Ok(self.status(0, &outputs));
         };
@@ -2919,23 +2877,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         outputs: macos::DisplayOutputs,
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
-        self.synchronize_foreground(&outputs);
-        let focused = self
-            .backend
-            .focused_window()
-            .ok_or("Focused window is unavailable")?;
-        let workspace = match self.workspaces.workspace_of(&focused) {
-            Some(workspace) => workspace,
-            None => {
-                self.cycle(outputs.clone(), cancelled)?;
-                self.workspaces
-                    .workspace_of(&focused)
-                    .ok_or("Focused window is not managed by Spaceman")?
-            }
-        };
-        if !self.is_visible(workspace, &outputs) {
-            return Err("Focused window is not on an active workspace".into());
-        }
+        let (focused, workspace) = self.focused_active_workspace(&outputs, cancelled, true)?;
         let windows = self.workspaces.engine(workspace).bound_windows();
         let Some(index) = windows.iter().position(|window| window == &focused) else {
             return Ok(self.status(0, &outputs));
@@ -2949,6 +2891,32 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         }
         self.remember_fullscreen_focus(workspace, target)?;
         Ok(self.status(0, &outputs))
+    }
+
+    fn focused_active_workspace(
+        &mut self,
+        outputs: &macos::DisplayOutputs,
+        cancelled: &AtomicBool,
+        refresh_if_unmanaged: bool,
+    ) -> Result<(crate::PhysicalWindowId, WorkspaceId), String> {
+        let window = self
+            .backend
+            .focused_window()
+            .ok_or("Focused window is unavailable")?;
+        let workspace = match self.workspaces.workspace_of(&window) {
+            Some(workspace) => workspace,
+            None if refresh_if_unmanaged => {
+                self.cycle(outputs.clone(), cancelled)?;
+                self.workspaces
+                    .workspace_of(&window)
+                    .ok_or("Focused window is not managed by Spaceman")?
+            }
+            None => return Err("Focused window is not managed by Spaceman".into()),
+        };
+        if !self.is_visible(workspace, outputs) {
+            return Err("Focused window is not on an active workspace".into());
+        }
+        Ok((window, workspace))
     }
 
     fn remember_fullscreen_focus(
@@ -3069,30 +3037,13 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         outputs: macos::DisplayOutputs,
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
-        self.synchronize_foreground(&outputs);
-        let window = self
-            .backend
-            .focused_window()
-            .ok_or("Focused window is unavailable")?;
-        let workspace = self
-            .workspaces
-            .workspace_of(&window)
-            .ok_or("Focused window is not managed by Spaceman")?;
-        if !self.is_visible(workspace, &outputs) {
-            return Err("Focused window is not on an active workspace".into());
-        }
+        let (_, workspace) = self.focused_active_workspace(&outputs, cancelled, false)?;
         if self.workspaces.uses_fullscreen_layout(workspace) {
             self.workspaces.set_fullscreen_layout(workspace, false);
             self.pending_fullscreen_focus_restore.remove(&workspace);
         }
         self.workspaces.engine_mut(workspace).toggle_axis();
-        let layout = self.layout_workspace(
-            workspace,
-            output_for(&self.workspaces, workspace, &outputs),
-            cancelled,
-        );
-        self.persist_workspace_state_if_changed()?;
-        Ok(self.status(layout.failed, &outputs))
+        self.relayout_persist(workspace, &outputs, cancelled)
     }
 
     fn resize_focused(
@@ -3101,18 +3052,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         outputs: macos::DisplayOutputs,
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
-        self.synchronize_foreground(&outputs);
-        let window = self
-            .backend
-            .focused_window()
-            .ok_or("Focused window is unavailable")?;
-        let workspace = self
-            .workspaces
-            .workspace_of(&window)
-            .ok_or("Focused window is not managed by Spaceman")?;
-        if !self.is_visible(workspace, &outputs) {
-            return Err("Focused window is not on an active workspace".into());
-        }
+        let (window, workspace) = self.focused_active_workspace(&outputs, cancelled, false)?;
         if self.workspaces.uses_fullscreen_layout(workspace) {
             return Err("Exit Fullscreen Layout before resizing the split layout".into());
         }
@@ -3125,9 +3065,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         ) {
             return Ok(self.status(0, &outputs));
         }
-        let layout = self.layout_workspace(workspace, output, cancelled);
-        self.persist_workspace_state_if_changed()?;
-        Ok(self.status(layout.failed, &outputs))
+        self.relayout_persist(workspace, &outputs, cancelled)
     }
 
     fn balance_focused(
@@ -3135,18 +3073,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         outputs: macos::DisplayOutputs,
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
-        self.synchronize_foreground(&outputs);
-        let window = self
-            .backend
-            .focused_window()
-            .ok_or("Focused window is unavailable")?;
-        let workspace = self
-            .workspaces
-            .workspace_of(&window)
-            .ok_or("Focused window is not managed by Spaceman")?;
-        if !self.is_visible(workspace, &outputs) {
-            return Err("Focused window is not on an active workspace".into());
-        }
+        let (window, workspace) = self.focused_active_workspace(&outputs, cancelled, false)?;
         if self.workspaces.uses_fullscreen_layout(workspace) {
             return Err("Exit Fullscreen Layout before balancing the split layout".into());
         }
@@ -3158,9 +3085,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         {
             return Ok(self.status(0, &outputs));
         }
-        let layout = self.layout_workspace(workspace, output, cancelled);
-        self.persist_workspace_state_if_changed()?;
-        Ok(self.status(layout.failed, &outputs))
+        self.relayout_persist(workspace, &outputs, cancelled)
     }
 
     fn toggle_fullscreen_layout(
@@ -3168,34 +3093,27 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         outputs: macos::DisplayOutputs,
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
-        self.synchronize_foreground(&outputs);
-        let window = self
-            .backend
-            .focused_window()
-            .ok_or("Focused window is unavailable")?;
-        let workspace = match self.workspaces.workspace_of(&window) {
-            Some(workspace) => workspace,
-            None => {
-                self.cycle(outputs.clone(), cancelled)?;
-                self.workspaces
-                    .workspace_of(&window)
-                    .ok_or("Focused window is not managed by Spaceman")?
-            }
-        };
-        if !self.is_visible(workspace, &outputs) {
-            return Err("Focused window is not on an active workspace".into());
-        }
+        let (window, workspace) = self.focused_active_workspace(&outputs, cancelled, true)?;
         self.workspaces.remember_focus(workspace, &window);
         let enabled = !self.workspaces.uses_fullscreen_layout(workspace);
         self.workspaces.set_fullscreen_layout(workspace, enabled);
         self.pending_fullscreen_focus_restore.remove(&workspace);
+        self.relayout_persist(workspace, &outputs, cancelled)
+    }
+
+    fn relayout_persist(
+        &mut self,
+        workspace: WorkspaceId,
+        outputs: &macos::DisplayOutputs,
+        cancelled: &AtomicBool,
+    ) -> Result<CycleStatus, String> {
         let layout = self.layout_workspace(
             workspace,
-            output_for(&self.workspaces, workspace, &outputs),
+            output_for(&self.workspaces, workspace, outputs),
             cancelled,
         );
         self.persist_workspace_state_if_changed()?;
-        Ok(self.status(layout.failed, &outputs))
+        Ok(self.status(layout.failed, outputs))
     }
 
     fn layout_workspace(
@@ -3559,30 +3477,26 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return macos::ApplyOutcome::Applied;
         };
         let outcome = self.write_restore_position(window, frame);
-        match outcome {
-            macos::ApplyOutcome::Gone => {}
-            macos::ApplyOutcome::Applied => {
-                // Accessibility read-back is optimistic for apps that apply
-                // moves asynchronously. Keep the recovery frame until the
-                // window server confirms arrival; cycles retry until it does.
-                // A window the window server cannot see is not confirmed.
-                let confirmed = self
-                    .backend
-                    .window_server_frame(window)
-                    .is_some_and(|actual| {
-                        actual.position_approximately_equals(frame, RESTORE_CONFIRM_TOLERANCE)
-                    });
-                if confirmed {
-                    self.commit_unparked(window);
-                } else {
-                    log_event!(
-                        "restore pending: {:?} not yet at {:?} per the window server",
-                        window,
-                        frame
-                    );
-                }
+        if let macos::ApplyOutcome::Applied = outcome {
+            // Accessibility read-back is optimistic for apps that apply
+            // moves asynchronously. Keep the recovery frame until the
+            // window server confirms arrival; cycles retry until it does.
+            // A window the window server cannot see is not confirmed.
+            let confirmed = self
+                .backend
+                .window_server_frame(window)
+                .is_some_and(|actual| {
+                    actual.position_approximately_equals(frame, RESTORE_CONFIRM_TOLERANCE)
+                });
+            if confirmed {
+                self.commit_unparked(window);
+            } else {
+                log_event!(
+                    "restore pending: {:?} not yet at {:?} per the window server",
+                    window,
+                    frame
+                );
             }
-            _ => {}
         }
         outcome
     }
