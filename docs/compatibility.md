@@ -30,10 +30,14 @@ tiled or floating — is re-homed to the workspace it reappeared on. If it reapp
 Electron applications re-assert saved bounds on screen-parameter changes — it is quietly pushed back
 off screen with its recovery frame intact. If an application undoes several re-parks in a row, the
 reappearance is honored after all and the window is re-homed. A window whose reappearance is honored
-twice within five minutes is quarantined for the rest of the session: released from its workspace and
-left entirely unmanaged. Quarantined windows appear in the `ignored` list of `spaceman ctl debug`, and an `ignore`
-config rule opts such applications out permanently. Windows an application keeps off screen itself are
-left alone rather than parked, and never recorded as recovery frames.
+twice within five minutes becomes parking-exempt for the rest of the session: it remains owned and
+tiled on its workspace, but is left visible when another workspace is active rather than being fought
+indefinitely. Parking-exempt windows appear in the `parking_exempt` list of `spaceman ctl debug`; an
+`ignore` config rule instead opts an application out of management permanently. If a newly identified
+frontmost window appears at the exact one-pixel-edge position produced by Spaceman parking, it is
+revealed so normal workspace adoption can recover an app that relaunched with stale saved bounds.
+Other windows an application keeps off screen itself are left alone rather than parked, and never
+recorded as recovery frames.
 
 Ghostty native tabs are the primary stable-logical-window target. Replacement is conservative: when
 the evidence is ambiguous, Spaceman preserves existing logical state rather than guessing. Other apps
