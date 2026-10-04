@@ -8,6 +8,7 @@ icon_info="$root/target/AppIcon-info.plist"
 sparkle_dir=$("$root/scripts/setup-sparkle.sh")
 identity=${SPACEMAN_CODESIGN_IDENTITY:-}
 deployment_target=$(/usr/bin/plutil -extract LSMinimumSystemVersion raw "$root/app/Info.plist")
+sdk_version=$(/usr/bin/xcrun --sdk macosx --show-sdk-version)
 cargo_bin=${CARGO:-}
 
 if [ -z "$cargo_bin" ]; then
@@ -38,9 +39,19 @@ case "$identity" in
     ;;
 esac
 
-MACOSX_DEPLOYMENT_TARGET="$deployment_target" \
-  CARGO_TARGET_DIR="$root/target" \
+CARGO_TARGET_DIR="$root/target" \
   "$cargo_bin" build --manifest-path "$root/Cargo.toml" --release --locked --bins
+# A global MACOSX_DEPLOYMENT_TARGET also applies to host-side proc-macro
+# dylibs, which must remain loadable by the build host. Set the deployment
+# command only on the final app executables before they are signed.
+for executable in spaceman-agent spaceman; do
+  path="$root/target/release/$executable"
+  patched="$path.deployment-target"
+  /usr/bin/vtool -set-build-version macos "$deployment_target" "$sdk_version" \
+    -replace -output "$patched" "$path"
+  /bin/chmod 755 "$patched"
+  /bin/mv "$patched" "$path"
+done
 rm -rf "$bundle"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" "$bundle/Contents/Frameworks"
 cp "$root/target/release/spaceman-agent" "$bundle/Contents/MacOS/spaceman-agent"
