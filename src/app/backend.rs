@@ -37,6 +37,8 @@ pub(super) trait WorkspaceBackend {
     /// Window-server frames for windows currently on screen; proves a window
     /// still exists when an Accessibility snapshot omits it.
     fn onscreen_window_frames(&mut self) -> Option<HashMap<u32, crate::Rect>>;
+    /// On-screen window-server IDs, front-most first.
+    fn onscreen_window_order(&mut self) -> Option<Vec<u32>>;
     fn set_position(
         &mut self,
         window: &crate::PhysicalWindowId,
@@ -67,6 +69,12 @@ pub(super) trait WorkspaceBackend {
         &mut self,
         state: &crate::workspace::WorkspaceState,
     ) -> Result<(), String>;
+    fn persist_window_memory(
+        &mut self,
+        memory: &crate::window_memory::WindowMemory,
+    ) -> Result<(), String>;
+    /// Best-effort diagnostics; a journal failure never affects management.
+    fn journal(&mut self, line: &crate::journal::JournalLine);
 }
 
 pub(super) struct MacWorkspaceBackend;
@@ -103,6 +111,10 @@ impl WorkspaceBackend for MacWorkspaceBackend {
         macos::onscreen_window_frames()
     }
 
+    fn onscreen_window_order(&mut self) -> Option<Vec<u32>> {
+        macos::onscreen_window_order()
+    }
+
     fn set_position(
         &mut self,
         window: &crate::PhysicalWindowId,
@@ -133,7 +145,9 @@ impl WorkspaceBackend for MacWorkspaceBackend {
         settings: &Settings,
         cancelled: &AtomicBool,
     ) -> Vec<macos::ApplyResult> {
-        macos::apply_managed_while(placements, settings, || !cancelled.load(Ordering::Acquire))
+        macos::apply_managed(placements, settings, None, || {
+            !cancelled.load(Ordering::Acquire)
+        })
     }
 
     fn apply_managed_during_drag(
@@ -143,7 +157,7 @@ impl WorkspaceBackend for MacWorkspaceBackend {
         dragged: &crate::PhysicalWindowId,
         cancelled: &AtomicBool,
     ) -> Vec<macos::ApplyResult> {
-        macos::apply_managed_during_drag(placements, settings, dragged, || {
+        macos::apply_managed(placements, settings, Some(dragged), || {
             !cancelled.load(Ordering::Acquire)
         })
     }
@@ -161,6 +175,54 @@ impl WorkspaceBackend for MacWorkspaceBackend {
     ) -> Result<(), String> {
         persist_workspace_state(state)
     }
+
+    fn persist_window_memory(
+        &mut self,
+        memory: &crate::window_memory::WindowMemory,
+    ) -> Result<(), String> {
+        let path = window_memory_path().ok_or("HOME is unavailable")?;
+        persist_json(&path, memory, "window memory")
+    }
+
+    fn journal(&mut self, line: &crate::journal::JournalLine) {
+        static FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let result = crate::journal::default_paths()
+            .ok_or_else(|| "HOME is unavailable".to_owned())
+            .and_then(|(path, rotated)| crate::journal::append(&path, &rotated, line));
+        match result {
+            Ok(()) => FAILED.store(false, Ordering::Relaxed),
+            // Log the first failure of a run, not every event.
+            Err(error) if !FAILED.swap(true, Ordering::Relaxed) => {
+                log_event!("arrangement journal unavailable: {error}");
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+fn window_memory_path() -> Option<PathBuf> {
+    crate::config::application_support_path("window-memory.json")
+}
+
+/// Window memory is advisory: unreadable or invalid memory is logged and
+/// replaced by an empty memory rather than blocking startup or recovery.
+pub(super) fn load_window_memory() -> crate::window_memory::WindowMemory {
+    let Some(path) = window_memory_path() else {
+        return crate::window_memory::WindowMemory::default();
+    };
+    let memory = load_json::<crate::window_memory::WindowMemory>(&path, "window memory").and_then(
+        |memory| {
+            let memory = memory.unwrap_or_default();
+            memory
+                .validate()
+                .map(|()| memory)
+                .map_err(|error| format!("window memory is invalid: {error}"))
+        },
+    );
+    memory.unwrap_or_else(|error| {
+        log_event!("ignoring {error}");
+        crate::window_memory::WindowMemory::default()
+    })
 }
 
 fn parked_path() -> Option<PathBuf> {

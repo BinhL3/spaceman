@@ -83,7 +83,6 @@ struct Controller {
     automatic: Retained<NSMenuItem>,
     launch_at_login: Retained<NSMenuItem>,
     status_title: String,
-    workspace_title: String,
     workspace_layouts: Vec<WorkspaceLayout>,
 }
 
@@ -136,7 +135,6 @@ pub fn install(sender: Sender<Action>) -> Result<(), String> {
             automatic,
             launch_at_login,
             status_title: String::new(),
-            workspace_title: String::new(),
             workspace_layouts: Vec::new(),
         });
     });
@@ -213,13 +211,9 @@ pub fn set_workspace_numbers(workspaces: &[u8]) {
         )
     };
     CONTROLLER.with(|controller| {
-        let mut controller = controller.borrow_mut();
-        if let Some(controller) = controller.as_mut()
-            && controller.workspace_title != title
-        {
+        if let Some(controller) = controller.borrow_mut().as_mut() {
             controller.button.setImage(None);
             controller.button.setTitle(&NSString::from_str(&title));
-            controller.workspace_title = title;
             controller.workspace_layouts.clear();
         }
     });
@@ -234,7 +228,6 @@ pub fn set_workspace_layouts(layouts: &[WorkspaceLayout]) {
             let image = workspace_layout_image(layouts);
             controller.button.setTitle(&NSString::new());
             controller.button.setImage(Some(&image));
-            controller.workspace_title.clear();
             controller.workspace_layouts = layouts.to_vec();
         }
     });

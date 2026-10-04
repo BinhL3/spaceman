@@ -69,7 +69,14 @@ pub fn applicable_placements(
     settings: &Settings,
 ) -> Vec<Placement> {
     let observed_frames = observed_frames(observation);
-    applicable_placements_with_frames(reconciliation, settings, &observed_frames)
+    reconciliation
+        .placements
+        .iter()
+        .filter(|placement| {
+            needs_application(placement, &observed_frames, settings.frame_tolerance)
+        })
+        .cloned()
+        .collect()
 }
 
 pub fn observed_frames(
@@ -86,25 +93,17 @@ pub fn observed_frames(
         .collect()
 }
 
-pub fn applicable_placements_with_frames(
-    reconciliation: &Reconciliation,
-    settings: &Settings,
+#[must_use]
+pub fn needs_application(
+    placement: &Placement,
     observed_frames: &HashMap<crate::PhysicalWindowId, crate::Rect>,
-) -> Vec<Placement> {
-    reconciliation
-        .placements
-        .iter()
-        .filter(|placement| {
-            placement
-                .window
-                .as_ref()
-                .and_then(|window| observed_frames.get(window))
-                .is_some_and(|frame| {
-                    !frame.approximately_equals(placement.frame, settings.frame_tolerance)
-                })
-        })
-        .cloned()
-        .collect()
+    tolerance: i32,
+) -> bool {
+    placement
+        .window
+        .as_ref()
+        .and_then(|window| observed_frames.get(window))
+        .is_some_and(|frame| !frame.approximately_equals(placement.frame, tolerance))
 }
 
 #[cfg(test)]

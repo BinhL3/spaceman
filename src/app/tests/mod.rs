@@ -1,13 +1,15 @@
 mod benchmarks;
 mod dispatch;
 mod gestures;
+mod journal;
 mod layout;
+mod memory;
 mod parking;
 mod reconciliation;
 mod reliability;
 mod startup;
 mod switching;
-use crate::{BindingState, DisplayRole, Slot, SlotId};
+use crate::{BindingState, Slot, SlotId};
 
 use super::*;
 use super::{
@@ -45,6 +47,10 @@ struct FakeBackend {
     snapshot_count: usize,
     observed_apply_count: usize,
     workspace_state: Option<crate::workspace::WorkspaceState>,
+    window_memory: Option<crate::window_memory::WindowMemory>,
+    /// Window-server stacking, front-most first.
+    stacking: Option<Vec<u32>>,
+    journal: Vec<crate::journal::JournalEvent>,
 }
 
 impl WorkspaceBackend for FakeBackend {
@@ -132,6 +138,10 @@ impl WorkspaceBackend for FakeBackend {
 
     fn onscreen_window_frames(&mut self) -> Option<HashMap<u32, crate::Rect>> {
         self.window_server_frames()
+    }
+
+    fn onscreen_window_order(&mut self) -> Option<Vec<u32>> {
+        self.stacking.clone()
     }
 
     fn set_position(
@@ -241,6 +251,18 @@ impl WorkspaceBackend for FakeBackend {
     ) -> Result<(), String> {
         self.workspace_state = Some(state.clone());
         Ok(())
+    }
+
+    fn persist_window_memory(
+        &mut self,
+        memory: &crate::window_memory::WindowMemory,
+    ) -> Result<(), String> {
+        self.window_memory = Some(memory.clone());
+        Ok(())
+    }
+
+    fn journal(&mut self, line: &crate::journal::JournalLine) {
+        self.journal.push(line.event.clone());
     }
 }
 

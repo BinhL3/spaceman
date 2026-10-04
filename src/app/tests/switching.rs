@@ -12,7 +12,6 @@ fn switching_leaves_self_hidden_windows_alone_instead_of_failing() {
     backend.frames.insert(stashed.clone(), frame(-4000));
     let mut runtime = runtime(backend);
     bind(&mut runtime, WorkspaceId::ONE, &tiled);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
     runtime
         .workspaces
         .own_floating(stashed.clone(), WorkspaceId::ONE);
@@ -48,8 +47,8 @@ fn moving_to_an_inactive_workspace_does_not_switch() {
         .unwrap();
 
     assert_eq!(
-        runtime.workspaces.active(DisplayRole::Main),
-        WorkspaceId::ONE
+        runtime.workspaces.active_for(&DisplaySelector::Main),
+        Some(WorkspaceId::ONE)
     );
     assert_eq!(runtime.workspaces.workspace_of(&window), Some(target));
     assert!(runtime.parked.contains_key(&window));
@@ -64,8 +63,8 @@ fn moving_to_an_inactive_workspace_does_not_switch() {
     runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
 
     assert_eq!(
-        runtime.workspaces.active(DisplayRole::Main),
-        WorkspaceId::ONE
+        runtime.workspaces.active_for(&DisplaySelector::Main),
+        Some(WorkspaceId::ONE)
     );
 }
 
@@ -151,7 +150,10 @@ fn switching_reveals_and_lays_out_incoming_beneath_before_hiding_outgoing() {
         .switch(target, outputs.clone(), &AtomicBool::new(false))
         .unwrap();
 
-    assert_eq!(runtime.workspaces.active(DisplayRole::Main), target);
+    assert_eq!(
+        runtime.workspaces.active_for(&DisplaySelector::Main),
+        Some(target)
+    );
     assert_eq!(runtime.backend.focused, Some(incoming.clone()));
     assert!(runtime.parked.contains_key(&outgoing));
     assert!(!runtime.parked.contains_key(&incoming));
@@ -306,12 +308,12 @@ fn workspace_back_and_forth_tracks_each_display_lane_independently() {
         .workspace_back_and_forth(outputs(), &cancelled)
         .unwrap();
     assert_eq!(
-        runtime.workspaces.active(DisplayRole::Main),
-        WorkspaceId::ONE
+        runtime.workspaces.active_for(&DisplaySelector::Main),
+        Some(WorkspaceId::ONE)
     );
     assert_eq!(
-        runtime.workspaces.active(DisplayRole::Secondary),
-        secondary_target
+        runtime.workspaces.active_for(&DisplaySelector::Secondary),
+        Some(secondary_target)
     );
 
     runtime.backend.focused = Some(secondary);
@@ -319,12 +321,12 @@ fn workspace_back_and_forth_tracks_each_display_lane_independently() {
         .workspace_back_and_forth(outputs(), &cancelled)
         .unwrap();
     assert_eq!(
-        runtime.workspaces.active(DisplayRole::Main),
-        WorkspaceId::ONE
+        runtime.workspaces.active_for(&DisplaySelector::Main),
+        Some(WorkspaceId::ONE)
     );
     assert_eq!(
-        runtime.workspaces.active(DisplayRole::Secondary),
-        WorkspaceId::SIX
+        runtime.workspaces.active_for(&DisplaySelector::Secondary),
+        Some(WorkspaceId::SIX)
     );
     assert_eq!(
         runtime.workspaces.previous_for(&DisplaySelector::Main),
@@ -365,8 +367,8 @@ fn switching_aborts_when_the_incoming_workspace_cannot_be_laid_out() {
             .is_err()
     );
     assert_eq!(
-        runtime.workspaces.active(DisplayRole::Main),
-        WorkspaceId::ONE
+        runtime.workspaces.active_for(&DisplaySelector::Main),
+        Some(WorkspaceId::ONE)
     );
     assert_eq!(runtime.backend.frames[&outgoing], outgoing_normal);
     assert!(!runtime.parked.contains_key(&outgoing));

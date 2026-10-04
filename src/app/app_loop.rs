@@ -98,19 +98,18 @@ pub(super) async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                 }
             };
             match result {
-                WorkerResult::Started { failed: 0 } if !automatic => {
-                    status_item::set_status(last_error.as_deref().unwrap_or("Paused"));
-                }
-                WorkerResult::Started { failed: 0 } => {}
-                WorkerResult::Started { failed } => {
-                    restoring = true;
-                    next_restore_retry = Some(Instant::now() + RESTORE_RETRY_INTERVAL);
-                    status_item::set_status(&format!("Restoring windows · {failed} failed"));
-                }
                 WorkerResult::Status { result, debug } if automatic => {
                     worker_busy = false;
                     cancelled.store(false, Ordering::Release);
                     latest_debug = Some(*debug);
+                    // Newer input routinely cancels background work; only
+                    // genuine failures are worth a log line.
+                    if let Err(error) = &result
+                        && last_error.as_ref() != Some(error)
+                        && !error.ends_with("cancelled")
+                    {
+                        log_event!("worker error: {error}");
+                    }
                     last_error = result.as_ref().err().cloned();
                     if let Ok(status) = &result {
                         active_workspaces.clone_from(&status.active);
@@ -203,48 +202,12 @@ pub(super) async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                     .and_then(|debug| {
                         serde_json::to_string(debug).map_err(|error| error.to_string())
                     }),
-                ControlCommand::Switch(workspace) if automatic => queue(
+                ControlCommand::Queue(ref action) if automatic => queue(
                     &actions_sender,
-                    Action::SwitchWorkspace(workspace),
-                    &format!("switch to workspace {workspace} queued"),
+                    Action::Worker(action.clone()),
+                    &action.queued_acknowledgement(),
                 ),
-                ControlCommand::WorkspaceBackAndForth if automatic => queue(
-                    &actions_sender,
-                    Action::WorkspaceBackAndForth,
-                    "workspace back-and-forth queued",
-                ),
-                ControlCommand::Move(workspace) if automatic => queue(
-                    &actions_sender,
-                    Action::MoveFocused(workspace),
-                    &format!("move to workspace {workspace} queued"),
-                ),
-                ControlCommand::MoveApp(ref bundle_id, workspace) if automatic => queue(
-                    &actions_sender,
-                    Action::MoveApp(bundle_id.clone(), workspace),
-                    &format!("move app to workspace {workspace} queued"),
-                ),
-                ControlCommand::Focus(direction) if automatic => {
-                    queue(&actions_sender, Action::Focus(direction), "focus queued")
-                }
-                ControlCommand::MoveDirection(direction) if automatic => queue(
-                    &actions_sender,
-                    Action::Reorder(direction),
-                    "directional move queued",
-                ),
-                ControlCommand::Layout if automatic => queue(
-                    &actions_sender,
-                    Action::ToggleLayout,
-                    "layout toggle queued",
-                ),
-                ControlCommand::Resize(direction) if automatic => {
-                    queue(&actions_sender, Action::Resize(direction), "resize queued")
-                }
-                ControlCommand::Balance if automatic => {
-                    queue(&actions_sender, Action::Balance, "balance queued")
-                }
-                ControlCommand::Retile if automatic => {
-                    queue(&actions_sender, Action::Retile, "retile queued")
-                }
+                ControlCommand::Queue(_) => Err("automatic tiling is paused".into()),
                 ControlCommand::Restart if worker_busy => {
                     Err("Spaceman is busy; retry restart".into())
                 }
@@ -263,16 +226,6 @@ pub(super) async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                     queue(&actions_sender, Action::ToggleAutomatic, "resume queued")
                 }
                 ControlCommand::Quit => queue(&actions_sender, Action::Quit, "quit queued"),
-                ControlCommand::Switch(_)
-                | ControlCommand::WorkspaceBackAndForth
-                | ControlCommand::Move(_)
-                | ControlCommand::MoveApp(_, _)
-                | ControlCommand::Focus(_)
-                | ControlCommand::MoveDirection(_)
-                | ControlCommand::Layout
-                | ControlCommand::Resize(_)
-                | ControlCommand::Balance
-                | ControlCommand::Retile => Err("automatic tiling is paused".into()),
             };
             request.respond(response);
         }
@@ -402,8 +355,8 @@ pub(super) async fn run_app_loop(cx: &mut gpui::AsyncApp, app: AppLoop) {
                         cancel_unavailable_exit(cx, &mut exit_intent, &mut last_error);
                     }
                 }
-                action => {
-                    if automatic && let Ok(action) = WorkerAction::try_from(action) {
+                Action::Worker(action) => {
+                    if automatic {
                         queue_input(
                             &mut pending_inputs,
                             QueuedInput::Action(action),
@@ -723,18 +676,16 @@ pub(super) fn spawn_worker(
     thread::spawn(move || {
         let restore_on_start = workspace_state.is_none();
         let mut runtime = WorkspaceRuntime::new(scope, parked, config, workspace_state);
-        let startup_failed = if restore_on_start {
-            runtime.restore_all()
-        } else {
-            0
-        };
-        if results
-            .send(WorkerResult::Started {
-                failed: startup_failed,
-            })
-            .is_err()
-        {
-            return;
+        runtime.restore_window_memory(load_window_memory());
+        runtime.journal_start(!restore_on_start);
+        // Windows still parked afterwards are retried by the paused loop's
+        // restore or, while tiling, by each cycle's unowned-window recovery.
+        if restore_on_start {
+            let requested = runtime.parked.len();
+            let failed = runtime.restore_all();
+            if requested > 0 {
+                runtime.journal_restore("startup without saved workspaces", requested, failed);
+            }
         }
         while let Ok(command) = commands.recv() {
             // Every command starts uncancelled: a cancellation aimed at previous
@@ -742,9 +693,18 @@ pub(super) fn spawn_worker(
             // cycles and previews remain interruptible; explicit user
             // commands are atomic once native writes begin.
             cancelled.store(false, Ordering::Release);
+            let label = command.label();
+            let started = Instant::now();
             let Some(result) = runtime.execute(command, &cancelled) else {
                 return;
             };
+            let elapsed = started.elapsed();
+            if elapsed >= SLOW_WORKER_COMMAND {
+                log_event!(
+                    "slow worker command: {label} took {}ms",
+                    elapsed.as_millis()
+                );
+            }
             if results.send(result).is_err() {
                 return;
             }

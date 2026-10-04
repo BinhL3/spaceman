@@ -243,6 +243,29 @@ mod tests {
     }
 
     #[test]
+    fn busy_preview_worker_queues_final_cross_display_drop() {
+        let mut tracker = GestureTracker::default();
+        tracker.begin(Some((window(), start())));
+        assert!(
+            tracker
+                .preview(Rect { x: 500, ..start() }, Some((700, 400)))
+                .is_some()
+        );
+        let drop = tracker
+            .finish(Some(Rect { x: 1500, ..start() }), Some((1700, 400)))
+            .unwrap();
+        let mut queue = InputQueue::default();
+        queue.push(QueuedInput::Gesture(drop)).unwrap();
+        assert_eq!(
+            queue.pop(),
+            Some(QueuedInput::Gesture(FinalGesture::Drop(
+                window(),
+                (1700, 400)
+            )))
+        );
+    }
+
+    #[test]
     fn mouse_up_uses_final_resize_even_when_preview_was_already_sent() {
         let mut tracker = GestureTracker::default();
         tracker.begin(Some((window(), start())));

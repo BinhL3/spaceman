@@ -26,17 +26,21 @@ use crate::{
 
 /// Timestamped diagnostic line on stderr (redirected to `agent.log` in bundle
 /// launches). Never include window titles or other user content.
+///
+/// Unlike `eprintln!`, a failed write (such as a full disk) is ignored rather
+/// than panicking the calling thread, and each line is written in one call.
 macro_rules! log_event {
     ($($arg:tt)*) => {{
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        eprintln!(
-            "[{}.{:03}] {}",
+        let line = format!(
+            "[{}.{:03}] {}\n",
             now.as_secs(),
             now.subsec_millis(),
             format_args!($($arg)*)
         );
+        let _ = std::io::Write::write_all(&mut std::io::stderr().lock(), line.as_bytes());
     }};
 }
 
@@ -45,6 +49,8 @@ mod backend;
 mod commands;
 mod cycle;
 mod input;
+mod journal;
+mod memory;
 mod parking;
 mod runtime;
 mod switching;
@@ -52,6 +58,8 @@ mod switching;
 use app_loop::{AppLoop, is_window_drag, is_window_resize, run_app_loop, spawn_worker};
 use backend::*;
 use input::{GestureTracker, InputQueue, QueuedInput};
+use journal::JournalState;
+use memory::MemoryState;
 use runtime::*;
 const TICK_INTERVAL: Duration = Duration::from_millis(25);
 const FALLBACK_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -125,19 +133,8 @@ impl ManagementScope {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Action {
+    Worker(WorkerAction),
     ToggleAutomatic,
-    Retile,
-    SwitchWorkspace(WorkspaceId),
-    WorkspaceBackAndForth,
-    MoveFocused(WorkspaceId),
-    MoveApp(String, WorkspaceId),
-    CycleFocus,
-    Focus(Direction),
-    Reorder(Direction),
-    ToggleLayout,
-    Resize(ResizeDirection),
-    Balance,
-    ToggleFullscreenLayout,
     OpenSettings,
     OpenAccessibility,
     CheckForUpdates,
@@ -149,7 +146,7 @@ pub(crate) enum Action {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum WorkerAction {
+pub(crate) enum WorkerAction {
     Retile,
     SwitchWorkspace(WorkspaceId),
     WorkspaceBackAndForth,
@@ -164,32 +161,21 @@ enum WorkerAction {
     ToggleFullscreenLayout,
 }
 
-impl TryFrom<Action> for WorkerAction {
-    type Error = ();
-
-    fn try_from(action: Action) -> Result<Self, Self::Error> {
-        match action {
-            Action::Retile => Ok(Self::Retile),
-            Action::SwitchWorkspace(workspace) => Ok(Self::SwitchWorkspace(workspace)),
-            Action::WorkspaceBackAndForth => Ok(Self::WorkspaceBackAndForth),
-            Action::MoveFocused(workspace) => Ok(Self::MoveFocused(workspace)),
-            Action::MoveApp(bundle_id, workspace) => Ok(Self::MoveApp(bundle_id, workspace)),
-            Action::CycleFocus => Ok(Self::CycleFocus),
-            Action::Focus(direction) => Ok(Self::Focus(direction)),
-            Action::Reorder(direction) => Ok(Self::Reorder(direction)),
-            Action::ToggleLayout => Ok(Self::ToggleLayout),
-            Action::Resize(direction) => Ok(Self::Resize(direction)),
-            Action::Balance => Ok(Self::Balance),
-            Action::ToggleFullscreenLayout => Ok(Self::ToggleFullscreenLayout),
-            Action::ToggleAutomatic
-            | Action::OpenSettings
-            | Action::OpenAccessibility
-            | Action::CheckForUpdates
-            | Action::InstallUpdate
-            | Action::Terminate
-            | Action::ToggleLaunchAtLogin
-            | Action::Restart
-            | Action::Quit => Err(()),
+impl WorkerAction {
+    fn queued_acknowledgement(&self) -> String {
+        match self {
+            Self::Retile => "retile queued".into(),
+            Self::SwitchWorkspace(workspace) => format!("switch to workspace {workspace} queued"),
+            Self::WorkspaceBackAndForth => "workspace back-and-forth queued".into(),
+            Self::MoveFocused(workspace) => format!("move to workspace {workspace} queued"),
+            Self::MoveApp(_, workspace) => format!("move app to workspace {workspace} queued"),
+            Self::CycleFocus => "focus cycle queued".into(),
+            Self::Focus(_) => "focus queued".into(),
+            Self::Reorder(_) => "directional move queued".into(),
+            Self::ToggleLayout => "layout toggle queued".into(),
+            Self::Resize(_) => "resize queued".into(),
+            Self::Balance => "balance queued".into(),
+            Self::ToggleFullscreenLayout => "fullscreen layout toggle queued".into(),
         }
     }
 }
@@ -201,7 +187,21 @@ enum WorkerCommand {
     Stop,
 }
 
+/// Worker commands slower than this are logged; long Accessibility stalls
+/// otherwise look like Spaceman silently doing nothing.
+const SLOW_WORKER_COMMAND: Duration = Duration::from_secs(2);
+
 impl WorkerCommand {
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::Action(WorkerAction::Retile, _) => "retile",
+            Self::Action(..) => "action",
+            Self::Gesture(..) => "gesture",
+            Self::RestoreAll => "restore all",
+            Self::Stop => "stop",
+        }
+    }
+
     fn interruptible(&self) -> bool {
         matches!(
             self,
@@ -236,9 +236,6 @@ impl ExitIntent {
 }
 
 enum WorkerResult {
-    Started {
-        failed: usize,
-    },
     Status {
         result: Result<CycleStatus, String>,
         debug: Box<RuntimeDebug>,
@@ -310,7 +307,9 @@ pub fn run() -> Result<(), String> {
             quit_app(cx);
             return;
         }
-        sparkle::start(actions_sender.clone());
+        if let Err(error) = sparkle::start(actions_sender.clone()) {
+            log_event!("Sparkle unavailable: {error}");
+        }
         match login_item::status() {
             Ok(status) => status_item::set_launch_at_login(status),
             Err(error) => status_item::set_status(&format!("Launch at Login unavailable: {error}")),

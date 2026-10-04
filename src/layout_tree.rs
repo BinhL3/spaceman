@@ -79,15 +79,7 @@ impl LayoutTree {
         self.root = match self.root.clone() {
             Node::Split { axis, children } => Node::Split {
                 axis,
-                children: children
-                    .into_iter()
-                    .filter_map(|child| {
-                        retain(child.node, &retained).map(|node| Child {
-                            weight: child.weight,
-                            node,
-                        })
-                    })
-                    .collect(),
+                children: retain_children(children, &retained),
             },
             root => retain(root, &retained).unwrap_or(Node::Split {
                 axis: fallback_axis,
@@ -130,8 +122,7 @@ impl LayoutTree {
     }
 
     pub(crate) fn swap(&mut self, first: SlotId, second: SlotId) -> bool {
-        let slots = self.slots();
-        if first == second || !slots.contains(&first) || !slots.contains(&second) {
+        if first == second || !self.root.contains(first) || !self.root.contains(second) {
             return false;
         }
         swap_slots(&mut self.root, first, second);
@@ -159,7 +150,6 @@ impl LayoutTree {
             return false;
         };
         if !insert_relative(&mut remaining, target, extracted, direction) {
-            self.root = remaining;
             return false;
         }
         self.root = remaining;
@@ -318,18 +308,10 @@ impl LayoutTree {
         true
     }
 
-    fn take_slot(&mut self, slot: SlotId) -> Option<(Node, Node)> {
-        let placeholder = Node::Split {
-            axis: self.root_axis(),
-            children: Vec::new(),
-        };
-        let previous = std::mem::replace(&mut self.root, placeholder);
-        match extract(previous.clone(), slot) {
+    fn take_slot(&self, slot: SlotId) -> Option<(Node, Node)> {
+        match extract(self.root.clone(), slot) {
             (Some(remaining), Some(moved)) => Some((remaining, moved)),
-            _ => {
-                self.root = previous;
-                None
-            }
+            _ => None,
         }
     }
 
@@ -429,19 +411,20 @@ fn split_pair(direction: Direction, moved: Node, anchor: Node) -> Node {
 fn retain(node: Node, retained: &HashSet<SlotId>) -> Option<Node> {
     match node {
         Node::Leaf(slot) => retained.contains(&slot).then_some(Node::Leaf(slot)),
-        Node::Split { axis, children } => collapse(
-            axis,
-            children
-                .into_iter()
-                .filter_map(|child| {
-                    retain(child.node, retained).map(|node| Child {
-                        weight: child.weight,
-                        node,
-                    })
-                })
-                .collect(),
-        ),
+        Node::Split { axis, children } => collapse(axis, retain_children(children, retained)),
     }
+}
+
+fn retain_children(children: Vec<Child>, retained: &HashSet<SlotId>) -> Vec<Child> {
+    children
+        .into_iter()
+        .filter_map(|child| {
+            retain(child.node, retained).map(|node| Child {
+                weight: child.weight,
+                node,
+            })
+        })
+        .collect()
 }
 
 fn collapse(axis: Axis, mut children: Vec<Child>) -> Option<Node> {

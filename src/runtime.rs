@@ -28,10 +28,9 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn invalidate(&mut self) -> u64 {
+    pub fn invalidate(&mut self) {
         self.pending = None;
         self.revision = self.revision.saturating_add(1);
-        self.revision
     }
 
     pub fn begin_cycle(&mut self) -> CycleTicket {
@@ -50,10 +49,7 @@ impl Engine {
         observation: &NativeObservation,
         settings: &Settings,
     ) -> Result<Reconciliation, StaleCycle> {
-        if self.pending != Some(ticket)
-            || ticket.revision != self.revision
-            || observation.cycle != ticket.cycle
-        {
+        if self.pending != Some(ticket) || observation.cycle != ticket.cycle {
             return Err(StaleCycle {
                 ticket,
                 current_revision: self.revision,
@@ -274,22 +270,6 @@ impl Engine {
     }
 }
 
-pub(crate) fn flat_placements(
-    output: crate::Rect,
-    axis: crate::Axis,
-    slots: &[Slot],
-) -> Vec<Placement> {
-    slots
-        .iter()
-        .zip(LayoutTree::weighted_flat(axis, slots.iter()).placements(output))
-        .map(|(slot, (slot_id, frame))| Placement {
-            slot: slot_id,
-            window: slot.bound_window().cloned(),
-            frame,
-        })
-        .collect()
-}
-
 fn placements_for(layout: &LayoutTree, model: &Model, output: crate::Rect) -> Vec<Placement> {
     let slots: HashMap<_, _> = model
         .workspace
@@ -332,72 +312,6 @@ mod tests {
                 window_id: id as u32,
             }),
         }
-    }
-
-    #[test]
-    fn flat_placements_partition_without_gaps_or_rounding_loss() {
-        let placements = flat_placements(
-            Rect {
-                x: 10,
-                y: 20,
-                width: 101,
-                height: 50,
-            },
-            crate::Axis::Horizontal,
-            &[slot(1, 1), slot(2, 1), slot(3, 1)],
-        );
-
-        assert_eq!(placements[0].frame.width, 33);
-        assert_eq!(placements[1].frame.x, 43);
-        assert_eq!(placements[1].frame.width, 34);
-        assert_eq!(placements[2].frame.x, 77);
-        assert_eq!(placements[2].frame.width, 34);
-        assert_eq!(placements[2].frame.x + placements[2].frame.width, 111);
-    }
-
-    #[test]
-    fn flat_placements_reserve_unresolved_slots() {
-        let mut unresolved = slot(2, 1);
-        unresolved.binding = crate::BindingState::Unresolved {
-            previous: unresolved.bound_window().unwrap().clone(),
-            candidates: Vec::new(),
-            since: 4,
-        };
-
-        let placements = flat_placements(
-            Rect {
-                width: 100,
-                height: 50,
-                ..Rect::default()
-            },
-            crate::Axis::Horizontal,
-            &[slot(1, 1), unresolved],
-        );
-        assert_eq!(placements.len(), 2);
-        assert_eq!(placements[0].frame.width, 50);
-        assert_eq!(placements[1].frame.width, 50);
-        assert_eq!(placements[1].window, None);
-    }
-
-    #[test]
-    fn flat_placements_preserve_cumulative_weight_rounding() {
-        let placements = flat_placements(
-            Rect {
-                x: 10,
-                y: 20,
-                width: 50,
-                height: 101,
-            },
-            crate::Axis::Vertical,
-            &[slot(1, 2), slot(2, 3), slot(3, 5)],
-        );
-
-        assert_eq!(placements[0].frame.height, 20);
-        assert_eq!(placements[1].frame.y, 40);
-        assert_eq!(placements[1].frame.height, 30);
-        assert_eq!(placements[2].frame.y, 70);
-        assert_eq!(placements[2].frame.height, 51);
-        assert_eq!(placements[2].frame.y + placements[2].frame.height, 121);
     }
 
     #[test]

@@ -107,13 +107,7 @@ thread_local! {
     static PENDING_INSTALL: RefCell<Option<RcBlock<dyn Fn()>>> = const { RefCell::new(None) };
 }
 
-pub(crate) fn start(actions: Sender<Action>) {
-    if let Err(error) = start_inner(actions) {
-        eprintln!("Sparkle unavailable: {error}");
-    }
-}
-
-fn start_inner(actions: Sender<Action>) -> Result<(), String> {
+pub(crate) fn start(actions: Sender<Action>) -> Result<(), String> {
     let marker = MainThreadMarker::new().ok_or("Sparkle must start on the main thread")?;
     let Some(framework_path) = framework_path()? else {
         return Ok(());

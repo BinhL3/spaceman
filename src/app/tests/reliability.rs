@@ -36,7 +36,6 @@ fn floating_disposition_wins_over_pending_replacement_reservation() {
                     since: 0,
                 },
             });
-        runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
         runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
         assert_eq!(runtime.workspaces.workspace_of(&replacement), None);
         assert_eq!(
@@ -47,7 +46,7 @@ fn floating_disposition_wins_over_pending_replacement_reservation() {
 }
 
 #[test]
-fn parked_window_in_a_display_gap_is_not_reparked_or_quarantined() {
+fn parked_window_in_a_display_gap_is_not_reparked_or_exempted() {
     let mut displays = three_outputs().displays().to_vec();
     displays[1].frame.y = 900;
     let outputs = macos::DisplayOutputs::new(displays).unwrap();
@@ -81,14 +80,13 @@ fn parked_window_in_a_display_gap_is_not_reparked_or_quarantined() {
     );
     let workspace = WorkspaceId::new(7).unwrap();
     bind(&mut runtime, workspace, &window);
-    runtime.workspaces.refresh_ownership(workspace);
     for _ in 0..10 {
         runtime
             .cycle(outputs.clone(), &AtomicBool::new(false))
             .unwrap();
     }
     assert!(!runtime.repark_attempts.contains_key(&window));
-    assert!(!runtime.quarantined.contains(&window));
+    assert!(!runtime.parking_exempt.contains(&window));
     assert!(
         !runtime
             .backend
@@ -119,8 +117,6 @@ fn ambiguous_ghostty_replacement_stays_reserved_on_its_original_display() {
     let mut runtime = runtime(backend);
     bind(&mut runtime, WorkspaceId::ONE, &old);
     bind(&mut runtime, WorkspaceId::SIX, &other);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
-    runtime.workspaces.refresh_ownership(WorkspaceId::SIX);
     let cancelled = AtomicBool::new(false);
     runtime.cycle(outputs.clone(), &cancelled).unwrap();
     let slot = runtime
@@ -296,8 +292,8 @@ fn switch_keeps_outgoing_visible_when_incoming_reveal_never_arrives() {
             .is_err()
     );
     assert_eq!(
-        runtime.workspaces.active(DisplayRole::Main),
-        WorkspaceId::ONE
+        runtime.workspaces.active_for(&DisplaySelector::Main),
+        Some(WorkspaceId::ONE)
     );
     assert!(
         outputs
@@ -318,6 +314,9 @@ fn switch_keeps_outgoing_visible_when_incoming_reveal_never_arrives() {
     runtime
         .switch(target, outputs, &AtomicBool::new(false))
         .unwrap();
-    assert_eq!(runtime.workspaces.active(DisplayRole::Main), target);
+    assert_eq!(
+        runtime.workspaces.active_for(&DisplaySelector::Main),
+        Some(target)
+    );
     assert!(!runtime.parked.contains_key(&incoming));
 }

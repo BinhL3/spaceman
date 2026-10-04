@@ -12,6 +12,9 @@ This file is the current engineering contract. README and `docs/` describe curre
   `src/app/commands.rs`, `src/app/backend.rs`: the worker-thread `WorkspaceRuntime` — observation
   cycles and affinity, workspace switches, durable parking/restoration, focused-window commands, and
   the native/persistence backend seam. Tests live in `src/app/tests/`.
+- `src/window_memory.rs`, `src/app/memory.rs`: advisory, title-free per-bundle placement memory and
+  relaunch recall. `src/journal.rs`, `src/app/journal.rs`: bounded arrangement/anomaly journal and
+  the `spaceman doctor` summary.
 - `src/app/input.rs`: bounded ordered user input and geometry-based gesture tracking, independent
   of preview-worker availability. Main-thread pointer sampling must not make synchronous AX calls.
 - `src/desktop_ui.rs`, `src/status_item.rs`, `src/settings.rs`, `src/login_item.rs`, `src/sparkle.rs`,
@@ -124,6 +127,10 @@ Update README and linked docs in the same change when menu labels, shortcuts, CL
 schema, environment variables, state paths/schema, privacy output, supported windows/displays,
 packaging, startup, restoration, or uninstall behavior changes. Verify every command and label against
 source. Keep historical documents visibly marked and never rewrite them as current truth.
+
+`docs/features/` maps user-visible capabilities to entry points, existing checks, and known gaps.
+Consult it before changing user-facing behavior, and update the affected feature file when a shortcut,
+CLI command, rule semantic, restart/recovery outcome, or covering test changes.
 
 ## Release Rules
 

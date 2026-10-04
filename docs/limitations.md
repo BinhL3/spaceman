@@ -10,6 +10,10 @@ Spaceman is an experimental public preview, not a broadly qualified release.
   workspace-owned. Nonstandard or immovable panels remain global.
 - Native-tab identity has no perfect public identifier. Ambiguous transitions intentionally defer
   replacement and may need another cycle.
+- After a reboot or application relaunch, remembered placements restore each window's workspace and
+  floating state, not its tile position, weight, or nesting within the layout. Without titles,
+  windows of a multi-window application that reopen with identical frames are matched in creation
+  order and may swap workspaces.
 - Configuration supports ordered exact-match `float`/`route`/`ignore` rules and display assignment. It
   intentionally does not support orthogonal named app spaces or regex title matching.
 - Configuration is loaded only at process startup. `ctl restart` exits safely but does not relaunch.

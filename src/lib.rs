@@ -9,6 +9,7 @@ pub mod geometry;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod hotkeys;
+pub mod journal;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod keyboard_layout;
@@ -41,6 +42,7 @@ mod status_item;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod termination;
+pub mod window_memory;
 pub mod workspace;
 
 pub use geometry::{Axis, Rect};
@@ -51,7 +53,7 @@ pub use reconcile::{
     Decision, Placement, Reconciliation, ReconciliationEvidence, Settings, reconcile,
 };
 pub use runtime::{CycleTicket, Engine, StaleCycle};
-pub use workspace::{DisplayRole, DisplaySelector, WorkspaceId, Workspaces};
+pub use workspace::{DisplaySelector, WorkspaceId, Workspaces};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResizeDirection {

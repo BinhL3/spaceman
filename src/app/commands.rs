@@ -150,21 +150,20 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return Ok(self.status(0, &outputs));
         }
         let output = output_for(&self.workspaces, workspace, &outputs);
-        if !self
+        let failed = if self
             .workspaces
             .engine_mut(workspace)
             .resize_window(&window, frame, output)
         {
-            if !preview {
-                self.persist_workspace_state_if_changed()?;
-            }
-            return Ok(self.status(0, &outputs));
-        }
-        let layout = self.layout_workspace_during_drag(workspace, output, Some(&window), cancelled);
+            self.layout_workspace_during_drag(workspace, output, Some(&window), cancelled)
+                .failed
+        } else {
+            0
+        };
         if !preview {
             self.persist_workspace_state_if_changed()?;
         }
-        Ok(self.status(layout.failed, &outputs))
+        Ok(self.status(failed, &outputs))
     }
 
     pub(super) fn focus_relative(
@@ -174,7 +173,13 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
         let (focused, workspace) = self.focused_active_workspace(&outputs, cancelled, true)?;
-        let Some((_, target)) = self.spatial_target(&focused, direction, &outputs) else {
+        let Some(target) = self
+            .stacked_target(workspace, &focused, direction)
+            .or_else(|| {
+                self.spatial_target(&focused, direction, &outputs)
+                    .map(|(_, target)| target)
+            })
+        else {
             return Ok(self.status(0, &outputs));
         };
         if !self.backend.focus_window(&target) {
@@ -182,6 +187,28 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         }
         self.remember_fullscreen_focus(workspace, &target)?;
         Ok(self.status(0, &outputs))
+    }
+
+    /// Fullscreen Layout tiles share one frame, so spatial navigation cannot
+    /// tell them apart. Left/up and right/down instead step backward and
+    /// forward through the stable tile order, without wrapping, so the ends of
+    /// the stack still lead to the adjacent display.
+    fn stacked_target(
+        &self,
+        workspace: WorkspaceId,
+        focused: &crate::PhysicalWindowId,
+        direction: Direction,
+    ) -> Option<crate::PhysicalWindowId> {
+        if !self.workspaces.uses_fullscreen_layout(workspace) {
+            return None;
+        }
+        let windows = self.workspaces.engine(workspace).bound_windows();
+        let index = windows.iter().position(|window| window == focused)?;
+        let target = match direction {
+            Direction::Left | Direction::Up => index.checked_sub(1)?,
+            Direction::Right | Direction::Down => index + 1,
+        };
+        windows.get(target).cloned()
     }
 
     pub(super) fn cycle_focus(

@@ -1,0 +1,86 @@
+# Restarts And Recovery
+
+Quit, update, crash, or reboot without losing windows off-screen, and come back to the same
+workspaces and layouts; when something looks wrong, find out what happened.
+
+## Sub-features
+
+```ts
+Spaceman restarts, apps keep running                       // recover.resume
+└── workspace-state.json valid -> same workspaces, layouts, Fullscreen Layout, last focus
+
+Pause / quit / update / macOS asks Spaceman to terminate   // recover.restore-on-exit
+├── Every parked window moved back to its original frame
+├── Recovery entry removed only after the window server confirms arrival
+└── Restoration fails -> exit blocked, menu shows "Restoring windows · N failed", retries
+
+Crash or hard kill                                         // recover.crash
+├── Next launch, valid state   -> parked windows reveal as their workspaces become visible
+├── Next launch, invalid/missing state -> every parked window restored first
+└── Parked entry with no owner -> restored before automatic tiling resumes
+
+App relaunch or reboot (new process IDs)                   // recover.memory  (working tree only)
+├── Old slots for dead processes retire
+├── New instance owning no windows -> for 60 s its windows claim remembered placements
+│   ├── recall closes early once every placement is claimed or the app quits
+│   ├── frame match (8 px) first, then creation order
+│   └── route/ignore rules win; disabled/unmanaged workspaces skipped
+└── Arrangement changes recorded after holding 10 s (quitting does not shrink the memory)
+
+Diagnose                                                   // recover.doctor  (journal: working tree only)
+├── spaceman doctor [hours] -> starts, restorations, recalls, anomalies, last arrangement
+├── spaceman ctl debug / spaceman hud -> live sanitized model
+└── agent.log (+ .1) -> decisions, slow worker commands, worker errors (not routine cancellations)
+```
+
+## How To Get To It (User POV)
+
+```ts
+Menu bar: Disable Tiling (pause + restore) | Quit Spaceman
+CLI:      spaceman ctl pause | resume | quit | restart | status | debug
+          spaceman doctor [hours]      // reads files directly; works with the agent stopped
+          spaceman hud
+Implicit: macOS restart/log out/shutdown, Sparkle update, reopening Spaceman.app after a crash
+Files:    ~/Library/Application Support/Spaceman/
+          ├── workspace-state.json   parked-windows.json   window-memory.json
+          └── journal.jsonl(.1)      agent.log(.1)
+```
+
+See [Recovery](../recovery.md) for the safe manual procedure; never delete `parked-windows.json` first.
+
+## Existing Checks
+
+- Unit (FakeBackend): `parking.rs` `restore_all_repositions_windows_at_their_original_frames`,
+  `restore_keeps_recovery_frame_until_the_window_server_confirms_arrival`,
+  `persisted_frames_recover_after_a_simulated_crash`; `reliability.rs`
+  `startup_recovers_parked_window_missing_from_valid_workspace_state`;
+  `reconciliation.rs` `restored_slots_for_a_dead_application_are_retired`;
+  `startup.rs` `invalid_startup_metadata_falls_back_so_parked_recovery_can_start`.
+- Unit (FakeBackend), `memory.rs`: relaunch recall by frame then order, no recall for instances that
+  already own windows, route precedence, recall expiry, recall closing when the app quits,
+  settle-before-record. Pure tests in
+  `src/window_memory.rs` and `src/journal.rs` cover matching, eviction, diffing, debouncing,
+  rotation, and the doctor summary. None involves a real reboot.
+- Live harness (not run): `scripts/live-workspaces.sh` hard-kills the agent with a parked window and
+  checks startup recovery.
+- Observed (2026-10-01, two reinstalls via `scripts/install-app.sh`): restoration before exit
+  succeeded both times (one retry). The first restart silently dropped five hidden-workspace slots
+  when Accessibility could not find them right after launch, then stalled 81 s; fixed in the working
+  tree (slots are kept while the window server still lists the window). The second restart kept all
+  seven slots.
+
+## Gotchas
+
+- **Reboot is unproven.** No test or observation yet covers: Spaceman restoring before other apps
+  save their window positions at shutdown, or memory recall after login. On 2026-10-01 apps
+  relaunched at Spaceman's off-screen parking edge after a reboot, suggesting they saved parked
+  frames; read `spaceman doctor` after the next reboot.
+- Memory restores the workspace and floating state, not tile position or weight; multi-window apps
+  reopening with identical frames are matched by creation order and can swap workspaces.
+- Quitting an app on a hidden workspace and reopening it later sends it back there (parked), which
+  focus-follow then switches to. Intentional, but surprising.
+- `ctl restart` exits without relaunching.
+- `doctor` only sees disagreements between the model and the screen. A window that is consistently on
+  the wrong workspace looks healthy; its moves are in the journal diffs.
+- Startup stalls (9 minutes after the 2026-10-01 boot, 81 s after a reinstall) are not yet
+  explained; `slow worker command` lines in `agent.log` now record them.

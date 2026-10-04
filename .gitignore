@@ -11,3 +11,4 @@ target/
 .release.env
 *.p12
 *.provisionprofile
+/scratchpad/

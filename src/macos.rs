@@ -404,10 +404,7 @@ fn running_application_instances() -> Vec<AppInstanceId> {
         .filter_map(|index| {
             let application = applications.objectAtIndex(index);
             let pid = application.processIdentifier();
-            (pid > 0 && pid != std::process::id() as i32).then(|| AppInstanceId {
-                pid,
-                launched_at: launch_time(&application),
-            })
+            (pid > 0 && pid != std::process::id() as i32).then(|| app_instance(&application))
         })
         .collect()
 }
@@ -566,24 +563,7 @@ pub fn apply_while(
         .collect()
 }
 
-pub fn apply_managed_while(
-    placements: &[Placement],
-    settings: &Settings,
-    should_continue: impl FnMut() -> bool,
-) -> Vec<ApplyResult> {
-    apply_managed_while_excluding(placements, settings, None, should_continue)
-}
-
-pub fn apply_managed_during_drag(
-    placements: &[Placement],
-    settings: &Settings,
-    dragged: &PhysicalWindowId,
-    should_continue: impl FnMut() -> bool,
-) -> Vec<ApplyResult> {
-    apply_managed_while_excluding(placements, settings, Some(dragged), should_continue)
-}
-
-fn apply_managed_while_excluding(
+pub fn apply_managed(
     placements: &[Placement],
     settings: &Settings,
     dragged: Option<&PhysicalWindowId>,
@@ -769,11 +749,7 @@ fn position_matches(actual: Rect, target: Rect) -> bool {
 }
 
 pub fn focused_window() -> Option<PhysicalWindowId> {
-    let application = NSWorkspace::sharedWorkspace().frontmostApplication()?;
-    let id = AppInstanceId {
-        pid: application.processIdentifier(),
-        launched_at: launch_time(&application),
-    };
+    let id = frontmost_application()?;
     let element = application_element(id.pid);
     let focused = attribute::<AXUIElement>(&element, "AXFocusedWindow").ok()?;
     physical_window_id(&id, &focused)
@@ -781,10 +757,7 @@ pub fn focused_window() -> Option<PhysicalWindowId> {
 
 pub fn frontmost_application() -> Option<AppInstanceId> {
     let application = NSWorkspace::sharedWorkspace().frontmostApplication()?;
-    Some(AppInstanceId {
-        pid: application.processIdentifier(),
-        launched_at: launch_time(&application),
-    })
+    Some(app_instance(&application))
 }
 
 pub fn focus_window(id: &PhysicalWindowId) -> bool {
@@ -1026,6 +999,13 @@ pub fn is_process_incarnation_running(id: &AppInstanceId) -> bool {
     running
 }
 
+fn app_instance(application: &NSRunningApplication) -> AppInstanceId {
+    AppInstanceId {
+        pid: application.processIdentifier(),
+        launched_at: launch_time(application),
+    }
+}
+
 fn launch_time(application: &NSRunningApplication) -> u64 {
     application.launchDate().map_or(0, |date| {
         (date.timeIntervalSince1970() * 1000.0).round() as u64
@@ -1079,10 +1059,7 @@ fn observe_application(
         return None;
     }
 
-    let id = AppInstanceId {
-        pid,
-        launched_at: launch_time(application),
-    };
+    let id = app_instance(application);
     let bundle_id = application
         .bundleIdentifier()
         .map_or_else(|| "unknown".into(), |value| value.to_string());
@@ -1283,6 +1260,16 @@ pub fn window_server_frames() -> Option<HashMap<CGWindowID, Rect>> {
     window_server_frame_map(CGWindowListOption::OptionAll)
 }
 
+/// On-screen window-server IDs, front-most first.
+pub fn onscreen_window_order() -> Option<Vec<CGWindowID>> {
+    Some(
+        window_server_windows(CGWindowListOption::OptionOnScreenOnly)?
+            .into_iter()
+            .map(|window| window.id)
+            .collect(),
+    )
+}
+
 /// Window-server frames for every ordinary window currently on screen. A
 /// window listed here exists and is visible even when an app's Accessibility
 /// snapshot momentarily omits it.
@@ -1306,13 +1293,10 @@ fn window_server_windows(options: CGWindowListOption) -> Option<Vec<WindowServer
 }
 
 fn window_server_frame_map(options: CGWindowListOption) -> Option<HashMap<CGWindowID, Rect>> {
-    let list = CGWindowListCopyWindowInfo(options | CGWindowListOption::ExcludeDesktopElements, 0)?;
     Some(
-        cf_array_items::<CFDictionary>(&list)
-            .filter_map(|entry| {
-                let (_, id) = window_server_identity(entry)?;
-                Some((id, window_server_bounds(entry)?))
-            })
+        window_server_windows(options)?
+            .into_iter()
+            .map(|window| (window.id, window.frame))
             .collect(),
     )
 }

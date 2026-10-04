@@ -3,15 +3,19 @@ use super::*;
 /// How long a fresh park must settle before an on-screen observation of that
 /// window is trusted as a genuine reappearance rather than in-flight movement.
 const PARK_SETTLE_GRACE: Duration = Duration::from_secs(2);
-/// Two confirmed self-un-parks within this window quarantines the window:
+/// Accessibility lookups fail transiently, notably right after Spaceman or an
+/// application launches. A window the window server still lists keeps its
+/// slot for this long before an Accessibility "gone" is believed.
+pub(super) const INACCESSIBLE_GRACE: Duration = Duration::from_secs(30);
+/// Two confirmed self-un-parks within this window exempt the window from parking:
 /// its application insists on managing it, and fighting back loses.
-const QUARANTINE_WINDOW: Duration = Duration::from_secs(300);
+const PARKING_EXEMPT_WINDOW: Duration = Duration::from_secs(300);
 /// A restore is confirmed when the window server reports the window near its
 /// target. Loose on purpose: apps may clamp the exact position, while a
 /// still-parked window sits a full display dimension away.
 pub(super) const RESTORE_CONFIRM_TOLERANCE: i32 = 64;
 /// After this many undone re-parks in a row the window's reappearance is
-/// honored (re-homed) instead of fought; repeated honors quarantine it.
+/// honored (re-homed) instead of fought; repeated honors exempt it from parking.
 pub(super) const REPARK_ATTEMPT_LIMIT: u8 = 3;
 
 /// Shared per-cycle context for parking decisions.
@@ -68,7 +72,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
 
     /// Honor a window that will not stay parked: drop the recovery frame and
     /// re-home it to the workspace it insists on appearing on. A second honor
-    /// within [`QUARANTINE_WINDOW`] quarantines the window for the session.
+    /// within [`PARKING_EXEMPT_WINDOW`] exempts it from further parking.
     fn honor_reappearance(
         &mut self,
         window: &crate::PhysicalWindowId,
@@ -88,24 +92,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return;
         }
         self.recent_heals
-            .retain(|_, healed_at| healed_at.elapsed() < QUARANTINE_WINDOW);
-        if self
+            .retain(|_, healed_at| healed_at.elapsed() < PARKING_EXEMPT_WINDOW);
+        let repeatedly_unparked = self
             .recent_heals
             .insert(window.clone(), Instant::now())
-            .is_some()
-        {
-            // Second confirmed self-un-park in a short window: the app insists
-            // on managing this window. Stop fighting it for the session.
-            log_event!(
-                "quarantine: {:?} keeps un-parking itself; leaving it unmanaged",
-                window
-            );
-            if let Some(owner) = self.workspaces.workspace_of_any(window) {
-                self.forget_window(owner, window);
-            }
-            self.quarantined.insert(window.clone());
-            return;
-        }
+            .is_some();
         if self.workspaces.floating_workspace_of(window).is_some() {
             log_event!(
                 "heal: re-home floating {:?} -> workspace {}",
@@ -123,6 +114,65 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 target
             );
         }
+        if repeatedly_unparked {
+            // The app insists on managing its saved position. Keep workspace
+            // ownership and tiling, but stop trying to hide this physical
+            // window across workspace switches for the rest of the session.
+            log_event!(
+                "parking exemption: {:?} keeps un-parking itself; leaving it visible",
+                window
+            );
+            self.parking_exempt.insert(window.clone());
+        }
+    }
+
+    /// Recover a newly identified frontmost window that was relaunched at the
+    /// exact one-pixel edge position produced by Spaceman parking. Its former
+    /// physical identity (and recovery entry) no longer exists, so revealing it
+    /// lets normal reconciliation adopt and tile it again.
+    pub(super) fn recover_frontmost_stale_parked_window(
+        &mut self,
+        outputs: &macos::DisplayOutputs,
+        frontmost: Option<&AppInstanceId>,
+        focused: Option<&crate::PhysicalWindowId>,
+        server_frames: &HashMap<u32, crate::Rect>,
+    ) {
+        let Some(window) = focused.filter(|window| frontmost == Some(&window.app)) else {
+            return;
+        };
+        if self.parked.contains_key(window) || self.workspaces.workspace_of_any(window).is_some() {
+            return;
+        }
+        let Some(frame) = server_frames.get(&window.window_id).copied() else {
+            return;
+        };
+        let displays = outputs.frames().collect::<Vec<_>>();
+        if displays
+            .iter()
+            .any(|display| display.contains_center(frame))
+        {
+            return;
+        }
+        let Some(output) = outputs.displays().iter().find_map(|display| {
+            let parked = crate::geometry::parked_frame(display.frame, &displays, frame);
+            parked
+                .position_approximately_equals(frame, 1)
+                .then_some(display.frame)
+        }) else {
+            return;
+        };
+        let target = crate::Rect {
+            x: output.x,
+            y: output.y,
+            ..frame
+        };
+        log_event!(
+            "recover stale parked focus: {:?} from {:?} to {:?}",
+            window,
+            frame,
+            target
+        );
+        let _ = self.backend.set_position(window, target);
     }
 
     pub(super) fn park_inactive(
@@ -149,15 +199,30 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             if cancelled.load(Ordering::Acquire) {
                 return;
             }
+            if self.parking_exempt.contains(&window) {
+                continue;
+            }
             let output = output_for(&self.workspaces, workspace, outputs);
             if let Some(original) = self.parked.get(&window).copied() {
                 self.repark_drifted_window(&window, original, output, &context);
                 continue;
             }
             let frame = match self.backend.frame(&window) {
-                Ok(frame) => frame,
+                Ok(frame) => {
+                    self.inaccessible_since.remove(&window);
+                    frame
+                }
                 Err(macos::WindowAccessError::Gone) => {
-                    self.forget_window(workspace, &window);
+                    if self.confirm_gone(&window) {
+                        log_event!(
+                            "forget {:?} (workspace {}): window closed",
+                            window,
+                            workspace
+                        );
+                        self.forget_window(workspace, &window);
+                    } else {
+                        *failed += 1;
+                    }
                     continue;
                 }
                 Err(macos::WindowAccessError::Unavailable) => {
@@ -183,6 +248,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if candidates.is_empty() {
             return;
         }
+        self.order_back_to_front(&mut candidates, |(_, window, ..)| window.window_id);
         for (_, window, frame, _) in &candidates {
             self.parked.insert(window.clone(), *frame);
         }
@@ -203,7 +269,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 workspace,
                 frame
             );
-            match self.backend.set_position(&window, target) {
+            let mut outcome = self.backend.set_position(&window, target);
+            if outcome == macos::ApplyOutcome::Gone && !self.confirm_gone(&window) {
+                outcome = macos::ApplyOutcome::Unavailable;
+            }
+            match outcome {
                 macos::ApplyOutcome::Applied => {
                     self.recently_parked.insert(window.clone(), Instant::now());
                 }
@@ -214,11 +284,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 }
                 _ => {
                     *failed += 1;
-                    if matches!(
-                        self.restore_window_uncommitted(&window),
-                        macos::ApplyOutcome::Applied | macos::ApplyOutcome::Gone
-                    ) && !self.parked.contains_key(&window)
-                    {
+                    // Only an applied or gone restore retires the entry.
+                    self.restore_window_uncommitted(&window);
+                    if !self.parked.contains_key(&window) {
                         restored.push((window, frame));
                     }
                 }
@@ -271,8 +339,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         *attempts += 1;
         if *attempts > REPARK_ATTEMPT_LIMIT {
             // The app undoes every park. Fighting on would flicker forever;
-            // honor the reappearance instead (re-home, then quarantine if it
-            // keeps happening).
+            // honor the reappearance instead (re-home, then exempt it from
+            // parking if it keeps happening).
             log_event!(
                 "re-park escalation: {:?} will not stay parked after {} attempts",
                 window,
@@ -302,6 +370,38 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         }
     }
 
+    /// Whether an Accessibility "gone" for `window` is real: the window
+    /// server no longer lists it, its process exited, or Accessibility has
+    /// failed to find it for [`INACCESSIBLE_GRACE`].
+    fn confirm_gone(&mut self, window: &crate::PhysicalWindowId) -> bool {
+        if self.backend.window_server_frame(window).is_none()
+            || !self.backend.is_process_running(&window.app)
+        {
+            self.inaccessible_since.remove(window);
+            return true;
+        }
+        let since = *self
+            .inaccessible_since
+            .entry(window.clone())
+            .or_insert_with(|| {
+                log_event!(
+                    "keeping {:?}: Accessibility cannot find it but the window server still lists it",
+                    window
+                );
+                Instant::now()
+            });
+        if since.elapsed() < INACCESSIBLE_GRACE {
+            return false;
+        }
+        log_event!(
+            "forgetting {:?}: inaccessible for {}s although the window server lists it",
+            window,
+            INACCESSIBLE_GRACE.as_secs()
+        );
+        self.inaccessible_since.remove(window);
+        true
+    }
+
     pub(super) fn restore_all(&mut self) -> usize {
         let parked: Vec<_> = self.parked.keys().cloned().collect();
         self.restore_windows(parked)
@@ -313,13 +413,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             let Some(frame) = self.parked.get(window).copied() else {
                 continue;
             };
-            match self.restore_window_uncommitted(window) {
-                macos::ApplyOutcome::Applied | macos::ApplyOutcome::Gone
-                    if !self.parked.contains_key(window) =>
-                {
-                    restored.push((window.clone(), frame));
-                }
-                _ => {}
+            self.restore_window_uncommitted(window);
+            if !self.parked.contains_key(window) {
+                restored.push((window.clone(), frame));
             }
         }
         self.persist_removals_or_rollback(restored);
@@ -351,6 +447,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         output: crate::Rect,
         outputs: &macos::DisplayOutputs,
     ) -> macos::ApplyOutcome {
+        if self.parking_exempt.contains(window) {
+            return macos::ApplyOutcome::Applied;
+        }
         let frame = match self.backend.frame(window) {
             Ok(frame) => frame,
             Err(macos::WindowAccessError::Gone) => return macos::ApplyOutcome::Gone,

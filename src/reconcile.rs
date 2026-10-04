@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AppInstanceId, AppObservation, BindingState, Model, NativeObservation, PhysicalWindowId, Rect,
-    Slot, SlotId, runtime::flat_placements,
+    Slot, SlotId, layout_tree::LayoutTree,
 };
 
 const GHOSTTY_REPLACEMENT_SETTLE_CYCLES: u64 = 3;
@@ -419,10 +419,110 @@ fn insert_windows(model: &mut Model, windows: &[PhysicalWindowId], decisions: &m
     }
 }
 
+fn flat_placements(output: Rect, axis: crate::Axis, slots: &[Slot]) -> Vec<Placement> {
+    slots
+        .iter()
+        .zip(LayoutTree::weighted_flat(axis, slots.iter()).placements(output))
+        .map(|(slot, (slot_id, frame))| Placement {
+            slot: slot_id,
+            window: slot.bound_window().cloned(),
+            frame,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{ObservedApplication, ObservedWindow};
+
+    fn weighted_slot(id: u64, weight: u32) -> Slot {
+        Slot {
+            id: SlotId(id),
+            weight,
+            binding: BindingState::Bound(PhysicalWindowId {
+                app: AppInstanceId {
+                    pid: 1,
+                    launched_at: 1,
+                },
+                window_id: id as u32,
+            }),
+        }
+    }
+
+    #[test]
+    fn flat_placements_partition_without_gaps_or_rounding_loss() {
+        let placements = flat_placements(
+            Rect {
+                x: 10,
+                y: 20,
+                width: 101,
+                height: 50,
+            },
+            crate::Axis::Horizontal,
+            &[
+                weighted_slot(1, 1),
+                weighted_slot(2, 1),
+                weighted_slot(3, 1),
+            ],
+        );
+
+        assert_eq!(placements[0].frame.width, 33);
+        assert_eq!(placements[1].frame.x, 43);
+        assert_eq!(placements[1].frame.width, 34);
+        assert_eq!(placements[2].frame.x, 77);
+        assert_eq!(placements[2].frame.width, 34);
+        assert_eq!(placements[2].frame.x + placements[2].frame.width, 111);
+    }
+
+    #[test]
+    fn flat_placements_reserve_unresolved_slots() {
+        let mut unresolved = weighted_slot(2, 1);
+        unresolved.binding = BindingState::Unresolved {
+            previous: unresolved.bound_window().unwrap().clone(),
+            candidates: Vec::new(),
+            since: 4,
+        };
+
+        let placements = flat_placements(
+            Rect {
+                width: 100,
+                height: 50,
+                ..Rect::default()
+            },
+            crate::Axis::Horizontal,
+            &[weighted_slot(1, 1), unresolved],
+        );
+        assert_eq!(placements.len(), 2);
+        assert_eq!(placements[0].frame.width, 50);
+        assert_eq!(placements[1].frame.width, 50);
+        assert_eq!(placements[1].window, None);
+    }
+
+    #[test]
+    fn flat_placements_preserve_cumulative_weight_rounding() {
+        let placements = flat_placements(
+            Rect {
+                x: 10,
+                y: 20,
+                width: 50,
+                height: 101,
+            },
+            crate::Axis::Vertical,
+            &[
+                weighted_slot(1, 2),
+                weighted_slot(2, 3),
+                weighted_slot(3, 5),
+            ],
+        );
+
+        assert_eq!(placements[0].frame.height, 20);
+        assert_eq!(placements[1].frame.y, 40);
+        assert_eq!(placements[1].frame.height, 30);
+        assert_eq!(placements[2].frame.y, 70);
+        assert_eq!(placements[2].frame.height, 51);
+        assert_eq!(placements[2].frame.y + placements[2].frame.height, 121);
+    }
 
     const OUTPUT: Rect = Rect {
         x: 0,

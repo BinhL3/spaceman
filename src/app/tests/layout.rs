@@ -17,7 +17,6 @@ fn ghostty_native_tab_replacement_preserves_workspace_and_fullscreen_layout() {
     .unwrap();
     let mut runtime = runtime_with_config(backend, config);
     bind(&mut runtime, WorkspaceId::ONE, &previous);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
     runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
     runtime
         .toggle_fullscreen_layout(outputs(), &AtomicBool::new(false))
@@ -258,7 +257,6 @@ fn fullscreen_layout_activates_persisted_cross_app_focus_after_restart() {
             binding: BindingState::Bound(window.clone()),
         });
     }
-    persisted.refresh_ownership(WorkspaceId::ONE);
     persisted.remember_focus(WorkspaceId::ONE, &focused);
     persisted.set_fullscreen_layout(WorkspaceId::ONE, true);
     let mut backend = FakeBackend {
@@ -336,7 +334,6 @@ fn failed_fullscreen_focus_restore_does_not_fight_later_focus() {
             binding: BindingState::Bound(window.clone()),
         });
     }
-    persisted.refresh_ownership(WorkspaceId::ONE);
     persisted.remember_focus(WorkspaceId::ONE, &persisted_focus);
     persisted.set_fullscreen_layout(WorkspaceId::ONE, true);
     let mut backend = FakeBackend {
@@ -702,46 +699,6 @@ fn perpendicular_reorder_creates_a_mixed_split_for_three_windows() {
 }
 
 #[test]
-fn switching_away_and_back_preserves_fullscreen_layout() {
-    let first = window(10);
-    let focused = window(20);
-    let incoming = window(30);
-    let outputs = outputs();
-    let displays = outputs.frames().collect::<Vec<_>>();
-    let incoming_normal = frame(100);
-    let incoming_parked =
-        crate::geometry::parked_frame(outputs.main().frame, &displays, incoming_normal);
-    let mut backend = FakeBackend {
-        focused: Some(focused.clone()),
-        ..FakeBackend::default()
-    };
-    backend.frames.insert(first.clone(), frame(50));
-    backend.frames.insert(focused.clone(), frame(500));
-    backend.frames.insert(incoming.clone(), incoming_parked);
-    let mut parked = HashMap::new();
-    parked.insert(incoming.clone(), incoming_normal);
-    let mut runtime = WorkspaceRuntime::with_backend(ManagementScope::Both, backend, parked);
-    bind(&mut runtime, WorkspaceId::ONE, &first);
-    bind(&mut runtime, WorkspaceId::ONE, &focused);
-    let target = WorkspaceId::new(2).unwrap();
-    bind(&mut runtime, target, &incoming);
-    let cancelled = AtomicBool::new(false);
-
-    runtime
-        .toggle_fullscreen_layout(outputs.clone(), &cancelled)
-        .unwrap();
-    runtime.switch(target, outputs.clone(), &cancelled).unwrap();
-    runtime
-        .switch(WorkspaceId::ONE, outputs.clone(), &cancelled)
-        .unwrap();
-
-    assert!(runtime.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
-    assert_eq!(runtime.backend.frames[&first], outputs.main().frame);
-    assert_eq!(runtime.backend.frames[&focused], outputs.main().frame);
-    assert_eq!(runtime.backend.focused, Some(focused));
-}
-
-#[test]
 fn switching_away_and_back_restores_fullscreen_layout_focus() {
     let first = window(10);
     let focused = window(20);
@@ -807,4 +764,88 @@ fn selecting_an_active_fullscreen_workspace_preserves_its_current_focus() {
         .unwrap();
 
     assert_eq!(runtime.backend.focused, Some(focused));
+}
+
+#[test]
+fn leaving_a_fullscreen_workspace_parks_the_front_window_last() {
+    // Every Fullscreen Layout tile shares one frame. Parking the front window
+    // first would uncover the stacked windows beneath it mid-switch.
+    let back = window(10);
+    let middle = window(20);
+    let front = window(30);
+    let outputs = outputs();
+    let mut backend = FakeBackend {
+        focused: Some(front.clone()),
+        // Front-most first, as the window server reports it.
+        stacking: Some(vec![30, 999, 20, 10]),
+        ..FakeBackend::default()
+    };
+    for window in [&back, &middle, &front] {
+        backend.frames.insert(window.clone(), frame(50));
+    }
+    let mut runtime = runtime(backend);
+    for window in [&front, &back, &middle] {
+        bind(&mut runtime, WorkspaceId::ONE, window);
+    }
+    let cancelled = AtomicBool::new(false);
+    runtime
+        .toggle_fullscreen_layout(outputs.clone(), &cancelled)
+        .unwrap();
+    runtime.backend.calls.clear();
+
+    runtime
+        .switch(WorkspaceId::new(2).unwrap(), outputs, &cancelled)
+        .unwrap();
+
+    let parked: Vec<_> = runtime
+        .backend
+        .calls
+        .iter()
+        .filter_map(|call| match call {
+            BackendCall::SetPosition(window, _) => Some(window.window_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(parked, vec![10, 20, 30]);
+}
+
+#[test]
+fn directional_focus_steps_through_a_fullscreen_stack_then_crosses_displays() {
+    let first = window(10);
+    let second = window(20);
+    let third = window(30);
+    let neighbor = window(40);
+    let outputs = outputs();
+    let mut backend = FakeBackend {
+        focused: Some(second.clone()),
+        ..FakeBackend::default()
+    };
+    for window in [&first, &second, &third] {
+        backend.frames.insert(window.clone(), frame(50));
+    }
+    backend.frames.insert(neighbor.clone(), frame(1200));
+    let mut runtime = runtime(backend);
+    for window in [&first, &second, &third] {
+        bind(&mut runtime, WorkspaceId::ONE, window);
+    }
+    bind(&mut runtime, WorkspaceId::SIX, &neighbor);
+    let cancelled = AtomicBool::new(false);
+    runtime
+        .toggle_fullscreen_layout(outputs.clone(), &cancelled)
+        .unwrap();
+    let focus = |runtime: &mut WorkspaceRuntime<FakeBackend>, direction| {
+        runtime
+            .focus_relative(direction, outputs.clone(), &cancelled)
+            .unwrap();
+        runtime.backend.focused.clone().unwrap().window_id
+    };
+
+    assert_eq!(focus(&mut runtime, Direction::Left), 10);
+    // The start of the stack has no previous tile and nothing lies left.
+    assert_eq!(focus(&mut runtime, Direction::Up), 10);
+    assert_eq!(focus(&mut runtime, Direction::Right), 20);
+    assert_eq!(focus(&mut runtime, Direction::Down), 30);
+    // The end of the stack continues to the adjacent display.
+    assert_eq!(focus(&mut runtime, Direction::Right), 40);
+    assert!(runtime.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
 }

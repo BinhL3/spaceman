@@ -50,6 +50,23 @@ Do not edit physical window IDs or frames casually. They are recovery metadata, 
 configuration surface. A stale entry for a window that no longer exists is harmless compared with
 losing metadata for a live parked window.
 
+## Diagnosing Odd Arrangements
+
+When windows end up on the wrong workspace, stay visible after a switch, or vanish, run:
+
+```sh
+spaceman doctor        # the whole journal
+spaceman doctor 24     # the last 24 hours
+```
+
+The arrangement journal (`journal.jsonl`) records a full snapshot of every window's owner, frame, and
+parked state at startup and every 30 minutes, a diff whenever that arrangement changes, and the
+start and end of each model/screen disagreement that lasts three seconds. It includes agent starts,
+exit restorations, and remembered placements recalled after relaunches, so a reboot that lost
+placements shows whether restoration ran before exit and which windows were recalled afterwards.
+See [Controls](controls.md#cli) for the anomaly kinds. Share journal excerpts only after reviewing them:
+they contain bundle identifiers and geometry, though never window titles.
+
 ## Safe Uninstall
 
 1. Turn off `Launch at Login` in Spaceman Settings and confirm it is disabled.

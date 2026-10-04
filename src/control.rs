@@ -11,37 +11,28 @@ use std::{
     time::Duration,
 };
 
-use crate::{Direction, ResizeDirection, WorkspaceId};
+use crate::{ResizeDirection, WorkspaceId, app::WorkerAction};
 
 const MAX_REQUEST_BYTES: u64 = 4 * 1024;
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_millis(250);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(6);
 
-pub const COMMAND_USAGE: &str = "status|debug|switch WORKSPACE|back-and-forth|move WORKSPACE|move-app ID WORKSPACE|focus DIR|move-direction DIR|layout|resize shrink|resize grow|balance|pause|resume|retile|restart|quit";
+pub const COMMAND_USAGE: &str = "status|debug|switch WORKSPACE|back-and-forth|move WORKSPACE|move-app ID WORKSPACE|focus DIR|focus next|move-direction DIR|layout|fullscreen|resize shrink|resize grow|balance|pause|resume|retile|restart|quit";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Command {
+pub(crate) enum Command {
     Status,
     Debug,
-    Switch(WorkspaceId),
-    WorkspaceBackAndForth,
-    Move(WorkspaceId),
-    MoveApp(String, WorkspaceId),
-    Focus(Direction),
-    MoveDirection(Direction),
-    Layout,
-    Resize(ResizeDirection),
-    Balance,
+    Queue(WorkerAction),
     Pause,
     Resume,
-    Retile,
     Restart,
     Quit,
 }
 
-pub struct Request {
-    pub command: Command,
+pub(crate) struct Request {
+    pub(crate) command: Command,
     response: Sender<Result<String, String>>,
 }
 
@@ -62,7 +53,7 @@ impl Drop for Server {
     }
 }
 
-pub fn listen(requests: Sender<Request>) -> Result<Server, String> {
+pub(crate) fn listen(requests: Sender<Request>) -> Result<Server, String> {
     let path = socket_path()?;
     listen_at(path, requests)
 }
@@ -145,16 +136,14 @@ fn serve(listener: UnixListener, requests: Sender<Request>) {
         };
         let _ = stream.set_read_timeout(Some(REQUEST_READ_TIMEOUT));
         let _ = stream.set_write_timeout(Some(REQUEST_READ_TIMEOUT));
-        let response = match read_command(&stream) {
-            Ok(line) => parse_line(line.trim()).and_then(|command| {
-                let (response, receiver) = channel();
-                requests
-                    .send(Request { command, response })
-                    .map_err(|_| "Spaceman agent is stopping".to_string())?;
-                receive_response(receiver)
-            }),
-            Err(error) => Err(format!("failed to read control command: {error}")),
-        };
+        let response = read_command(&stream).and_then(|line| {
+            let command = parse_line(line.trim())?;
+            let (response, receiver) = channel();
+            requests
+                .send(Request { command, response })
+                .map_err(|_| "Spaceman agent is stopping".to_string())?;
+            receive_response(receiver)
+        });
         let (prefix, message) = match response {
             Ok(message) => ("ok", message),
             Err(error) => ("error", error),
@@ -190,74 +179,82 @@ fn socket_path() -> Result<PathBuf, String> {
 
 fn parse_line(line: &str) -> Result<Command, String> {
     let parts = line.split_whitespace().collect::<Vec<_>>();
-    match parts.as_slice() {
-        ["status"] => Ok(Command::Status),
-        ["debug"] => Ok(Command::Debug),
-        ["switch", workspace] => WorkspaceId::parse(workspace).map(Command::Switch),
-        ["back-and-forth"] => Ok(Command::WorkspaceBackAndForth),
-        ["move", workspace] => WorkspaceId::parse(workspace).map(Command::Move),
-        ["move-app", bundle_id, workspace] => WorkspaceId::parse(workspace)
-            .map(|workspace| Command::MoveApp((*bundle_id).into(), workspace)),
-        ["focus", direction] => direction.parse().map(Command::Focus),
-        ["move-direction", direction] => direction.parse().map(Command::MoveDirection),
-        ["layout"] => Ok(Command::Layout),
-        ["resize", "shrink"] => Ok(Command::Resize(ResizeDirection::Shrink)),
-        ["resize", "grow"] => Ok(Command::Resize(ResizeDirection::Grow)),
-        ["balance"] => Ok(Command::Balance),
-        ["pause"] => Ok(Command::Pause),
-        ["resume"] => Ok(Command::Resume),
-        ["retile"] => Ok(Command::Retile),
-        ["restart"] => Ok(Command::Restart),
-        ["quit"] => Ok(Command::Quit),
-        _ => Err(format!("expected {COMMAND_USAGE}")),
-    }
+    let action = match parts.as_slice() {
+        ["status"] => return Ok(Command::Status),
+        ["debug"] => return Ok(Command::Debug),
+        ["pause"] => return Ok(Command::Pause),
+        ["resume"] => return Ok(Command::Resume),
+        ["restart"] => return Ok(Command::Restart),
+        ["quit"] => return Ok(Command::Quit),
+        ["switch", workspace] => WorkerAction::SwitchWorkspace(WorkspaceId::parse(workspace)?),
+        ["back-and-forth"] => WorkerAction::WorkspaceBackAndForth,
+        ["move", workspace] => WorkerAction::MoveFocused(WorkspaceId::parse(workspace)?),
+        ["move-app", bundle_id, workspace] => {
+            WorkerAction::MoveApp((*bundle_id).into(), WorkspaceId::parse(workspace)?)
+        }
+        ["focus", "next"] => WorkerAction::CycleFocus,
+        ["focus", direction] => WorkerAction::Focus(direction.parse()?),
+        ["move-direction", direction] => WorkerAction::Reorder(direction.parse()?),
+        ["layout"] => WorkerAction::ToggleLayout,
+        ["fullscreen"] => WorkerAction::ToggleFullscreenLayout,
+        ["resize", "shrink"] => WorkerAction::Resize(ResizeDirection::Shrink),
+        ["resize", "grow"] => WorkerAction::Resize(ResizeDirection::Grow),
+        ["balance"] => WorkerAction::Balance,
+        ["retile"] => WorkerAction::Retile,
+        _ => return Err(format!("expected {COMMAND_USAGE}")),
+    };
+    Ok(Command::Queue(action))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Direction;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn parses_control_commands() {
+        let queued = |line| match parse_line(line).unwrap() {
+            Command::Queue(action) => action,
+            command => panic!("{line:?} parsed as {command:?}"),
+        };
         assert_eq!(parse_line("status").unwrap(), Command::Status);
         assert_eq!(
-            parse_line("back-and-forth").unwrap(),
-            Command::WorkspaceBackAndForth
+            queued("back-and-forth"),
+            WorkerAction::WorkspaceBackAndForth
         );
         assert_eq!(
-            parse_line("switch 10").unwrap(),
-            Command::Switch(WorkspaceId::new(10).unwrap())
+            queued("switch 10"),
+            WorkerAction::SwitchWorkspace(WorkspaceId::new(10).unwrap())
         );
         assert!(parse_line("move 11").is_err());
         assert_eq!(
-            parse_line("switch D").unwrap(),
-            Command::Switch(WorkspaceId::named('D').unwrap())
+            queued("switch D"),
+            WorkerAction::SwitchWorkspace(WorkspaceId::named('D').unwrap())
         );
         assert_eq!(
-            parse_line("move-app com.example.App 3").unwrap(),
-            Command::MoveApp("com.example.App".into(), WorkspaceId::new(3).unwrap())
+            queued("move-app com.example.App 3"),
+            WorkerAction::MoveApp("com.example.App".into(), WorkspaceId::new(3).unwrap())
         );
         assert!(parse_line("resume now").is_err());
         assert_eq!(parse_line("restart").unwrap(), Command::Restart);
+        assert_eq!(queued("focus left"), WorkerAction::Focus(Direction::Left));
         assert_eq!(
-            parse_line("focus left").unwrap(),
-            Command::Focus(Direction::Left)
+            queued("move-direction right"),
+            WorkerAction::Reorder(Direction::Right)
+        );
+        assert_eq!(queued("layout"), WorkerAction::ToggleLayout);
+        assert_eq!(
+            queued("resize shrink"),
+            WorkerAction::Resize(ResizeDirection::Shrink)
         );
         assert_eq!(
-            parse_line("move-direction right").unwrap(),
-            Command::MoveDirection(Direction::Right)
+            queued("resize grow"),
+            WorkerAction::Resize(ResizeDirection::Grow)
         );
-        assert_eq!(parse_line("layout").unwrap(), Command::Layout);
-        assert_eq!(
-            parse_line("resize shrink").unwrap(),
-            Command::Resize(ResizeDirection::Shrink)
-        );
-        assert_eq!(
-            parse_line("resize grow").unwrap(),
-            Command::Resize(ResizeDirection::Grow)
-        );
-        assert_eq!(parse_line("balance").unwrap(), Command::Balance);
+        assert_eq!(queued("balance"), WorkerAction::Balance);
+        assert_eq!(queued("focus next"), WorkerAction::CycleFocus);
+        assert_eq!(queued("fullscreen"), WorkerAction::ToggleFullscreenLayout);
     }
 
     #[test]

@@ -6,10 +6,6 @@ use super::*;
 /// starting a huddle) and briefly report a partial window list; one such
 /// snapshot must not retire a slot.
 pub(super) const OMISSION_SETTLE: Duration = Duration::from_secs(2);
-/// How long a workspace switch waits for slow applications to actually move
-/// their windows on screen before the outgoing workspace is hidden. Keeps the
-/// bare desktop from ever showing during a switch.
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FrozenWindowAffinity {
     Owned(WorkspaceId),
@@ -17,9 +13,11 @@ enum FrozenWindowAffinity {
     AmbiguousReplacement,
     Floating,
     ExplicitRoute(WorkspaceId),
+    /// The app's existing workspace, or a remembered placement a relaunched
+    /// application's window claimed.
     Inferred(WorkspaceId),
     CurrentDisplay,
-    /// Never tiled, owned, or parked (ignore rule or quarantine).
+    /// Never tiled, owned, or parked (ignore rule or parking exemption).
     Ignored,
 }
 
@@ -147,6 +145,12 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let server_snapshot = self.backend.window_server_frames();
         let empty_server_frames = HashMap::new();
         let server_frames = server_snapshot.as_ref().unwrap_or(&empty_server_frames);
+        self.recover_frontmost_stale_parked_window(
+            &outputs,
+            frontmost.as_ref(),
+            focused.as_ref(),
+            server_frames,
+        );
         self.restore_visible(&visible, cancelled, &mut failed);
         self.park_inactive(&outputs, &visible, server_frames, cancelled, &mut failed);
         if cancelled.load(Ordering::Acquire) {
@@ -214,6 +218,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         {
             self.workspaces.remember_focus(workspace, focused);
         }
+        self.record_window_memory(server_frames);
+        self.journal.observation = Some(observation);
         self.persist_workspace_state_if_changed()?;
         Ok(self.status_for_visible(failed, &visible))
     }
@@ -241,6 +247,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             }
         }
 
+        self.close_recalls();
         let mut affinities = HashMap::new();
         for application in &observation.applications {
             let crate::AppObservation::Complete { app, windows, .. } = application else {
@@ -255,13 +262,12 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     }
                 }
             }
+            self.prepare_recall(app, windows);
             let app_workspace = self.workspaces.workspace_for_app(&app.id);
             for window in windows {
                 self.heal_reappeared_window(window, visible, server_frames);
                 let disposition = self.config.disposition(&app.bundle_id, window);
-                if self.quarantined.contains(&window.id)
-                    || disposition == WindowDisposition::Ignored
-                {
+                if disposition == WindowDisposition::Ignored {
                     if let Some(owner) = self.workspaces.workspace_of_any(&window.id) {
                         log_event!("release {:?} from workspace {}: ignored", window.id, owner);
                         self.forget_window(owner, &window.id);
@@ -295,6 +301,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     affinity
                 } else if floating && self.workspaces.floating_workspace_of(&window.id).is_some() {
                     FrozenWindowAffinity::Floating
+                } else if floating && let Some(placement) = self.memory.recalled(&window.id) {
+                    self.workspaces
+                        .own_floating(window.id.clone(), placement.workspace);
+                    FrozenWindowAffinity::Floating
                 } else if floating {
                     visible
                         .iter()
@@ -323,10 +333,13 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                             }
                             FrozenWindowAffinity::ExplicitRoute(target)
                         }
-                        WindowDisposition::Managed => app_workspace.map_or(
-                            FrozenWindowAffinity::CurrentDisplay,
-                            FrozenWindowAffinity::Inferred,
-                        ),
+                        WindowDisposition::Managed => self
+                            .memory
+                            .recalled(&window.id)
+                            .map(|placement| placement.workspace)
+                            .or(app_workspace)
+                            .map(FrozenWindowAffinity::Inferred)
+                            .unwrap_or(FrozenWindowAffinity::CurrentDisplay),
                         WindowDisposition::Floating | WindowDisposition::Ignored => unreachable!(),
                     }
                 };
@@ -464,7 +477,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                         | FrozenWindowAffinity::Inferred(_)
                         | FrozenWindowAffinity::CurrentDisplay => {
                             output.contains_center(window.frame)
-                                && !self.workspaces.owned_by_other(workspace, &window.id)
+                                && self
+                                    .workspaces
+                                    .workspace_of(&window.id)
+                                    .is_none_or(|owner| owner == workspace)
                         }
                     }
                 });
@@ -553,10 +569,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             }
             routed_targets.insert(*target);
         }
-        self.workspaces.refresh_ownership(workspace);
+        self.workspaces.prune_intents(workspace);
         self.clear_fullscreen_restore_if_inactive(workspace);
         for target in &routed_targets {
-            self.workspaces.refresh_ownership(*target);
             self.clear_fullscreen_restore_if_inactive(*target);
         }
         let bound: HashSet<_> = self
@@ -576,13 +591,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         self.apply_fullscreen_layout(workspace, &mut placements, output);
         if filter_unchanged {
             placements.retain(|placement| {
-                placement
-                    .window
-                    .as_ref()
-                    .and_then(|window| observed_frames.get(window))
-                    .is_some_and(|frame| {
-                        !frame.approximately_equals(placement.frame, settings.frame_tolerance)
-                    })
+                live::needs_application(placement, &observed_frames, settings.frame_tolerance)
             });
         }
         placements.retain(|placement| {

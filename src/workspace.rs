@@ -63,12 +63,11 @@ impl WorkspaceId {
     }
 
     pub fn all() -> impl Iterator<Item = Self> {
-        (1..=Self::COUNT).map(|index| Self(u8::try_from(index).expect("workspace count fits u8")))
+        (0..Self::COUNT).map(Self::from_index)
     }
 
     pub fn numbered() -> impl Iterator<Item = Self> {
-        (1..=Self::NUMBERED_COUNT)
-            .map(|index| Self(u8::try_from(index).expect("workspace count fits u8")))
+        Self::all().take(Self::NUMBERED_COUNT)
     }
 
     pub(crate) fn from_index(index: usize) -> Self {
@@ -122,12 +121,6 @@ impl<'de> Deserialize<'de> for WorkspaceId {
         }
         .map_err(serde::de::Error::custom)
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum DisplayRole {
-    Main,
-    Secondary,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -269,15 +262,6 @@ impl DisplaySelector {
     }
 }
 
-impl From<DisplayRole> for DisplaySelector {
-    fn from(value: DisplayRole) -> Self {
-        match value {
-            DisplayRole::Main => Self::Main,
-            DisplayRole::Secondary => Self::Secondary,
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct Workspaces {
     engines: [Engine; WorkspaceId::COUNT],
@@ -323,21 +307,9 @@ impl Workspaces {
             .rposition(|engine| !engine.model().workspace.slots.is_empty())
             .map_or(WorkspaceId::NUMBERED_COUNT, |index| index + 1)
             .max(WorkspaceId::NUMBERED_COUNT);
-        let mut active: Vec<_> = self
-            .active
-            .iter()
-            .map(|(selector, workspace)| (selector.clone(), *workspace))
-            .collect();
-        active.sort();
-        let mut previous: Vec<_> = self
-            .previous
-            .iter()
-            .map(|(selector, workspace)| (selector.clone(), *workspace))
-            .collect();
-        previous.sort();
         WorkspaceState {
-            active,
-            previous,
+            active: sorted(self.active.clone()),
+            previous: sorted(self.previous.clone()),
             axes: Vec::new(),
             layouts: self
                 .engines
@@ -351,14 +323,7 @@ impl Workspaces {
                 .take(workspace_count)
                 .map(|engine| engine.model().workspace.slots.clone())
                 .collect(),
-            floating: {
-                let mut floating = self
-                    .floating_entries()
-                    .map(|(window, workspace)| (window.clone(), workspace))
-                    .collect::<Vec<_>>();
-                floating.sort();
-                floating
-            },
+            floating: sorted(self.floating_owners.clone()),
             last_focused: trimmed(&self.last_focused, Option::is_some),
             fullscreen_layout: trimmed(&self.fullscreen_layout, |enabled| *enabled),
             maximized: Vec::new(),
@@ -395,7 +360,6 @@ impl Workspaces {
                 )
             });
             self.engine_mut(workspace).restore_layout(layout);
-            self.refresh_ownership(workspace);
         }
         for (selector, workspace) in active {
             if self.assignment(workspace) == &selector {
@@ -435,14 +399,6 @@ impl Workspaces {
                     || legacy_maximized.is_some(),
             );
         }
-    }
-
-    #[must_use]
-    pub fn active(&self, display: DisplayRole) -> WorkspaceId {
-        self.active_for(&display.into()).unwrap_or(match display {
-            DisplayRole::Main => WorkspaceId::ONE,
-            DisplayRole::Secondary => WorkspaceId::SIX,
-        })
     }
 
     #[must_use]
@@ -646,16 +602,6 @@ impl Workspaces {
         })
     }
 
-    #[must_use]
-    pub fn owned_by_other(&self, workspace: WorkspaceId, window: &PhysicalWindowId) -> bool {
-        self.workspace_of(window)
-            .is_some_and(|owner| owner != workspace)
-    }
-
-    pub fn refresh_ownership(&mut self, workspace: WorkspaceId) {
-        self.prune_intents(workspace);
-    }
-
     pub fn forget_window(&mut self, workspace: WorkspaceId, window: &PhysicalWindowId) {
         self.engine_mut(workspace).take_slot(window);
         self.prune_intents(workspace);
@@ -681,7 +627,7 @@ impl Workspaces {
             enabled && !self.engine(workspace).model().workspace.slots.is_empty();
     }
 
-    fn prune_intents(&mut self, workspace: WorkspaceId) {
+    pub(crate) fn prune_intents(&mut self, workspace: WorkspaceId) {
         let index = workspace.index();
         if self.last_focused[index].is_some_and(|slot| !self.has_slot(workspace, slot)) {
             self.last_focused[index] = None;
@@ -731,6 +677,12 @@ impl Workspaces {
     }
 }
 
+fn sorted<T: Ord>(items: impl IntoIterator<Item = T>) -> Vec<T> {
+    let mut items: Vec<_> = items.into_iter().collect();
+    items.sort();
+    items
+}
+
 fn trimmed<T: Clone>(items: &[T; WorkspaceId::COUNT], keep: impl Fn(&T) -> bool) -> Vec<T> {
     let length = items.iter().rposition(keep).map_or(0, |index| index + 1);
     items[..length].to_vec()
@@ -767,7 +719,6 @@ mod tests {
                 since: 1,
             },
         });
-        workspaces.refresh_ownership(WorkspaceId::ONE);
         assert_eq!(
             workspaces.workspace_for_app(&old.app),
             Some(WorkspaceId::ONE)
@@ -784,7 +735,6 @@ mod tests {
             weight: 1,
             binding: BindingState::Bound(other),
         });
-        workspaces.refresh_ownership(WorkspaceId::SIX);
         assert_eq!(workspaces.workspace_for_app(&old.app), None);
         assert!(workspaces.state().validate().is_ok());
     }
@@ -832,8 +782,14 @@ mod tests {
     fn switching_one_display_preserves_the_other() {
         let mut workspaces = Workspaces::default();
         workspaces.switch(WorkspaceId::new(3).unwrap());
-        assert_eq!(workspaces.active(DisplayRole::Main).number(), Some(3));
-        assert_eq!(workspaces.active(DisplayRole::Secondary).number(), Some(6));
+        assert_eq!(
+            workspaces.active_for(&DisplaySelector::Main),
+            WorkspaceId::new(3).ok()
+        );
+        assert_eq!(
+            workspaces.active_for(&DisplaySelector::Secondary),
+            Some(WorkspaceId::SIX)
+        );
     }
 
     #[test]
@@ -844,8 +800,11 @@ mod tests {
 
         workspaces.switch(named);
 
-        assert_eq!(workspaces.active(DisplayRole::Main), named);
-        assert_eq!(workspaces.active(DisplayRole::Secondary), WorkspaceId::SIX);
+        assert_eq!(workspaces.active_for(&DisplaySelector::Main), Some(named));
+        assert_eq!(
+            workspaces.active_for(&DisplaySelector::Secondary),
+            Some(WorkspaceId::SIX)
+        );
     }
 
     #[test]
@@ -915,7 +874,6 @@ mod tests {
             weight: 1,
             binding: BindingState::Bound(second.clone()),
         });
-        workspaces.refresh_ownership(WorkspaceId::ONE);
         workspaces.engine_mut(WorkspaceId::ONE).toggle_axis();
         let third = WorkspaceId::new(3).unwrap();
         workspaces.switch(third);
@@ -925,7 +883,7 @@ mod tests {
         let mut restored = Workspaces::default();
         restored.restore(state);
 
-        assert_eq!(restored.active(DisplayRole::Main), third);
+        assert_eq!(restored.active_for(&DisplaySelector::Main), Some(third));
         assert_eq!(
             restored.previous_for(&DisplaySelector::Main),
             Some(WorkspaceId::ONE)
@@ -953,7 +911,6 @@ mod tests {
                 binding: BindingState::Bound(window.clone()),
             });
         }
-        workspaces.refresh_ownership(WorkspaceId::ONE);
         workspaces.remember_focus(WorkspaceId::ONE, &second);
         workspaces.set_fullscreen_layout(WorkspaceId::ONE, true);
 
@@ -1051,7 +1008,6 @@ mod tests {
             weight: 1,
             binding: BindingState::Bound(owned.clone()),
         });
-        workspaces.refresh_ownership(named);
         workspaces.switch(named);
 
         let encoded = serde_json::to_value(workspaces.state()).unwrap();
@@ -1060,7 +1016,7 @@ mod tests {
         let mut restored = Workspaces::default();
         restored.restore(state);
 
-        assert_eq!(restored.active(DisplayRole::Main), named);
+        assert_eq!(restored.active_for(&DisplaySelector::Main), Some(named));
         assert_eq!(restored.workspace_of(&owned), Some(named));
         assert!(restored.is_enabled(named));
     }

@@ -25,8 +25,8 @@ macOS Service Management. Registration is stored and enforced by macOS; Spaceman
 separate helper, daemon, or launch-agent plist.
 
 Spaceman can read a window title for exact config-rule matching. Titles remain in memory and are
-explicitly excluded from serialized observations, persisted state, `spaceman ctl debug`, and
-`spaceman hud` output.
+explicitly excluded from serialized observations, persisted state, the arrangement journal,
+`spaceman ctl debug`, `spaceman doctor`, and `spaceman hud` output.
 
 Local files live under `~/Library/Application Support/Spaceman/`:
 
@@ -34,14 +34,21 @@ Local files live under `~/Library/Application Support/Spaceman/`:
 - `workspace-state.json`: active workspace selectors, previous-workspace history, logical slots,
   last-focused tile intent, Fullscreen Layout state, floating-window ownership, and layout trees;
 - `parked-windows.json`: physical process/window identifiers and original frames needed for recovery;
+- `window-memory.json`: per-application bundle identifiers with each remembered window's workspace,
+  floating state, and last frame, used to restore placements after relaunches and reboots;
 - `agent.log`: timestamped diagnostic events (switches, parking, restoration, ownership changes) with
-  process/window identifiers and frames, never window titles; mode `0600`, discarded past 5 MB at the
-  next launch. Terminal launches keep diagnostics on stderr instead;
+  process/window identifiers and frames, never window titles; mode `0600`, moved to `agent.log.1`
+  (replacing any previous generation) past 5 MB at the next launch. Terminal launches keep
+  diagnostics on stderr instead;
+- `journal.jsonl` and `journal.jsonl.1`: the arrangement journal summarized by `spaceman doctor`.
+  It records process IDs, window-server IDs, bundle identifiers, frames, workspace ownership, parked
+  state, and debounced model/screen disagreements, never window titles; mode `0600`, rotated past
+  4 MiB with one previous generation kept. App-bundle and terminal launches both write it;
 - `control.sock`: local Unix control socket, mode `0600`;
 - `control.lock`: single-agent lock, mode `0600`.
 
-State files contain application process/window identity and geometry, but no window titles. The code
-uses atomic replacement for both JSON state files and restricts the Application Support directory to
+State files contain application process/window identity, bundle identifiers, and geometry, but no
+window titles. The code uses atomic replacement for the JSON state files and restricts the Application Support directory to
 mode `0700`; do not sync or publish recovery state without reviewing it.
 
 ## Native Interfaces

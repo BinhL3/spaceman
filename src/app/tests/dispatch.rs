@@ -62,8 +62,6 @@ fn fixture() -> WorkspaceRuntime<FakeBackend> {
     bind(&mut runtime, WorkspaceId::ONE, &window(10));
     bind(&mut runtime, WorkspaceId::ONE, &window(20));
     bind(&mut runtime, WorkspaceId::SIX, &window(30));
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
-    runtime.workspaces.refresh_ownership(WorkspaceId::SIX);
     runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
     runtime.backend.calls.clear();
     runtime
@@ -200,6 +198,31 @@ fn dispatch_classifies_cancellation_before_worker_receipt() {
     ));
     assert!(!busy);
     assert!(!interruptible);
+}
+
+#[test]
+fn control_acknowledgements_name_each_queued_action() {
+    let acknowledgements = actions()
+        .into_iter()
+        .map(|(action, _)| action.queued_acknowledgement())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        acknowledgements,
+        [
+            "retile queued",
+            "switch to workspace 2 queued",
+            "workspace back-and-forth queued",
+            "move to workspace 6 queued",
+            "move app to workspace 6 queued",
+            "focus cycle queued",
+            "focus queued",
+            "directional move queued",
+            "layout toggle queued",
+            "resize queued",
+            "balance queued",
+            "fullscreen layout toggle queued",
+        ]
+    );
 }
 
 #[test]

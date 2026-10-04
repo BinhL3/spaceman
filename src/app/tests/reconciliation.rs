@@ -227,7 +227,6 @@ fn new_ghostty_window_joins_unique_workspace_across_displays() {
     backend.frames.insert(created.clone(), secondary_frame);
     let mut runtime = runtime(backend);
     bind(&mut runtime, WorkspaceId::ONE, &existing);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
 
     runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
 
@@ -262,7 +261,6 @@ fn explicit_route_overrides_unique_app_affinity() {
     .unwrap();
     let mut runtime = runtime_with_config(backend, config);
     bind(&mut runtime, WorkspaceId::ONE, &existing);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
 
     runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
 
@@ -299,7 +297,6 @@ fn floating_rule_converts_existing_and_new_windows_to_floating_ownership() {
             .unwrap();
     let mut runtime = runtime_with_config(backend, config);
     bind(&mut runtime, WorkspaceId::ONE, &existing);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
 
     runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
 
@@ -334,7 +331,6 @@ fn ignore_rule_releases_the_window_and_never_adopts_it() {
             .unwrap();
     let mut runtime = runtime_with_config(backend, config);
     bind(&mut runtime, WorkspaceId::ONE, &existing);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
 
     runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
 
@@ -368,8 +364,6 @@ fn app_spanning_workspaces_keeps_current_display_routing() {
     let mut runtime = runtime(backend);
     bind(&mut runtime, WorkspaceId::ONE, &main);
     bind(&mut runtime, WorkspaceId::SIX, &secondary);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
-    runtime.workspaces.refresh_ownership(WorkspaceId::SIX);
 
     runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
 
@@ -401,7 +395,6 @@ fn simultaneous_new_windows_use_the_same_frozen_affinity() {
     backend.frames.insert(second.clone(), frame(1100));
     let mut runtime = runtime(backend);
     bind(&mut runtime, WorkspaceId::ONE, &existing);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
 
     runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
 
@@ -437,7 +430,6 @@ fn new_window_for_unique_inactive_workspace_is_parked() {
     let mut runtime = runtime(backend);
     let inactive = WorkspaceId::new(2).unwrap();
     bind(&mut runtime, inactive, &existing);
-    runtime.workspaces.refresh_ownership(inactive);
 
     runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
 
@@ -462,7 +454,6 @@ fn on_screen_window_omitted_from_one_snapshot_keeps_its_slot() {
     let mut runtime = runtime(backend);
     bind(&mut runtime, WorkspaceId::ONE, &kept);
     bind(&mut runtime, WorkspaceId::ONE, &closed);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
 
     runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
 
@@ -501,7 +492,6 @@ fn omission_settling_ends_when_the_window_is_observed_again() {
     backend.frames.insert(window.clone(), frame(50));
     let mut runtime = runtime(backend);
     bind(&mut runtime, WorkspaceId::ONE, &window);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
 
     runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
     assert!(runtime.omitted_windows.contains_key(&window));
@@ -571,7 +561,6 @@ fn tiled_window_becoming_non_resizable_moves_to_floating_ownership() {
     backend.frames.insert(window.clone(), normal);
     let mut runtime = runtime(backend);
     bind(&mut runtime, WorkspaceId::ONE, &window);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
 
     runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
 
@@ -680,7 +669,6 @@ fn restored_slots_for_a_dead_application_are_retired() {
         weight: 1,
         binding: BindingState::Bound(dead.clone()),
     });
-    persisted.refresh_ownership(WorkspaceId::ONE);
     let backend = FakeBackend {
         observation: Some(crate::NativeObservation {
             cycle: 0,

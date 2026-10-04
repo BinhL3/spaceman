@@ -55,6 +55,8 @@ fn main() -> ExitCode {
     };
     let arguments = args.collect::<Vec<_>>();
     let rest = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+    #[cfg(target_os = "macos")]
+    let apply = rest.last() == Some(&"--apply");
 
     let result = match (command.as_str(), rest.as_slice()) {
         ("replay", [path]) => run_replay(path).and_then(to_json),
@@ -65,6 +67,13 @@ fn main() -> ExitCode {
             .map(|outputs| outputs.displays().to_vec())
             .map_err(|error| error.to_string())
             .and_then(to_json),
+        ("doctor", []) => run_doctor(None),
+        ("doctor", [hours]) => hours
+            .parse::<u64>()
+            .ok()
+            .filter(|hours| *hours > 0)
+            .ok_or_else(|| format!("hours must be a positive integer, got {hours:?}"))
+            .and_then(|hours| run_doctor(Some(hours))),
         ("config-check", [path]) => spaceman::config::load_path(std::path::Path::new(path))
             .map(|_| "configuration is valid".into()),
         #[cfg(target_os = "macos")]
@@ -72,31 +81,21 @@ fn main() -> ExitCode {
         #[cfg(target_os = "macos")]
         ("hud", []) => run_hud(),
         #[cfg(target_os = "macos")]
-        ("retile", []) => run_retile(false).and_then(to_json),
+        ("retile", [] | ["--apply"]) => run_retile(apply).and_then(to_json),
+        // A lone positional "--apply" sets `apply` but always fails cycle parsing first.
         #[cfg(target_os = "macos")]
-        ("retile", ["--apply"]) => run_retile(true).and_then(to_json),
-        #[cfg(target_os = "macos")]
-        ("watch", [cycles]) => parse_cycles(cycles)
-            .and_then(|cycles| run_watch(cycles, false, None))
+        ("watch", [cycles] | [cycles, "--apply"]) => parse_cycles(cycles)
+            .and_then(|cycles| run_watch(cycles, apply, None))
             .and_then(to_json),
         #[cfg(target_os = "macos")]
-        ("watch", [cycles, "--apply"]) => parse_cycles(cycles)
-            .and_then(|cycles| run_watch(cycles, true, None))
-            .and_then(to_json),
+        ("watch-window", [window_id, cycles] | [window_id, cycles, "--apply"]) => {
+            parse_window_id(window_id)
+                .and_then(|window_id| parse_cycles(cycles).map(|cycles| (window_id, cycles)))
+                .and_then(|(window_id, cycles)| run_watch(cycles, apply, Some(window_id)))
+                .and_then(to_json)
+        }
         #[cfg(target_os = "macos")]
-        ("watch-window", [window_id, cycles]) => parse_window_id(window_id)
-            .and_then(|window_id| parse_cycles(cycles).map(|cycles| (window_id, cycles)))
-            .and_then(|(window_id, cycles)| run_watch(cycles, false, Some(window_id)))
-            .and_then(to_json),
-        #[cfg(target_os = "macos")]
-        ("watch-window", [window_id, cycles, "--apply"]) => parse_window_id(window_id)
-            .and_then(|window_id| parse_cycles(cycles).map(|cycles| (window_id, cycles)))
-            .and_then(|(window_id, cycles)| run_watch(cycles, true, Some(window_id)))
-            .and_then(to_json),
-        #[cfg(target_os = "macos")]
-        ("run", []) => run_persistent(false),
-        #[cfg(target_os = "macos")]
-        ("run", ["--apply"]) => run_persistent(true),
+        ("run", [] | ["--apply"]) => run_persistent(apply),
         (known, _) if KNOWN_COMMANDS.contains(&known) => {
             print_usage(&executable);
             return ExitCode::from(2);
@@ -123,6 +122,7 @@ fn main() -> ExitCode {
 const KNOWN_COMMANDS: &[&str] = &[
     "replay",
     "config-check",
+    "doctor",
     #[cfg(target_os = "macos")]
     "snapshot",
     #[cfg(target_os = "macos")]
@@ -144,6 +144,7 @@ const KNOWN_COMMANDS: &[&str] = &[
 fn print_usage(executable: &str) {
     eprintln!("usage: {executable} replay <fixture.json>");
     eprintln!("       {executable} config-check <config.toml>");
+    eprintln!("       {executable} doctor [hours]");
     #[cfg(target_os = "macos")]
     eprintln!("       {executable} snapshot");
     #[cfg(target_os = "macos")]
@@ -163,6 +164,20 @@ fn print_usage(executable: &str) {
     eprintln!("       {executable} watch-window <window-id> <cycles> [--apply]");
     #[cfg(target_os = "macos")]
     eprintln!("       {executable} run [--apply]");
+}
+
+fn run_doctor(hours: Option<u64>) -> Result<String, String> {
+    let (live, rotated) = spaceman::journal::default_paths().ok_or("HOME is unavailable")?;
+    let (lines, skipped) = spaceman::journal::read(&[rotated, live.clone()])?;
+    if lines.is_empty() && skipped == 0 {
+        return Ok(format!(
+            "No arrangement journal at {} yet. It is written by a running Spaceman agent.",
+            live.display()
+        ));
+    }
+    let now = spaceman::journal::unix_millis();
+    let since = hours.map_or(0, |hours| now.saturating_sub(hours * 3_600_000));
+    Ok(spaceman::journal::summarize(&lines, since, now, skipped))
 }
 
 #[cfg(target_os = "macos")]

@@ -1,7 +1,10 @@
 fn main() {
     redirect_stderr_to_log();
     if let Err(error) = spaceman::app::run() {
-        eprintln!("Spaceman failed: {error}");
+        let _ = std::io::Write::write_all(
+            &mut std::io::stderr(),
+            format!("Spaceman failed: {error}\n").as_bytes(),
+        );
         std::process::exit(1);
     }
 }
@@ -21,7 +24,9 @@ fn redirect_stderr_to_log() {
         let _ = std::fs::create_dir_all(parent);
     }
     if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > 5 * 1024 * 1024) {
-        let _ = std::fs::remove_file(&path);
+        // Keep one previous generation: the history before a restart is
+        // usually what explains it.
+        let _ = std::fs::rename(&path, path.with_extension("log.1"));
     }
     use std::os::unix::fs::OpenOptionsExt;
     let Ok(file) = std::fs::OpenOptions::new()

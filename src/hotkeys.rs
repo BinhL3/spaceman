@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, ffi::c_void, ptr, sync::mpsc::Sender};
 
 use crate::{
     Direction, ResizeDirection, WorkspaceId,
-    app::Action,
+    app::{Action, WorkerAction},
     keyboard_layout::{LayoutFingerprint, LayoutSnapshot, LogicalKey, SemanticKey},
 };
 
@@ -61,8 +61,14 @@ unsafe extern "C" {
 pub struct Hotkeys {
     registrations: Vec<*mut c_void>,
     handler: *mut c_void,
-    context: Option<Box<Sender<Action>>>,
+    context: Option<Box<HandlerContext>>,
     layout_fingerprint: LayoutFingerprint,
+}
+
+/// Read by the Carbon handler; a hotkey's ID is its index into `actions`.
+struct HandlerContext {
+    sender: Sender<Action>,
+    actions: Vec<WorkerAction>,
 }
 
 #[derive(Debug)]
@@ -75,7 +81,7 @@ pub(crate) struct HotkeyPlan {
 struct Registration {
     key_code: u32,
     modifiers: u32,
-    id: u32,
+    action: WorkerAction,
     description: String,
 }
 
@@ -92,41 +98,30 @@ impl HotkeyPlan {
             .filter_map(|workspace| workspace.letter().map(|letter| letter.to_ascii_lowercase()))
             .collect::<Vec<_>>();
         for workspace in WorkspaceId::all().filter(|workspace| enabled.contains(workspace)) {
-            let (key, switch_id, move_id) = match (workspace.number(), workspace.letter()) {
-                (Some(number), _) => (
-                    LogicalKey::Semantic(SemanticKey::Workspace(number)),
-                    u32::from(number),
-                    u32::from(number) + 10,
-                ),
-                (_, Some(letter)) => {
-                    let offset = u32::from(letter as u8 - b'A');
-                    (
-                        LogicalKey::Character(letter.to_ascii_lowercase()),
-                        200 + offset,
-                        300 + offset,
-                    )
-                }
+            let key = match (workspace.number(), workspace.letter()) {
+                (Some(number), _) => LogicalKey::Semantic(SemanticKey::Workspace(number)),
+                (_, Some(letter)) => LogicalKey::Character(letter.to_ascii_lowercase()),
                 _ => unreachable!("workspace ID is always valid"),
             };
             let key = layout.resolve(key).map_err(|error| error.to_string())?;
             registrations.push(registration(
                 key,
                 OPTION_KEY,
-                switch_id,
+                WorkerAction::SwitchWorkspace(workspace),
                 format!("switch workspace {workspace}"),
             ));
             registrations.push(registration(
                 key,
                 OPTION_KEY | SHIFT_KEY,
-                move_id,
+                WorkerAction::MoveFocused(workspace),
                 format!("move window to workspace {workspace}"),
             ));
         }
-        for (character, id, direction) in [
-            ('h', 104, "left"),
-            ('j', 105, "down"),
-            ('k', 106, "up"),
-            ('l', 107, "right"),
+        for (character, direction, name) in [
+            ('h', Direction::Left, "left"),
+            ('j', Direction::Down, "down"),
+            ('k', Direction::Up, "up"),
+            ('l', Direction::Right, "right"),
         ] {
             if claimed_letters.contains(&character) {
                 continue;
@@ -137,45 +132,60 @@ impl HotkeyPlan {
             registrations.push(registration(
                 key,
                 OPTION_KEY,
-                id,
-                format!("focus {direction}"),
+                WorkerAction::Focus(direction),
+                format!("focus {name}"),
             ));
             registrations.push(registration(
                 key,
                 OPTION_KEY | SHIFT_KEY,
-                id + 10,
-                format!("move window {direction}"),
+                WorkerAction::Reorder(direction),
+                format!("move window {name}"),
             ));
         }
-        for (key, modifiers, id, description) in [
+        for (key, modifiers, action, description) in [
             (
                 LogicalKey::Character('f'),
                 OPTION_KEY | SHIFT_KEY,
-                103,
+                WorkerAction::ToggleFullscreenLayout,
                 "toggle fullscreen layout",
             ),
-            (LogicalKey::Character('/'), OPTION_KEY, 108, "toggle layout"),
+            (
+                LogicalKey::Character('/'),
+                OPTION_KEY,
+                WorkerAction::ToggleLayout,
+                "toggle layout",
+            ),
             (
                 LogicalKey::Character('`'),
                 OPTION_KEY,
-                112,
+                WorkerAction::CycleFocus,
                 "cycle workspace windows",
             ),
             (
                 LogicalKey::Semantic(SemanticKey::Tab),
                 OPTION_KEY,
-                109,
+                WorkerAction::WorkspaceBackAndForth,
                 "workspace back-and-forth",
             ),
-            (LogicalKey::Character('-'), OPTION_KEY, 110, "shrink layout"),
-            (LogicalKey::Character('='), OPTION_KEY, 111, "grow layout"),
+            (
+                LogicalKey::Character('-'),
+                OPTION_KEY,
+                WorkerAction::Resize(ResizeDirection::Shrink),
+                "shrink layout",
+            ),
+            (
+                LogicalKey::Character('='),
+                OPTION_KEY,
+                WorkerAction::Resize(ResizeDirection::Grow),
+                "grow layout",
+            ),
         ] {
             if matches!(key, LogicalKey::Character(character) if claimed_letters.contains(&character))
             {
                 continue;
             }
             let key = layout.resolve(key).map_err(|error| error.to_string())?;
-            registrations.push(registration(key, modifiers, id, description.into()));
+            registrations.push(registration(key, modifiers, action, description.into()));
         }
 
         reject_collisions(&registrations)?;
@@ -193,13 +203,13 @@ impl HotkeyPlan {
 fn registration(
     key: crate::keyboard_layout::ResolvedKey,
     semantic_modifiers: u32,
-    id: u32,
+    action: WorkerAction,
     description: String,
 ) -> Registration {
     Registration {
         key_code: key.key_code,
         modifiers: semantic_modifiers | if key.shift { SHIFT_KEY } else { 0 },
-        id,
+        action,
         description,
     }
 }
@@ -222,7 +232,14 @@ fn reject_collisions(registrations: &[Registration]) -> Result<(), String> {
 
 impl Hotkeys {
     pub fn install(sender: Sender<Action>, plan: HotkeyPlan) -> Result<Self, String> {
-        let context = Box::new(sender);
+        let context = Box::new(HandlerContext {
+            sender,
+            actions: plan
+                .registrations
+                .iter()
+                .map(|registration| registration.action.clone())
+                .collect(),
+        });
         let context_pointer = (&raw const *context).cast_mut();
         let event_type = EventTypeSpec {
             event_class: EVENT_CLASS_KEYBOARD,
@@ -249,12 +266,8 @@ impl Hotkeys {
             context: Some(context),
             layout_fingerprint: plan.layout_fingerprint,
         };
-        for registration in plan.registrations {
-            hotkeys.register(
-                registration.key_code,
-                registration.modifiers,
-                registration.id,
-            )?;
+        for (id, registration) in (0..).zip(plan.registrations) {
+            hotkeys.register(registration.key_code, registration.modifiers, id)?;
         }
         Ok(hotkeys)
     }
@@ -307,7 +320,7 @@ unsafe extern "C" fn hotkey_handler(
     event: *mut c_void,
     user_data: *mut c_void,
 ) -> i32 {
-    let sender = unsafe { &*user_data.cast::<Sender<Action>>() };
+    let context = unsafe { &*user_data.cast::<HandlerContext>() };
     let mut hotkey_id = EventHotKeyId {
         signature: 0,
         id: 0,
@@ -325,70 +338,13 @@ unsafe extern "C" fn hotkey_handler(
     };
     if status == 0
         && hotkey_id.signature == SIGNATURE
-        && let Some(action) = decode_action(hotkey_id.id)
+        && let Some(action) = usize::try_from(hotkey_id.id)
+            .ok()
+            .and_then(|index| context.actions.get(index))
     {
-        let _ = sender.send(action);
+        let _ = context.sender.send(Action::Worker(action.clone()));
     }
     0
-}
-
-fn decode_action(id: u32) -> Option<Action> {
-    if id == 103 {
-        return Some(Action::ToggleFullscreenLayout);
-    }
-    if id == 108 {
-        return Some(Action::ToggleLayout);
-    }
-    if id == 109 {
-        return Some(Action::WorkspaceBackAndForth);
-    }
-    if id == 110 {
-        return Some(Action::Resize(ResizeDirection::Shrink));
-    }
-    if id == 111 {
-        return Some(Action::Resize(ResizeDirection::Grow));
-    }
-    if id == 112 {
-        return Some(Action::CycleFocus);
-    }
-    let (reorder, direction_id) = if (114..=117).contains(&id) {
-        (true, id - 10)
-    } else {
-        (false, id)
-    };
-    let direction = match direction_id {
-        104 => Direction::Left,
-        105 => Direction::Down,
-        106 => Direction::Up,
-        107 => Direction::Right,
-        _ => return decode_workspace_action(id),
-    };
-    if reorder {
-        Some(Action::Reorder(direction))
-    } else {
-        Some(Action::Focus(direction))
-    }
-}
-
-fn decode_workspace_action(id: u32) -> Option<Action> {
-    let (move_window, workspace) = match id {
-        1..=10 => (false, WorkspaceId::new(u8::try_from(id).ok()?).ok()?),
-        11..=20 => (true, WorkspaceId::new(u8::try_from(id - 10).ok()?).ok()?),
-        200..=225 => (
-            false,
-            WorkspaceId::named(char::from(b'A' + u8::try_from(id - 200).ok()?)).ok()?,
-        ),
-        300..=325 => (
-            true,
-            WorkspaceId::named(char::from(b'A' + u8::try_from(id - 300).ok()?)).ok()?,
-        ),
-        _ => return None,
-    };
-    Some(if move_window {
-        Action::MoveFocused(workspace)
-    } else {
-        Action::SwitchWorkspace(workspace)
-    })
 }
 
 #[cfg(test)]
@@ -412,54 +368,48 @@ mod tests {
         )
     }
 
+    fn action<'a>(plan: &'a HotkeyPlan, description: &str) -> Option<&'a WorkerAction> {
+        plan.registrations
+            .iter()
+            .find(|registration| registration.description == description)
+            .map(|registration| &registration.action)
+    }
+
     #[test]
-    fn decodes_switch_and_move_hotkeys_including_zero_key() {
-        assert!(matches!(
-            decode_action(1),
-            Some(Action::SwitchWorkspace(id)) if id.number() == Some(1)
-        ));
-        assert!(matches!(
-            decode_action(103),
-            Some(Action::ToggleFullscreenLayout)
-        ));
-        assert!(matches!(decode_action(108), Some(Action::ToggleLayout)));
-        assert!(matches!(
-            decode_action(109),
-            Some(Action::WorkspaceBackAndForth)
-        ));
-        assert!(matches!(
-            decode_action(110),
-            Some(Action::Resize(ResizeDirection::Shrink))
-        ));
-        assert!(matches!(
-            decode_action(111),
-            Some(Action::Resize(ResizeDirection::Grow))
-        ));
-        assert!(matches!(decode_action(112), Some(Action::CycleFocus)));
-        assert!(matches!(
-            decode_action(104),
-            Some(Action::Focus(Direction::Left))
-        ));
-        assert!(matches!(
-            decode_action(107),
-            Some(Action::Focus(Direction::Right))
-        ));
-        assert!(matches!(
-            decode_action(114),
-            Some(Action::Reorder(Direction::Left))
-        ));
-        assert!(matches!(
-            decode_action(117),
-            Some(Action::Reorder(Direction::Right))
-        ));
-        assert!(matches!(
-            decode_action(10),
-            Some(Action::SwitchWorkspace(id)) if id.number() == Some(10)
-        ));
-        assert!(matches!(
-            decode_action(20),
-            Some(Action::MoveFocused(id)) if id.number() == Some(10)
-        ));
+    fn registrations_carry_switch_move_and_layout_actions_including_zero_key() {
+        let enabled = WorkspaceId::numbered().collect::<Vec<_>>();
+        let plan = HotkeyPlan::from_layout(&enabled, &layout()).unwrap();
+        let one = WorkspaceId::new(1).unwrap();
+        let ten = WorkspaceId::new(10).unwrap();
+        for (description, expected) in [
+            ("switch workspace 1", WorkerAction::SwitchWorkspace(one)),
+            (
+                "toggle fullscreen layout",
+                WorkerAction::ToggleFullscreenLayout,
+            ),
+            ("toggle layout", WorkerAction::ToggleLayout),
+            (
+                "workspace back-and-forth",
+                WorkerAction::WorkspaceBackAndForth,
+            ),
+            (
+                "shrink layout",
+                WorkerAction::Resize(ResizeDirection::Shrink),
+            ),
+            ("grow layout", WorkerAction::Resize(ResizeDirection::Grow)),
+            ("cycle workspace windows", WorkerAction::CycleFocus),
+            ("focus left", WorkerAction::Focus(Direction::Left)),
+            ("focus right", WorkerAction::Focus(Direction::Right)),
+            ("move window left", WorkerAction::Reorder(Direction::Left)),
+            ("move window right", WorkerAction::Reorder(Direction::Right)),
+            ("switch workspace 10", WorkerAction::SwitchWorkspace(ten)),
+            (
+                "move window to workspace 10",
+                WorkerAction::MoveFocused(ten),
+            ),
+        ] {
+            assert_eq!(action(&plan, description), Some(&expected), "{description}");
+        }
     }
 
     #[test]
@@ -475,32 +425,17 @@ mod tests {
         let mut enabled = WorkspaceId::numbered().collect::<Vec<_>>();
         enabled.push(WorkspaceId::named('H').unwrap());
         let plan = HotkeyPlan::from_layout(&enabled, &layout()).unwrap();
-        assert!(
-            plan.registrations
-                .iter()
-                .any(|registration| registration.id == 207)
+        let h = WorkspaceId::named('H').unwrap();
+        assert_eq!(
+            action(&plan, "switch workspace H"),
+            Some(&WorkerAction::SwitchWorkspace(h))
         );
-        assert!(
-            plan.registrations
-                .iter()
-                .any(|registration| registration.id == 307)
+        assert_eq!(
+            action(&plan, "move window to workspace H"),
+            Some(&WorkerAction::MoveFocused(h))
         );
-        assert!(
-            !plan
-                .registrations
-                .iter()
-                .any(|registration| registration.id == 104)
-        );
-        assert!(
-            !plan
-                .registrations
-                .iter()
-                .any(|registration| registration.id == 114)
-        );
-        assert!(matches!(
-            decode_action(207),
-            Some(Action::SwitchWorkspace(workspace)) if workspace == WorkspaceId::named('H').unwrap()
-        ));
+        assert_eq!(action(&plan, "focus left"), None);
+        assert_eq!(action(&plan, "move window left"), None);
     }
 
     #[test]
@@ -523,7 +458,7 @@ mod tests {
         let toggle_layout = plan
             .registrations
             .iter()
-            .find(|registration| registration.id == 108)
+            .find(|registration| registration.action == WorkerAction::ToggleLayout)
             .unwrap();
         assert_eq!(toggle_layout.modifiers, OPTION_KEY | SHIFT_KEY);
     }

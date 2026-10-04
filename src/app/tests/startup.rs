@@ -41,15 +41,6 @@ fn management_scope_rejects_unknown_values() {
 }
 
 #[test]
-fn event_driven_runtime_reduces_idle_fallback_scans() {
-    let previous_scans_per_minute = 60_000 / 250;
-    let fallback_scans_per_minute = 60 / FALLBACK_REFRESH_INTERVAL.as_secs();
-
-    assert_eq!(previous_scans_per_minute, 240);
-    assert_eq!(fallback_scans_per_minute, 60);
-}
-
-#[test]
 fn activation_settling_defers_refresh_without_an_ax_event() {
     assert!(!refresh_due(false, false, true, false));
     assert!(refresh_due(false, false, true, true));
@@ -59,64 +50,6 @@ fn activation_settling_defers_refresh_without_an_ax_event() {
 fn window_creation_bypasses_activation_settling() {
     assert!(refresh_due(true, true, false, false));
     assert!(!refresh_due(false, true, false, false));
-}
-
-#[test]
-fn pending_workspace_actions_preserve_arrival_order() {
-    let mut pending = InputQueue::default();
-    let second = WorkspaceId::new(2).unwrap();
-    let third = WorkspaceId::new(3).unwrap();
-    pending
-        .push(QueuedInput::Action(WorkerAction::SwitchWorkspace(second)))
-        .unwrap();
-    pending
-        .push(QueuedInput::Action(WorkerAction::SwitchWorkspace(third)))
-        .unwrap();
-
-    assert_eq!(
-        pending.pop(),
-        Some(QueuedInput::Action(WorkerAction::SwitchWorkspace(second)))
-    );
-    assert_eq!(
-        pending.pop(),
-        Some(QueuedInput::Action(WorkerAction::SwitchWorkspace(third)))
-    );
-    assert_eq!(pending.pop(), None);
-}
-
-#[test]
-fn busy_preview_worker_queues_final_cross_display_drop() {
-    let window = window(10);
-    let mut tracker = GestureTracker::default();
-    tracker.begin(Some((window.clone(), frame(50))));
-    assert!(tracker.preview(frame(500), Some((700, 400))).is_some());
-    let drop = tracker
-        .finish(Some(frame(1500)), Some((1700, 400)))
-        .unwrap();
-    let mut pending = InputQueue::default();
-    pending.push(QueuedInput::Gesture(drop)).unwrap();
-    assert_eq!(
-        pending.pop(),
-        Some(QueuedInput::Gesture(FinalGesture::Drop(
-            window,
-            (1700, 400)
-        )))
-    );
-}
-
-#[test]
-fn mouse_up_uses_final_resize_frame_instead_of_losing_busy_preview() {
-    let window = window(10);
-    let mut tracker = GestureTracker::default();
-    tracker.begin(Some((window.clone(), frame(50))));
-    let final_frame = crate::Rect {
-        width: 700,
-        ..frame(50)
-    };
-    assert_eq!(
-        tracker.finish(Some(final_frame), Some((1700, 400))),
-        Some(FinalGesture::Resize(window, final_frame))
-    );
 }
 
 #[test]

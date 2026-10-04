@@ -58,7 +58,6 @@ fn parked_window_observed_back_on_screen_re_homes_and_drops_recovery_frame() {
     backend.frames.insert(overlay.clone(), frame(60));
     let mut runtime = runtime(backend);
     bind(&mut runtime, WorkspaceId::ONE, &tiled);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
     let hidden = WorkspaceId::new(2).unwrap();
     runtime.workspaces.own_floating(overlay.clone(), hidden);
     runtime.parked.insert(overlay.clone(), frame(70));
@@ -98,10 +97,8 @@ fn parked_tiled_window_observed_back_on_screen_re_homes_to_the_visible_workspace
     backend.frames.insert(returned.clone(), frame(400));
     let mut runtime = runtime(backend);
     bind(&mut runtime, WorkspaceId::ONE, &existing);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
     let hidden = WorkspaceId::new(2).unwrap();
     bind(&mut runtime, hidden, &returned);
-    runtime.workspaces.refresh_ownership(hidden);
     runtime.parked.insert(returned.clone(), frame(70));
 
     runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
@@ -143,10 +140,8 @@ fn stale_accessibility_observation_does_not_heal_a_genuinely_parked_window() {
     backend.server_frames.insert(parked.clone(), offscreen);
     let mut runtime = runtime(backend);
     bind(&mut runtime, WorkspaceId::ONE, &tiled);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
     let hidden = WorkspaceId::new(2).unwrap();
     bind(&mut runtime, hidden, &parked);
-    runtime.workspaces.refresh_ownership(hidden);
     runtime.parked.insert(parked.clone(), frame(400));
 
     runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
@@ -187,7 +182,7 @@ fn stale_accessibility_frame_does_not_skip_parking_an_on_screen_window() {
 }
 
 #[test]
-fn second_confirmed_self_un_park_quarantines_the_window() {
+fn second_confirmed_self_un_park_keeps_tiling_but_stops_parking_the_window() {
     let tiled = window(10);
     let fighter = window(11);
     let mut backend = FakeBackend {
@@ -203,10 +198,8 @@ fn second_confirmed_self_un_park_quarantines_the_window() {
     backend.frames.insert(fighter.clone(), frame(400));
     let mut runtime = runtime(backend);
     bind(&mut runtime, WorkspaceId::ONE, &tiled);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
     let hidden = WorkspaceId::new(2).unwrap();
     bind(&mut runtime, hidden, &fighter);
-    runtime.workspaces.refresh_ownership(hidden);
 
     // First confirmed self-un-park: healed and re-homed to workspace 1.
     runtime.parked.insert(fighter.clone(), frame(400));
@@ -217,22 +210,85 @@ fn second_confirmed_self_un_park_quarantines_the_window() {
     );
 
     // The user switches away (window back on a hidden workspace, parked),
-    // and the window un-parks itself again shortly after: quarantined.
+    // and the window un-parks itself again shortly after: parking-exempt.
     runtime.workspaces.move_window(&fighter, hidden);
     runtime.parked.insert(fighter.clone(), frame(400));
+    runtime.backend.frames.insert(fighter.clone(), frame(400));
+    runtime
+        .backend
+        .server_frames
+        .insert(fighter.clone(), frame(400));
+    runtime.backend.calls.clear();
     runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
 
-    assert!(runtime.quarantined.contains(&fighter));
-    assert_eq!(runtime.workspaces.workspace_of_any(&fighter), None);
+    assert!(runtime.parking_exempt.contains(&fighter));
+    assert_eq!(
+        runtime.workspaces.workspace_of(&fighter),
+        Some(WorkspaceId::ONE)
+    );
     assert!(!runtime.parked.contains_key(&fighter));
+    assert!(
+        runtime
+            .backend
+            .calls
+            .iter()
+            .any(|call| matches!(call, BackendCall::Apply(window, _) if window == &fighter)),
+        "calls: {:?}",
+        runtime.backend.calls
+    );
 
-    // Switching away leaves the quarantined window exactly where it is.
+    // Switching away leaves the exempt window exactly where it is without
+    // releasing its logical workspace ownership.
     let before = runtime.backend.frames[&fighter];
     runtime
         .switch(hidden, outputs(), &AtomicBool::new(false))
         .unwrap();
     assert!(!runtime.parked.contains_key(&fighter));
     assert_eq!(runtime.backend.frames[&fighter], before);
+    assert_eq!(
+        runtime.workspaces.workspace_of(&fighter),
+        Some(WorkspaceId::ONE)
+    );
+}
+
+#[test]
+fn frontmost_window_relaunched_at_a_spaceman_parking_edge_is_recovered() {
+    let stranded = window(10);
+    let outputs = outputs();
+    let display = outputs.main().frame;
+    let normal = frame(50);
+    let displays = outputs.frames().collect::<Vec<_>>();
+    let parked = crate::geometry::parked_frame(display, &displays, normal);
+    let mut backend = FakeBackend {
+        observation: Some(observation(&stranded, parked)),
+        focused: Some(stranded.clone()),
+        frontmost: Some(stranded.app.clone()),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(stranded.clone(), parked);
+    backend.server_frames.insert(stranded.clone(), parked);
+    let mut runtime = runtime(backend);
+
+    runtime
+        .cycle(outputs.clone(), &AtomicBool::new(false))
+        .unwrap();
+
+    assert_eq!(
+        runtime.workspaces.workspace_of(&stranded),
+        Some(WorkspaceId::ONE)
+    );
+    assert!(
+        outputs
+            .union()
+            .contains_center(runtime.backend.frames[&stranded])
+    );
+    assert!(runtime.backend.calls.iter().any(|call| {
+        matches!(
+            call,
+            BackendCall::SetPosition(window, target)
+                if window == &stranded && target.x == display.x && target.y == display.y
+        )
+    }));
 }
 
 #[test]
@@ -257,10 +313,8 @@ fn background_reappearance_is_re_parked_instead_of_re_homed() {
     backend.frames.insert(drifter.clone(), frame(400));
     let mut runtime = runtime(backend);
     bind(&mut runtime, WorkspaceId::ONE, &tiled);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
     let hidden = WorkspaceId::new(2).unwrap();
     bind(&mut runtime, hidden, &drifter);
-    runtime.workspaces.refresh_ownership(hidden);
     runtime.parked.insert(drifter.clone(), frame(400));
 
     runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
@@ -295,10 +349,8 @@ fn undone_re_parks_escalate_to_honoring_the_reappearance() {
     backend.server_frames.insert(fighter.clone(), frame(400));
     let mut runtime = runtime(backend);
     bind(&mut runtime, WorkspaceId::ONE, &tiled);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
     let hidden = WorkspaceId::new(2).unwrap();
     bind(&mut runtime, hidden, &fighter);
-    runtime.workspaces.refresh_ownership(hidden);
     runtime.parked.insert(fighter.clone(), frame(400));
 
     for _ in 0..=REPARK_ATTEMPT_LIMIT {
@@ -340,10 +392,8 @@ fn heal_waits_for_a_fresh_park_to_settle_before_trusting_reappearance() {
     backend.frames.insert(parked.clone(), frame(400));
     let mut runtime = runtime(backend);
     bind(&mut runtime, WorkspaceId::ONE, &tiled);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
     let hidden = WorkspaceId::new(2).unwrap();
     bind(&mut runtime, hidden, &parked);
-    runtime.workspaces.refresh_ownership(hidden);
     // The park write just happened; the app is still applying it, so both
     // Accessibility and the window server still report the old frame.
     runtime.parked.insert(parked.clone(), frame(400));
@@ -596,4 +646,58 @@ fn persisted_frames_recover_after_a_simulated_crash() {
     assert_eq!(second.restore_all(), 0);
     assert_eq!(second.backend.frames[&window], normal);
     assert!(second.backend.persisted.is_empty());
+}
+
+#[test]
+fn hidden_window_accessibility_cannot_find_keeps_its_slot_while_the_window_server_lists_it() {
+    // Right after launch, Accessibility may fail to find windows that exist.
+    // That must not silently drop every hidden workspace's windows.
+    let hidden = window(10);
+    let mut backend = FakeBackend {
+        observation: Some(observation(&hidden, frame(50))),
+        frame_outcome: Some(macos::WindowAccessError::Gone),
+        ..FakeBackend::default()
+    };
+    backend.server_frames.insert(hidden.clone(), frame(50));
+    let mut runtime = runtime(backend);
+    let workspace = WorkspaceId::new(2).unwrap();
+    bind(&mut runtime, workspace, &hidden);
+    let cancelled = AtomicBool::new(false);
+
+    runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(runtime.workspaces.workspace_of(&hidden), Some(workspace));
+
+    // Accessibility recovers: the slot is intact and parking proceeds.
+    runtime.backend.frame_outcome = None;
+    runtime.backend.frames.insert(hidden.clone(), frame(50));
+    runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(runtime.workspaces.workspace_of(&hidden), Some(workspace));
+    assert!(runtime.parked.contains_key(&hidden));
+    assert!(runtime.inaccessible_since.is_empty());
+}
+
+#[test]
+fn persistently_inaccessible_or_closed_hidden_windows_are_forgotten() {
+    let stuck = window(10);
+    let closed = window(11);
+    let mut backend = FakeBackend {
+        observation: Some(observation(&stuck, frame(50))),
+        frame_outcome: Some(macos::WindowAccessError::Gone),
+        ..FakeBackend::default()
+    };
+    backend.server_frames.insert(stuck.clone(), frame(50));
+    let mut runtime = runtime(backend);
+    let workspace = WorkspaceId::new(2).unwrap();
+    bind(&mut runtime, workspace, &stuck);
+    bind(&mut runtime, workspace, &closed);
+    let cancelled = AtomicBool::new(false);
+
+    runtime.cycle(outputs(), &cancelled).unwrap();
+    // The window server does not list the closed window: forgotten at once.
+    assert_eq!(runtime.workspaces.workspace_of(&closed), None);
+    assert_eq!(runtime.workspaces.workspace_of(&stuck), Some(workspace));
+
+    *runtime.inaccessible_since.get_mut(&stuck).unwrap() -= crate::app::parking::INACCESSIBLE_GRACE;
+    runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(runtime.workspaces.workspace_of(&stuck), None);
 }

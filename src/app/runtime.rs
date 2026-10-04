@@ -14,8 +14,9 @@ pub(super) struct RuntimeDebug {
     displays: Vec<DebugDisplay>,
     tiles: Vec<NavigationTile>,
     floating: Vec<DebugFloatingWindow>,
-    /// Quarantined windows left unmanaged because they un-park themselves.
-    ignored: Vec<crate::PhysicalWindowId>,
+    /// Managed windows left visible across workspace switches because they
+    /// repeatedly reject parking positions.
+    parking_exempt: Vec<crate::PhysicalWindowId>,
     targets: DebugTargets,
 }
 
@@ -76,16 +77,23 @@ pub(super) struct WorkspaceRuntime<B = MacWorkspaceBackend> {
     /// Consecutive re-parks undone by the app; past the limit the window's
     /// reappearance is honored instead of fought.
     pub(super) repark_attempts: HashMap<crate::PhysicalWindowId, u8>,
-    /// Windows that repeatedly un-park themselves; left unmanaged for the session.
-    pub(super) quarantined: HashSet<crate::PhysicalWindowId>,
+    /// Windows that repeatedly un-park themselves. They remain managed and
+    /// tiled, but are left visible across workspace switches for the session.
+    pub(super) parking_exempt: HashSet<crate::PhysicalWindowId>,
     /// Bound windows the window server shows on screen while the app's
     /// Accessibility snapshot omits them, and when the omission began.
     pub(super) omitted_windows: HashMap<crate::PhysicalWindowId, Instant>,
+    /// Owned windows Accessibility reports gone while the window server still
+    /// lists them, and when that began.
+    pub(super) inaccessible_since: HashMap<crate::PhysicalWindowId, Instant>,
     pub(super) config: Config,
     pub(super) foreground_lanes: HashMap<String, DisplaySelector>,
     pub(super) suppressed_focus: Option<crate::PhysicalWindowId>,
     pub(super) pending_fullscreen_focus_restore: HashSet<WorkspaceId>,
     pub(super) persisted_workspace_state: crate::workspace::WorkspaceState,
+    /// Title-free placements that survive application relaunches and reboots.
+    pub(super) memory: MemoryState,
+    pub(super) journal: JournalState,
 }
 
 impl WorkspaceRuntime<MacWorkspaceBackend> {
@@ -126,12 +134,17 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 (result, outputs)
             }
             WorkerCommand::RestoreAll => {
-                return Some(WorkerResult::Restored {
-                    failed: self.restore_all(),
-                });
+                let requested = self.parked.len();
+                let failed = self.restore_all();
+                self.journal_restore("restore all", requested, failed);
+                return Some(WorkerResult::Restored { failed });
             }
-            WorkerCommand::Stop => return None,
+            WorkerCommand::Stop => {
+                self.journal_event(crate::journal::JournalEvent::Stop);
+                return None;
+            }
         };
+        self.check_arrangement(&outputs);
         Some(WorkerResult::Status {
             result,
             debug: Box::new(self.debug_state(&outputs)),
@@ -227,14 +240,24 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             recently_parked: HashMap::new(),
             recent_heals: HashMap::new(),
             repark_attempts: HashMap::new(),
-            quarantined: HashSet::new(),
+            parking_exempt: HashSet::new(),
             omitted_windows: HashMap::new(),
+            inaccessible_since: HashMap::new(),
             config,
             foreground_lanes: HashMap::new(),
             suppressed_focus: None,
             pending_fullscreen_focus_restore,
             persisted_workspace_state,
+            memory: MemoryState::default(),
+            journal: JournalState::default(),
         }
+    }
+
+    pub(super) fn restore_window_memory(&mut self, memory: crate::window_memory::WindowMemory) {
+        self.memory = MemoryState {
+            memory,
+            ..MemoryState::default()
+        };
     }
 
     pub(super) fn visible_workspaces(
@@ -392,10 +415,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 .collect(),
             tiles,
             floating,
-            ignored: {
-                let mut ignored: Vec<_> = self.quarantined.iter().cloned().collect();
-                ignored.sort_by_key(|window| (window.app.pid, window.window_id));
-                ignored
+            parking_exempt: {
+                let mut windows: Vec<_> = self.parking_exempt.iter().cloned().collect();
+                windows.sort_by_key(|window| (window.app.pid, window.window_id));
+                windows
             },
             targets,
         }
@@ -460,6 +483,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         self.recently_parked.remove(window);
         self.recent_heals.remove(window);
         self.repark_attempts.remove(window);
+        self.inaccessible_since.remove(window);
     }
 
     pub(super) fn clear_fullscreen_restore_if_inactive(&mut self, workspace: WorkspaceId) {

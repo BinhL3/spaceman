@@ -49,7 +49,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return Ok(self.status(0, &outputs));
         }
         let switch_started = Instant::now();
-        let outgoing = self.workspaces.windows(previous);
+        let mut outgoing = self.workspaces.windows(previous);
+        self.order_back_to_front(&mut outgoing, |window| window.window_id);
         let incoming = self.workspaces.windows(workspace);
         log_event!(
             "switch: workspace {} -> {} (outgoing {}, incoming {})",
@@ -237,6 +238,31 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             }
             self.persist_removals_or_rollback(removed);
         }
+    }
+
+    /// Park the window furthest back first. Hiding the front window first
+    /// uncovers the windows stacked beneath it (every Fullscreen Layout tile
+    /// shares one frame) until they are parked too, which reads as a flash.
+    pub(super) fn order_back_to_front<T>(
+        &mut self,
+        items: &mut [T],
+        window_id: impl Fn(&T) -> u32,
+    ) {
+        if items.len() < 2 {
+            return;
+        }
+        let Some(order) = self.backend.onscreen_window_order() else {
+            return;
+        };
+        let rank: HashMap<u32, usize> = order
+            .iter()
+            .enumerate()
+            .map(|(rank, id)| (*id, rank))
+            .collect();
+        // Off-screen windows uncover nothing; they sort first.
+        items.sort_by_key(|item| {
+            std::cmp::Reverse(rank.get(&window_id(item)).copied().unwrap_or(usize::MAX))
+        });
     }
 
     /// Undo a partially applied switch: bring the outgoing windows back and

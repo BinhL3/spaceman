@@ -13,10 +13,8 @@ fn mouse_deferred_layout_does_not_roll_back_a_switch() {
     backend.frames.insert(incoming.clone(), frame(60));
     let mut runtime = runtime(backend);
     bind(&mut runtime, WorkspaceId::ONE, &outgoing);
-    runtime.workspaces.refresh_ownership(WorkspaceId::ONE);
     let target = WorkspaceId::new(2).unwrap();
     bind(&mut runtime, target, &incoming);
-    runtime.workspaces.refresh_ownership(target);
 
     let result = runtime.switch(target, outputs(), &AtomicBool::new(false));
 

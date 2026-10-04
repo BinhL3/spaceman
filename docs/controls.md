@@ -31,7 +31,11 @@ tile.
 Fullscreen Layout is a workspace mode: every tiled window receives the full display frame, and the
 focused window is raised above the others. Its menu-bar workspace glyph is filled while the mode is
 active. Option-backtick focuses the next tiled window and wraps
-through the workspace's stable tile order; it provides the same ordering in split layouts.
+through the workspace's stable tile order; it provides the same ordering in split layouts. In
+Fullscreen Layout, `Option+H`/`Option+K` step to the previous tile and `Option+L`/`Option+J` to the
+next one in that order without wrapping; past either end of the stack they continue to the adjacent
+display, as in a split layout. Leaving the workspace hides its windows back to front, so stacked
+windows are never uncovered mid-switch.
 Command-backtick continues to use macOS's same-application window cycle, and Spaceman remembers the
 resulting focus. Press `Option+Shift+F` again to restore the unchanged split layout. Fullscreen Layout
 and its active tile survive workspace switches, native-tab physical-window replacement, and Spaceman
@@ -89,8 +93,10 @@ spaceman ctl back-and-forth
 spaceman ctl move 7
 spaceman ctl move-app com.tinyspeck.slackmacgap 6
 spaceman ctl focus left
+spaceman ctl focus next
 spaceman ctl move-direction right
 spaceman ctl layout
+spaceman ctl fullscreen
 spaceman ctl resize shrink
 spaceman ctl resize grow
 spaceman ctl balance
@@ -100,16 +106,35 @@ spaceman ctl retile
 spaceman ctl restart
 spaceman ctl quit
 spaceman hud
+spaceman doctor
+spaceman doctor 24
 ```
 
-Directions are `left`, `down`, `up`, and `right`. `balance` equalizes the focused tile's immediate
+Directions are `left`, `down`, `up`, and `right`. `focus next` is Option-backtick and `fullscreen`
+toggles the focused workspace's Fullscreen Layout, like `Option+Shift+F`. `balance` equalizes the focused tile's immediate
 split while respecting nested minimum sizes. `hud` repeatedly renders sanitized runtime geometry in
 the terminal until interrupted.
 
 `ctl debug` excludes window titles. It reports each display's Fullscreen Layout state and tiled
 geometry plus floating-window workspace, parked state, and original recovery frame so workspace leaks
-can be diagnosed safely. Its `ignored` list names quarantined windows that un-parked themselves
-repeatedly and are left unmanaged.
+can be diagnosed safely. Its `parking_exempt` list names managed windows that repeatedly rejected
+parking positions and are therefore left visible across workspace switches for the current session.
+
+`doctor` summarizes the arrangement journal (all of it, or the last N hours): agent starts and their
+loaded state, exit restorations, remembered placements recalled or left unclaimed, and every
+model/screen disagreement that lasted at least three seconds, grouped by kind with counts, total and
+longest durations, and the applications involved. It ends with the last known per-workspace
+arrangement. It reads files directly and works while the agent is stopped. The journaled kinds are:
+
+| Kind | Meaning |
+| --- | --- |
+| `leaked` | owned by a hidden workspace, not parked, yet on a display |
+| `stranded` | owned by a visible workspace and not parked, yet off every display |
+| `parked_visible` | recorded as parked, yet on a display |
+| `unadopted` | managed by configuration and on a display, but owned by no workspace |
+| `misplaced` | tiled on a visible workspace more than 16 pixels from its layout target |
+| `missing` | owned, but the window server no longer lists it |
+| `parking_exempt` | left visible across switches after repeatedly un-parking itself |
 
 The agent listens at `~/Library/Application Support/Spaceman/control.sock`; both socket and lock file
 are mode `0600`. Requests are newline-delimited, limited to 4 KiB, and served locally over a Unix
