@@ -70,6 +70,8 @@ pause, quit, or hotkey loss.
 - A window that enters macOS native fullscreen (for example browser video) loses its slot after two
   seconds and returns as a new tile at the end of the layout
   ([known defect](fullscreen-layout.md#gotchas)).
-- Floating windows (rules or non-resizable) are owned by a workspace but never tiled or resized.
-- An app whose windows span several workspaces sends its new windows to the display under the
-  window rather than "its" workspace.
+- Floating windows (rules, modal/dialog windows without an enabled fullscreen button, or non-resizable
+  windows) are owned by a workspace (and can be moved between workspaces) but are never tiled or
+  resized.
+- New windows open on the active workspace of the display under the window's center unless matched by
+  an explicit `route` rule or startup placement recall.

@@ -205,7 +205,7 @@ fn cycle_reconciles_and_applies_through_the_fake_backend() {
 }
 
 #[test]
-fn new_ghostty_window_joins_unique_workspace_across_displays() {
+fn new_ghostty_window_opens_on_its_current_display_active_workspace() {
     let existing = window(10);
     let created = window(11);
     let main_frame = frame(50);
@@ -236,13 +236,13 @@ fn new_ghostty_window_joins_unique_workspace_across_displays() {
     );
     assert_eq!(
         runtime.workspaces.workspace_of(&created),
-        Some(WorkspaceId::ONE)
+        Some(WorkspaceId::SIX)
     );
-    assert!(runtime.backend.frames[&created].x < 1000);
+    assert!(runtime.backend.frames[&created].x >= 1000);
 }
 
 #[test]
-fn explicit_route_overrides_unique_app_affinity() {
+fn bundle_route_applies_to_initial_window_while_secondary_windows_stay_on_active_workspace() {
     let existing = window(10);
     let created = window(11);
     let mut backend = FakeBackend {
@@ -257,6 +257,44 @@ fn explicit_route_overrides_unique_app_affinity() {
     backend.frames.insert(created.clone(), frame(100));
     let config = Config::parse(
         "version = 1\n[[rules]]\nbundle_id = 'com.example.Test'\naction = 'route'\nworkspace = 6",
+    )
+    .unwrap();
+    let mut runtime = runtime_with_config(backend, config);
+    bind(&mut runtime, WorkspaceId::ONE, &existing);
+
+    runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+
+    assert_eq!(
+        runtime.workspaces.workspace_of(&existing),
+        Some(WorkspaceId::ONE)
+    );
+    assert_eq!(
+        runtime.workspaces.workspace_of(&created),
+        Some(WorkspaceId::ONE)
+    );
+    assert!(runtime.backend.frames[&created].x < 1000);
+}
+
+#[test]
+fn title_route_rule_routes_matching_secondary_window() {
+    let existing = window(10);
+    let created = window(11);
+    let mut observed = observation_for_windows(
+        "com.example.Test",
+        &created,
+        &[(existing.clone(), frame(50)), (created.clone(), frame(100))],
+    );
+    if let crate::AppObservation::Complete { windows, .. } = &mut observed.applications[0] {
+        windows[1].title = Some("Huddle".into());
+    }
+    let mut backend = FakeBackend {
+        observation: Some(observed),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(existing.clone(), frame(50));
+    backend.frames.insert(created.clone(), frame(100));
+    let config = Config::parse(
+        "version = 1\n[[rules]]\nbundle_id = 'com.example.Test'\ntitle = 'Huddle'\naction = 'route'\nworkspace = 6",
     )
     .unwrap();
     let mut runtime = runtime_with_config(backend, config);
@@ -374,7 +412,7 @@ fn app_spanning_workspaces_keeps_current_display_routing() {
 }
 
 #[test]
-fn simultaneous_new_windows_use_the_same_frozen_affinity() {
+fn simultaneous_new_windows_stay_on_their_display_active_workspace() {
     let existing = window(10);
     let first = window(11);
     let second = window(12);
@@ -400,18 +438,18 @@ fn simultaneous_new_windows_use_the_same_frozen_affinity() {
 
     assert_eq!(
         runtime.workspaces.workspace_of(&first),
-        Some(WorkspaceId::ONE)
+        Some(WorkspaceId::SIX)
     );
     assert_eq!(
         runtime.workspaces.workspace_of(&second),
-        Some(WorkspaceId::ONE)
+        Some(WorkspaceId::SIX)
     );
-    assert!(runtime.backend.frames[&first].x < 1000);
-    assert!(runtime.backend.frames[&second].x < 1000);
+    assert!(runtime.backend.frames[&first].x >= 1000);
+    assert!(runtime.backend.frames[&second].x >= 1000);
 }
 
 #[test]
-fn new_window_for_unique_inactive_workspace_is_parked() {
+fn new_window_opens_on_active_workspace_even_when_app_has_window_on_inactive_workspace() {
     let existing = window(10);
     let created = window(11);
     let mut backend = FakeBackend {
@@ -433,11 +471,16 @@ fn new_window_for_unique_inactive_workspace_is_parked() {
 
     runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
 
-    assert_eq!(runtime.workspaces.workspace_of(&created), Some(inactive));
-    assert!(runtime.parked.contains_key(&created));
+    assert_eq!(
+        runtime.workspaces.workspace_of(&created),
+        Some(WorkspaceId::SIX)
+    );
+    assert!(!runtime.parked.contains_key(&created));
     assert!(
-        !outputs()
-            .union()
+        outputs()
+            .secondary()
+            .unwrap()
+            .frame
             .contains_center(runtime.backend.frames[&created])
     );
 }

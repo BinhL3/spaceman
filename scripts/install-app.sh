@@ -31,7 +31,10 @@ ditto "$source_bundle" "$installed_bundle"
 codesign --verify --deep --strict "$installed_bundle"
 mkdir -p "$cli_root"
 ln -sf "$installed_bundle/Contents/MacOS/spaceman" "$cli_root/spaceman"
-open "$installed_bundle"
+for _ in $(seq 1 10); do
+  open "$installed_bundle" 2>/dev/null && break
+  sleep 0.2
+done
 if $was_automatic; then
   for _ in $(seq 1 75); do
     if "$installed_bundle/Contents/MacOS/spaceman" ctl resume >/dev/null 2>&1; then

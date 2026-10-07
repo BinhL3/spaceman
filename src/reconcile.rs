@@ -131,72 +131,69 @@ pub fn reconcile(
                     evidence,
                     settings,
                 };
-                if reconcile_unresolved(&mut next, &app.id, &context, &mut decisions) {
-                    next.continuity
-                        .entry(app.id.clone())
-                        .or_default()
-                        .previous_focused = focused.clone();
-                    continue;
-                }
-                let current: HashSet<_> = windows.iter().map(|window| window.id.clone()).collect();
-                let existing: HashSet<_> = next
-                    .workspace
-                    .slots
-                    .iter()
-                    .filter(|slot| slot.belongs_to(&app.id))
-                    .filter_map(|slot| slot.bound_window().cloned())
-                    .collect();
-                let stale: Vec<_> = existing.difference(&current).cloned().collect();
-                let new: Vec<_> = current.difference(&existing).cloned().collect();
-
-                let replacement = app.bundle_id == "com.mitchellh.ghostty"
-                    && replacement_candidate(&next, &stale, &new, &context);
-
-                if replacement {
-                    let previous = &stale[0];
-                    let current = &new[0];
-                    let slot = next
+                if !reconcile_unresolved(&mut next, &app.id, &context, &mut decisions) {
+                    let current: HashSet<_> =
+                        windows.iter().map(|window| window.id.clone()).collect();
+                    let existing: HashSet<_> = next
                         .workspace
                         .slots
-                        .iter_mut()
-                        .find(|slot| slot.bound_window() == Some(previous))
-                        .expect("stale window came from a bound slot");
-                    slot.binding = BindingState::Bound(current.clone());
-                    decisions.push(Decision::NativeTabReplaced {
-                        slot: slot.id,
-                        previous: previous.clone(),
-                        current: current.clone(),
-                    });
-                } else if app.bundle_id == "com.mitchellh.ghostty"
-                    && !stale.is_empty()
-                    && !new.is_empty()
-                {
-                    for slot in next.workspace.slots.iter_mut().filter(|slot| {
-                        slot.bound_window()
-                            .is_some_and(|window| stale.contains(window))
-                    }) {
-                        let previous = slot
-                            .bound_window()
-                            .expect("filtered to a bound slot")
-                            .clone();
-                        slot.binding = BindingState::Unresolved {
-                            previous,
-                            candidates: new.clone(),
-                            since: observation.cycle,
-                        };
+                        .iter()
+                        .filter(|slot| slot.belongs_to(&app.id))
+                        .filter_map(|slot| slot.bound_window().cloned())
+                        .collect();
+                    let stale: Vec<_> = existing.difference(&current).cloned().collect();
+                    let new: Vec<_> = current.difference(&existing).cloned().collect();
+
+                    let replacement = app.bundle_id == "com.mitchellh.ghostty"
+                        && replacement_candidate(&next, &stale, &new, &context);
+
+                    if replacement {
+                        let previous = &stale[0];
+                        let current = &new[0];
+                        let slot = next
+                            .workspace
+                            .slots
+                            .iter_mut()
+                            .find(|slot| slot.bound_window() == Some(previous))
+                            .expect("stale window came from a bound slot");
+                        slot.binding = BindingState::Bound(current.clone());
+                        decisions.push(Decision::NativeTabReplaced {
+                            slot: slot.id,
+                            previous: previous.clone(),
+                            current: current.clone(),
+                        });
+                    } else if app.bundle_id == "com.mitchellh.ghostty"
+                        && !stale.is_empty()
+                        && !new.is_empty()
+                    {
+                        for slot in &mut next.workspace.slots {
+                            let Some(previous) = slot
+                                .bound_window()
+                                .filter(|window| stale.contains(window))
+                                .cloned()
+                            else {
+                                continue;
+                            };
+                            slot.binding = BindingState::Unresolved {
+                                previous,
+                                candidates: new.clone(),
+                                since: observation.cycle,
+                            };
+                        }
+                        decisions.push(Decision::NativeTabAmbiguous {
+                            app: app.id.clone(),
+                        });
+                    } else {
+                        remove_windows(&mut next, &stale, &mut decisions);
+                        insert_windows(&mut next, &new, &mut decisions);
                     }
-                    decisions.push(Decision::NativeTabAmbiguous {
-                        app: app.id.clone(),
-                    });
-                } else {
-                    remove_windows(&mut next, &stale, &mut decisions);
-                    insert_windows(&mut next, &new, &mut decisions);
                 }
 
                 next.continuity
                     .entry(app.id.clone())
                     .or_default()
-                    .previous_focused = focused.clone();
+                    .previous_focused
+                    .clone_from(focused);
             }
         }
     }
@@ -277,22 +274,15 @@ fn reconcile_unresolved(
         context.cycle.saturating_sub(*since) >= GHOSTTY_REPLACEMENT_SETTLE_CYCLES
     });
     if expired {
-        let expired_slots: HashSet<_> = unresolved
-            .iter()
-            .map(|index| model.workspace.slots[*index].id)
-            .collect();
-        model.workspace.slots.retain(|slot| {
-            if !expired_slots.contains(&slot.id) {
-                return true;
+        model.workspace.slots.retain(|slot| match &slot.binding {
+            BindingState::Unresolved { previous, .. } if slot.belongs_to(app) => {
+                decisions.push(Decision::WindowRemoved {
+                    slot: slot.id,
+                    window: previous.clone(),
+                });
+                false
             }
-            let BindingState::Unresolved { previous, .. } = &slot.binding else {
-                unreachable!()
-            };
-            decisions.push(Decision::WindowRemoved {
-                slot: slot.id,
-                window: previous.clone(),
-            });
-            false
+            _ => true,
         });
         insert_windows(model, &candidates, decisions);
         return true;
@@ -375,29 +365,34 @@ fn candidate_matches_target(
 }
 
 fn remove_app(model: &mut Model, app: &AppInstanceId, decisions: &mut Vec<Decision>) {
-    let windows: Vec<_> = model
-        .workspace
-        .slots
-        .iter()
-        .filter(|slot| slot.belongs_to(app))
-        .filter_map(|slot| slot.bound_window().cloned())
-        .collect();
-    remove_windows(model, &windows, decisions);
-    model.workspace.slots.retain(|slot| !slot.belongs_to(app));
+    model.workspace.slots.retain(|slot| {
+        if !slot.belongs_to(app) {
+            return true;
+        }
+        if let Some(window) = slot.bound_window().cloned() {
+            decisions.push(Decision::WindowRemoved {
+                slot: slot.id,
+                window,
+            });
+        }
+        false
+    });
 }
 
 fn remove_windows(model: &mut Model, windows: &[PhysicalWindowId], decisions: &mut Vec<Decision>) {
     model.workspace.slots.retain(|slot| {
-        let remove = slot
+        let Some(window) = slot
             .bound_window()
-            .is_some_and(|window| windows.contains(window));
-        if remove {
-            decisions.push(Decision::WindowRemoved {
-                slot: slot.id,
-                window: slot.bound_window().expect("filtered to bound slot").clone(),
-            });
-        }
-        !remove
+            .filter(|window| windows.contains(window))
+            .cloned()
+        else {
+            return true;
+        };
+        decisions.push(Decision::WindowRemoved {
+            slot: slot.id,
+            window,
+        });
+        false
     });
 }
 

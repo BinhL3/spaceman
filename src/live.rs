@@ -22,17 +22,9 @@ pub fn add_absent_applications_with(
     mut is_running: impl FnMut(&AppInstanceId) -> bool,
     mut has_window_server_evidence: impl FnMut(&AppInstanceId) -> bool,
 ) {
-    let present: HashSet<_> = observation
-        .applications
-        .iter()
-        .map(|app| match app {
-            AppObservation::Complete { app, .. } => app.id.clone(),
-            AppObservation::Unavailable { app, .. } | AppObservation::Terminated { app } => {
-                app.clone()
-            }
-        })
-        .collect();
+    let mut present = HashSet::with_capacity(observation.applications.len());
     for app in &observation.applications {
+        present.insert(app.app_id().clone());
         if let AppObservation::Complete { app, .. } = app {
             known_apps.insert(app.id.clone(), app.bundle_id.clone());
         }

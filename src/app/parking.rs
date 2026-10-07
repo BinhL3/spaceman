@@ -146,13 +146,13 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let Some(frame) = server_frames.get(&window.window_id).copied() else {
             return;
         };
-        let displays = outputs.frames().collect::<Vec<_>>();
-        if displays
-            .iter()
+        if outputs
+            .frames()
             .any(|display| display.contains_center(frame))
         {
             return;
         }
+        let displays = outputs.frames().collect::<Vec<_>>();
         let Some(output) = outputs.displays().iter().find_map(|display| {
             let parked = crate::geometry::parked_frame(display.frame, &displays, frame);
             parked
@@ -335,6 +335,20 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         {
             return;
         }
+        if server.width < original.width.saturating_sub(RESTORE_CONFIRM_TOLERANCE)
+            && server.height < original.height.saturating_sub(RESTORE_CONFIRM_TOLERANCE)
+            && self.backend.frame(window).is_ok_and(|ax| {
+                !context
+                    .displays
+                    .iter()
+                    .any(|display| display.contains_center(ax))
+            })
+        {
+            // Mission Control / Exposé scales parked windows into on-screen
+            // thumbnails in the window server while their Accessibility
+            // position stays parked off-screen.
+            return;
+        }
         let attempts = self.repark_attempts.entry(window.clone()).or_insert(0);
         *attempts += 1;
         if *attempts > REPARK_ATTEMPT_LIMIT {
@@ -428,7 +442,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .count()
     }
 
-    fn mark_parked(&mut self, window: crate::PhysicalWindowId, frame: crate::Rect) -> bool {
+    pub(super) fn mark_parked(
+        &mut self,
+        window: crate::PhysicalWindowId,
+        frame: crate::Rect,
+    ) -> bool {
         if self.parked.contains_key(&window) {
             return true;
         }
@@ -461,26 +479,28 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         // right after a move, which would misclassify the window and record a
         // wrong recovery frame.
         let frame = self.backend.window_server_frame(window).unwrap_or(frame);
+        let was_parked = self.parked.contains_key(window);
         if !outputs
             .frames()
             .any(|display| display.contains_center(frame))
-            && !self.parked.contains_key(window)
+            && !was_parked
         {
             // The app keeps this window off-screen itself. There is nothing to hide
             // and no on-screen frame worth recording for recovery.
             log_event!("park skip: {:?} already off-screen at {:?}", window, frame);
             return macos::ApplyOutcome::Applied;
         }
-        if !self.mark_parked(window.clone(), frame) {
+        let recovery = self.parked.get(window).copied().unwrap_or(frame);
+        if !self.mark_parked(window.clone(), recovery) {
             return macos::ApplyOutcome::Unavailable;
         }
         let displays = outputs.frames().collect::<Vec<_>>();
-        let parked = crate::geometry::parked_frame(output, &displays, frame);
+        let parked = crate::geometry::parked_frame(output, &displays, recovery);
         let outcome = self.backend.set_position(window, parked);
-        log_event!("park: {:?} from {:?} ({:?})", window, frame, outcome);
+        log_event!("park: {:?} from {:?} ({:?})", window, recovery, outcome);
         if matches!(outcome, macos::ApplyOutcome::Applied) {
             self.recently_parked.insert(window.clone(), Instant::now());
-        } else {
+        } else if !was_parked {
             let _ = self.restore_window(window);
         }
         outcome

@@ -256,6 +256,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     pub(super) fn restore_window_memory(&mut self, memory: crate::window_memory::WindowMemory) {
         self.memory = MemoryState {
             memory,
+            started_at: Some(Instant::now()),
             ..MemoryState::default()
         };
     }
@@ -324,6 +325,56 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         }
     }
 
+    pub(super) fn bundle_id(&self, app: &AppInstanceId) -> Option<&str> {
+        self.memory
+            .bundles
+            .get(app)
+            .or_else(|| {
+                self.known_apps
+                    .iter()
+                    .find_map(|apps| apps.get(app))
+                    .filter(|bundle| !bundle.is_empty())
+            })
+            .map(String::as_str)
+    }
+
+    pub(super) fn ensure_managed_workspace(
+        &self,
+        workspace: WorkspaceId,
+    ) -> Result<DisplaySelector, String> {
+        if !self.workspaces.is_enabled(workspace) {
+            return Err(format!("Workspace {workspace} is not configured"));
+        }
+        let selector = self.workspaces.assignment(workspace).clone();
+        if !self.scope.manages_selector(&selector) {
+            return Err(format!(
+                "Workspace {} is outside the managed display scope",
+                workspace
+            ));
+        }
+        Ok(selector)
+    }
+
+    pub(super) fn exit_fullscreen_if_split(&mut self, workspace: WorkspaceId) {
+        if !self.workspaces.uses_fullscreen_layout(workspace) {
+            return;
+        }
+        let bound_count = self
+            .workspaces
+            .engine(workspace)
+            .model()
+            .workspace
+            .slots
+            .iter()
+            .filter(|slot| slot.bound_window().is_some())
+            .count();
+        if bound_count > 1 {
+            log_event!("workspace {workspace}: exited Fullscreen Layout ({bound_count} tiles)");
+            self.workspaces.set_fullscreen_layout(workspace, false);
+            self.pending_fullscreen_focus_restore.remove(&workspace);
+        }
+    }
+
     pub(super) fn spatial_target(
         &self,
         focused: &crate::PhysicalWindowId,
@@ -336,8 +387,15 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     }
 
     pub(super) fn navigation_tiles(&self, outputs: &macos::DisplayOutputs) -> Vec<NavigationTile> {
+        self.navigation_tiles_for(&self.visible_workspaces(outputs))
+    }
+
+    pub(super) fn navigation_tiles_for(
+        &self,
+        visible: &[ResolvedWorkspace],
+    ) -> Vec<NavigationTile> {
         let mut tiles = Vec::new();
-        for resolved in self.visible_workspaces(outputs) {
+        for resolved in visible {
             let mut placements = self
                 .workspaces
                 .engine(resolved.workspace)
@@ -359,7 +417,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     }
 
     pub(super) fn debug_state(&mut self, outputs: &macos::DisplayOutputs) -> RuntimeDebug {
-        let tiles = self.navigation_tiles(outputs);
+        let visible = self.visible_workspaces(outputs);
+        let tiles = self.navigation_tiles_for(&visible);
         let focused = self.backend.focused_window();
         let target = |direction| {
             focused.as_ref().and_then(|focused| {
@@ -373,7 +432,6 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             up: target(Direction::Up),
             right: target(Direction::Right),
         };
-        let visible = self.visible_workspaces(outputs);
         let floating = self
             .workspaces
             .floating_entries()
@@ -399,12 +457,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                         name: display.name.clone(),
                         frame: display.frame,
                         workspace: resolved.workspace,
-                        axis: self
-                            .workspaces
-                            .engine(resolved.workspace)
-                            .model()
-                            .workspace
-                            .axis,
+                        axis: self.workspaces.engine(resolved.workspace).root_axis(),
                         fullscreen_layout: self
                             .workspaces
                             .uses_fullscreen_layout(resolved.workspace),
@@ -480,6 +533,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         self.clear_fullscreen_restore_if_inactive(workspace);
         self.workspaces.forget_floating(window);
         self.constrained[workspace.index()].remove(window);
+        self.omitted_windows.remove(window);
         self.recently_parked.remove(window);
         self.recent_heals.remove(window);
         self.repark_attempts.remove(window);

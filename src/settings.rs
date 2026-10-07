@@ -29,8 +29,7 @@ pub(crate) fn open(actions: Sender<Action>, cx: &mut App) -> Result<(), String> 
     if let Some(handle) = WINDOW.with(|window| *window.borrow())
         && handle
             .update(cx, |settings, window, cx| {
-                settings.refresh();
-                cx.notify();
+                settings.refresh(cx);
                 window.activate_window();
             })
             .is_ok()
@@ -65,11 +64,7 @@ pub(crate) fn refresh(cx: &mut App) {
         let Some(handle) = *window.borrow() else {
             return;
         };
-        let _ = handle.update(cx, |settings, _, cx| {
-            if settings.refresh() {
-                cx.notify();
-            }
-        });
+        let _ = handle.update(cx, |settings, _, cx| settings.refresh(cx));
     });
 }
 
@@ -89,11 +84,7 @@ impl SettingsWindow {
             loop {
                 Timer::after(Duration::from_secs(1)).await;
                 if settings
-                    .update(cx, |settings, cx| {
-                        if settings.refresh() {
-                            cx.notify();
-                        }
-                    })
+                    .update(cx, |settings, cx| settings.refresh(cx))
                     .is_err()
                 {
                     break;
@@ -102,8 +93,8 @@ impl SettingsWindow {
         })
         .detach();
         let activation = cx.observe_window_activation(window, |settings, window, cx| {
-            if window.is_window_active() && settings.refresh() {
-                cx.notify();
+            if window.is_window_active() {
+                settings.refresh(cx);
             }
         });
         let (launch_at_login, launch_error) = launch_status();
@@ -120,7 +111,7 @@ impl SettingsWindow {
         }
     }
 
-    fn refresh(&mut self) -> bool {
+    fn refresh(&mut self, cx: &mut Context<Self>) {
         let accessibility = macos::accessibility_trusted();
         let (launch_at_login, launch_error) = launch_status();
         let update_status = sparkle::status();
@@ -134,7 +125,9 @@ impl SettingsWindow {
             .set_enabled(launch_at_login == login_item::Status::Enabled);
         self.launch_error = launch_error;
         self.update_status = update_status;
-        changed
+        if changed {
+            cx.notify();
+        }
     }
 
     fn send(&self, action: Action) {

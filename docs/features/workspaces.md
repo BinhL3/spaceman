@@ -26,10 +26,10 @@ Focus follows                                              // ws.focus-follow
 
 Where a new window goes (first match wins)                 // ws.adoption
 ├── ignore rule        -> never managed
-├── route rule         -> that workspace (parked if hidden)
-├── float rule / non-resizable -> floating on the workspace where first seen
-├── remembered placement (relaunched app, first 60 s) -> remembered workspace   // working tree only
-├── app already on exactly one workspace -> that workspace
+├── route rule         -> that workspace (parked if hidden); bundle-only route rules apply to the
+│                         app's initial window while secondary windows stay on the active workspace
+├── float rule / dialog / non-resizable -> floating on the workspace where first seen
+├── remembered placement (startup window, first 60 s) -> remembered workspace
 └── otherwise          -> active workspace of the display under the window's center
 
 Displays                                                    // ws.displays
@@ -66,9 +66,11 @@ on the same letter.
   `workspace_back_and_forth_tracks_each_display_lane_independently`,
   `switching_to_an_unconfigured_named_workspace_is_rejected`.
 - Unit (FakeBackend), `src/app/tests/reconciliation.rs`: adoption order
-  (`explicit_route_overrides_unique_app_affinity`, `ignore_rule_releases_the_window_and_never_adopts_it`,
+  (`bundle_route_applies_to_initial_window_while_secondary_windows_stay_on_active_workspace`,
+  `title_route_rule_routes_matching_secondary_window`,
+  `ignore_rule_releases_the_window_and_never_adopts_it`,
   `floating_rule_owns_window_without_adding_it_to_layout`,
-  `new_window_for_unique_inactive_workspace_is_parked`), display fallback
+  `new_window_opens_on_active_workspace_even_when_app_has_window_on_inactive_workspace`), display fallback
   (`missing_preferred_display_falls_back_without_double_visibility`,
   `active_preferred_workspace_falls_back_and_returns_after_hotplug`).
 - Unit (FakeBackend), `src/app/tests/parking.rs`: parking without minimizing, re-parking windows that

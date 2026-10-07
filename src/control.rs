@@ -6,7 +6,7 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     path::PathBuf,
-    sync::mpsc::{Receiver, Sender, channel},
+    sync::mpsc::{Sender, channel},
     thread,
     time::Duration,
 };
@@ -37,12 +37,12 @@ pub(crate) struct Request {
 }
 
 impl Request {
-    pub fn respond(self, response: Result<String, String>) {
+    pub(crate) fn respond(self, response: Result<String, String>) {
         let _ = self.response.send(response);
     }
 }
 
-pub struct Server {
+pub(crate) struct Server {
     path: PathBuf,
     _lock: File,
 }
@@ -142,7 +142,9 @@ fn serve(listener: UnixListener, requests: Sender<Request>) {
             requests
                 .send(Request { command, response })
                 .map_err(|_| "Spaceman agent is stopping".to_string())?;
-            receive_response(receiver)
+            receiver
+                .recv_timeout(RESPONSE_TIMEOUT)
+                .map_err(|_| "Spaceman did not respond to the control command".to_string())?
         });
         let (prefix, message) = match response {
             Ok(message) => ("ok", message),
@@ -165,12 +167,6 @@ fn read_command(reader: impl Read) -> Result<String, String> {
         return Err("control command must end with a newline".into());
     }
     String::from_utf8(bytes).map_err(|_| "control command is not valid UTF-8".into())
-}
-
-fn receive_response(receiver: Receiver<Result<String, String>>) -> Result<String, String> {
-    receiver
-        .recv_timeout(RESPONSE_TIMEOUT)
-        .map_err(|_| "Spaceman did not respond to the control command".to_string())?
 }
 
 fn socket_path() -> Result<PathBuf, String> {

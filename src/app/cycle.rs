@@ -107,15 +107,15 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 .as_ref()
                 .is_none_or(|frontmost| &focused.app == frontmost)
         });
-        let focus_workspace = focused
-            .as_ref()
-            .filter(|_| focused_is_frontmost)
-            .and_then(|focused| self.workspaces.workspace_of_any(focused))
-            .or_else(|| {
-                frontmost
-                    .as_ref()
-                    .and_then(|app| self.workspaces.workspace_for_app(app))
-            });
+        let focus_workspace = if focused_is_frontmost {
+            focused
+                .as_ref()
+                .and_then(|focused| self.workspaces.workspace_of_any(focused))
+        } else {
+            frontmost
+                .as_ref()
+                .and_then(|app| self.workspaces.workspace_for_app(app))
+        };
         let suppressed = focused_is_frontmost
             && focused
                 .as_ref()
@@ -254,16 +254,18 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 continue;
             };
             if has_floating {
-                let observed: HashSet<_> = windows.iter().map(|window| &window.id).collect();
-                for window in self.workspaces.floating_windows_for_app(&app.id) {
-                    if !observed.contains(&window) && !self.parked.contains_key(&window) {
+                let floating_windows = self.workspaces.floating_windows_for_app(&app.id);
+                for window in floating_windows {
+                    if !windows.iter().any(|observed| observed.id == window)
+                        && !self.parked.contains_key(&window)
+                    {
                         log_event!("forget floating {:?}: not observed and not parked", window);
                         self.workspaces.forget_floating(&window);
                     }
                 }
             }
             self.prepare_recall(app, windows);
-            let app_workspace = self.workspaces.workspace_for_app(&app.id);
+            let mut app_owns_window = self.workspaces.app_owns_windows(&app.id);
             for window in windows {
                 self.heal_reappeared_window(window, visible, server_frames);
                 let disposition = self.config.disposition(&app.bundle_id, window);
@@ -302,6 +304,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 } else if floating && self.workspaces.floating_workspace_of(&window.id).is_some() {
                     FrozenWindowAffinity::Floating
                 } else if floating && let Some(placement) = self.memory.recalled(&window.id) {
+                    app_owns_window = true;
                     self.workspaces
                         .own_floating(window.id.clone(), placement.workspace);
                     FrozenWindowAffinity::Floating
@@ -310,6 +313,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                         .iter()
                         .find(|resolved| resolved.output.contains_center(window.frame))
                         .map_or(FrozenWindowAffinity::CurrentDisplay, |resolved| {
+                            app_owns_window = true;
                             log_event!(
                                 "adopt floating {:?} -> workspace {}",
                                 window.id,
@@ -331,15 +335,24 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                                     target
                                 ));
                             }
-                            FrozenWindowAffinity::ExplicitRoute(target)
+                            if !app_owns_window
+                                || self.config.route_matches_title(&app.bundle_id, window)
+                            {
+                                app_owns_window = true;
+                                FrozenWindowAffinity::ExplicitRoute(target)
+                            } else {
+                                FrozenWindowAffinity::CurrentDisplay
+                            }
                         }
-                        WindowDisposition::Managed => self
-                            .memory
-                            .recalled(&window.id)
-                            .map(|placement| placement.workspace)
-                            .or(app_workspace)
-                            .map(FrozenWindowAffinity::Inferred)
-                            .unwrap_or(FrozenWindowAffinity::CurrentDisplay),
+                        WindowDisposition::Managed => {
+                            app_owns_window = true;
+                            self.memory
+                                .recalled(&window.id)
+                                .map(|placement| {
+                                    FrozenWindowAffinity::Inferred(placement.workspace)
+                                })
+                                .unwrap_or(FrozenWindowAffinity::CurrentDisplay)
+                        }
                         WindowDisposition::Floating | WindowDisposition::Ignored => unreachable!(),
                     }
                 };
@@ -369,6 +382,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return;
         };
         let bound = self.workspaces.engine(workspace).bound_windows();
+        if bound.is_empty() && self.omitted_windows.is_empty() {
+            return;
+        }
         let observed: HashSet<_> = live::observed_frames(observation).into_keys().collect();
         self.omitted_windows
             .retain(|window, _| match self.workspaces.workspace_of(window) {
@@ -527,7 +543,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .engine_mut(workspace)
             .accept(ticket, &scoped_observation, &settings)
             .map_err(|error| format!("stale workspace cycle: {error:?}"))?;
-        log_binding_decisions(workspace, &reconciliation.decisions);
+        self.log_binding_decisions(workspace, &reconciliation.decisions, affinity_policy);
         let routes: Vec<_> = reconciliation
             .decisions
             .iter()
@@ -569,22 +585,35 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             }
             routed_targets.insert(*target);
         }
-        self.workspaces.prune_intents(workspace);
-        self.clear_fullscreen_restore_if_inactive(workspace);
-        for target in &routed_targets {
-            self.clear_fullscreen_restore_if_inactive(*target);
-        }
+        let inserted_here = reconciliation.decisions.iter().any(|decision| {
+            matches!(
+                decision,
+                Decision::WindowInserted { window, .. }
+                    if !routes.iter().any(|(routed, _)| routed == window)
+            )
+        });
         let bound: HashSet<_> = self
             .workspaces
             .engine(workspace)
             .bound_windows()
             .into_iter()
             .collect();
+        if inserted_here {
+            self.exit_fullscreen_if_split(workspace);
+        }
+        for target in &routed_targets {
+            self.exit_fullscreen_if_split(*target);
+        }
+        self.workspaces.prune_intents(workspace);
+        self.clear_fullscreen_restore_if_inactive(workspace);
+        for target in &routed_targets {
+            self.clear_fullscreen_restore_if_inactive(*target);
+        }
         self.constrained[workspace.index()].retain(|window, _| bound.contains(window));
         let observed_frames = live::observed_frames(&scoped_observation);
         let filter_unchanged = routes.is_empty();
         let mut placements = if filter_unchanged {
-            reconciliation.placements.clone()
+            reconciliation.placements
         } else {
             self.workspaces.engine(workspace).placements(&settings)
         };
@@ -629,6 +658,45 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         }
         Ok(())
     }
+    /// Slot-identity changes are the events that explain "my window moved"; the
+    /// steady-state decisions (unavailable, deferred) would only add noise.
+    fn log_binding_decisions(
+        &self,
+        workspace: WorkspaceId,
+        decisions: &[Decision],
+        affinity_policy: &FrozenAffinityPolicy,
+    ) {
+        for decision in decisions {
+            match decision {
+                Decision::WindowInserted { slot, window } => {
+                    let bundle = self.bundle_id(&window.app).unwrap_or("unknown");
+                    let affinity = affinity_policy.windows.get(window);
+                    log_event!(
+                        "workspace {workspace}: bound {window:?} ({bundle}, {affinity:?}) to slot {slot:?}"
+                    );
+                }
+                Decision::WindowRemoved { slot, window } => {
+                    let bundle = self.bundle_id(&window.app).unwrap_or("unknown");
+                    log_event!(
+                        "workspace {workspace}: retired slot {slot:?} ({window:?} / {bundle} absent)"
+                    );
+                }
+                Decision::NativeTabReplaced {
+                    slot,
+                    previous,
+                    current,
+                } => {
+                    log_event!("workspace {workspace}: slot {slot:?} {previous:?} -> {current:?}");
+                }
+                Decision::ApplicationTerminated { app } => {
+                    log_event!("workspace {workspace}: {app:?} terminated");
+                }
+                Decision::NativeTabAmbiguous { .. }
+                | Decision::ObservationUnavailable { .. }
+                | Decision::MouseDownDeferred => {}
+            }
+        }
+    }
 }
 
 fn update_observed_frames(
@@ -651,34 +719,6 @@ fn update_observed_frames(
                     window.frame = *frame;
                 }
             }
-        }
-    }
-}
-
-/// Slot-identity changes are the events that explain "my window moved"; the
-/// steady-state decisions (unavailable, deferred) would only add noise.
-fn log_binding_decisions(workspace: WorkspaceId, decisions: &[Decision]) {
-    for decision in decisions {
-        match decision {
-            Decision::WindowInserted { slot, window } => {
-                log_event!("workspace {workspace}: bound {window:?} to slot {slot:?}");
-            }
-            Decision::WindowRemoved { slot, window } => {
-                log_event!("workspace {workspace}: retired slot {slot:?} ({window:?} absent)");
-            }
-            Decision::NativeTabReplaced {
-                slot,
-                previous,
-                current,
-            } => {
-                log_event!("workspace {workspace}: slot {slot:?} {previous:?} -> {current:?}");
-            }
-            Decision::ApplicationTerminated { app } => {
-                log_event!("workspace {workspace}: {app:?} terminated");
-            }
-            Decision::NativeTabAmbiguous { .. }
-            | Decision::ObservationUnavailable { .. }
-            | Decision::MouseDownDeferred => {}
         }
     }
 }

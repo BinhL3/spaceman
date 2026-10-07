@@ -168,7 +168,7 @@ fn print_usage(executable: &str) {
 
 fn run_doctor(hours: Option<u64>) -> Result<String, String> {
     let (live, rotated) = spaceman::journal::default_paths().ok_or("HOME is unavailable")?;
-    let (lines, skipped) = spaceman::journal::read(&[rotated, live.clone()])?;
+    let (lines, skipped) = spaceman::journal::read(&[&rotated, &live])?;
     if lines.is_empty() && skipped == 0 {
         return Ok(format!(
             "No arrangement journal at {} yet. It is written by a running Spaceman agent.",
@@ -483,11 +483,10 @@ impl WindowScope {
     }
 
     fn filter(&mut self, observation: &mut NativeObservation) {
-        let mut scoped = observation.applications.drain(..).find(|app| match app {
-            spaceman::AppObservation::Complete { app, .. } => app.id == self.app,
-            spaceman::AppObservation::Unavailable { app, .. }
-            | spaceman::AppObservation::Terminated { app } => app == &self.app,
-        });
+        let mut scoped = observation
+            .applications
+            .drain(..)
+            .find(|app| app.app_id() == &self.app);
         if let Some(spaceman::AppObservation::Complete {
             focused, windows, ..
         }) = &mut scoped
@@ -509,44 +508,28 @@ impl WindowScope {
             windows.retain(|window| selected.as_ref() == Some(&window.id));
             if let Some(selected) = selected {
                 self.authorized_window_ids.insert(selected.window_id);
-            }
-            if focused
-                .as_ref()
-                .is_some_and(|focused| !windows.iter().any(|window| window.id == *focused))
-            {
-                *focused = None;
-            }
-            if windows.is_empty() {
-                self.missing_cycles = self.missing_cycles.saturating_add(1);
-            } else {
+                *focused = focused.take().filter(|focused| focused == &selected);
                 self.missing_cycles = 0;
+                observation.applications = vec![scoped.expect("complete observation present")];
+                return;
             }
         }
-        if scoped.is_none() {
-            self.missing_cycles = self.missing_cycles.saturating_add(1);
-        }
-        if self.missing_cycles <= 8
-            && !matches!(
-                scoped,
-                Some(spaceman::AppObservation::Complete { ref windows, .. }) if !windows.is_empty()
-            )
-        {
-            scoped = Some(spaceman::AppObservation::Unavailable {
+        self.missing_cycles = self.missing_cycles.saturating_add(1);
+        observation.applications = vec![if self.missing_cycles <= 8 {
+            spaceman::AppObservation::Unavailable {
                 app: self.app.clone(),
                 error: "scoped window is settling or absent".into(),
-            });
-        }
-        observation.applications =
-            vec![
-                scoped.unwrap_or_else(|| spaceman::AppObservation::Complete {
-                    app: spaceman::ObservedApplication {
-                        id: self.app.clone(),
-                        bundle_id: self.bundle_id.clone(),
-                    },
-                    focused: None,
-                    windows: Vec::new(),
-                }),
-            ];
+            }
+        } else {
+            spaceman::AppObservation::Complete {
+                app: spaceman::ObservedApplication {
+                    id: self.app.clone(),
+                    bundle_id: self.bundle_id.clone(),
+                },
+                focused: None,
+                windows: Vec::new(),
+            }
+        }];
     }
 }
 

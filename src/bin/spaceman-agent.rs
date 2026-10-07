@@ -13,7 +13,10 @@ fn main() {
 /// size-capped, owner-only log file so runtime diagnostics survive. Terminal
 /// launches keep stderr on the terminal.
 fn redirect_stderr_to_log() {
-    use std::io::IsTerminal;
+    use std::{
+        io::IsTerminal,
+        os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    };
     if std::io::stderr().is_terminal() {
         return;
     }
@@ -28,7 +31,6 @@ fn redirect_stderr_to_log() {
         // usually what explains it.
         let _ = std::fs::rename(&path, path.with_extension("log.1"));
     }
-    use std::os::unix::fs::OpenOptionsExt;
     let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -37,7 +39,6 @@ fn redirect_stderr_to_log() {
     else {
         return;
     };
-    use std::os::unix::fs::PermissionsExt;
     let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
     spaceman::macos::redirect_stderr_to(&file);
 }

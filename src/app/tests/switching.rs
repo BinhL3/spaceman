@@ -374,3 +374,112 @@ fn switching_aborts_when_the_incoming_workspace_cannot_be_laid_out() {
     assert!(!runtime.parked.contains_key(&outgoing));
     assert!(runtime.parked.contains_key(&incoming));
 }
+
+#[test]
+fn moving_a_floating_window_to_another_workspace_parks_and_transfers_ownership() {
+    let floating = window(10);
+    let mut backend = FakeBackend {
+        focused: Some(floating.clone()),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(floating.clone(), frame(100));
+    let mut runtime = runtime(backend);
+    runtime
+        .workspaces
+        .own_floating(floating.clone(), WorkspaceId::ONE);
+    let target = WorkspaceId::new(2).unwrap();
+
+    runtime
+        .move_focused(target, outputs(), &AtomicBool::new(false))
+        .unwrap();
+
+    assert_eq!(
+        runtime.workspaces.floating_workspace_of(&floating),
+        Some(target)
+    );
+    assert!(runtime.parked.contains_key(&floating));
+    assert!(
+        !outputs()
+            .main()
+            .frame
+            .contains_center(runtime.backend.frames[&floating])
+    );
+}
+
+#[test]
+fn focusing_an_unmanaged_window_of_a_multi_window_app_does_not_switch_workspaces() {
+    let main_window = window(10);
+    let secondary_window = window(11);
+    let parked_frame = main_parked_frame(frame(50));
+    let mut backend = FakeBackend {
+        focused: Some(secondary_window.clone()),
+        frontmost: Some(secondary_window.app.clone()),
+        observation: Some(observation(&secondary_window, frame(200))),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(main_window.clone(), parked_frame);
+    backend.frames.insert(secondary_window.clone(), frame(200));
+    let mut runtime = runtime_with_parked(backend, [(main_window.clone(), frame(50))]);
+    let hidden = WorkspaceId::new(2).unwrap();
+    bind(&mut runtime, hidden, &main_window);
+
+    let status = runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+
+    assert_eq!(status.active, vec![WorkspaceId::ONE, WorkspaceId::SIX]);
+    assert_eq!(
+        runtime.workspaces.workspace_of(&secondary_window),
+        Some(WorkspaceId::ONE)
+    );
+    assert_eq!(runtime.workspaces.workspace_of(&main_window), Some(hidden));
+}
+
+#[test]
+fn switch_rollback_preserves_original_recovery_frames_and_suppresses_focus_loop() {
+    let outgoing = window(10);
+    let incoming_first = window(20);
+    let incoming_second = window(30);
+    let outputs = outputs();
+    let first_original = frame(100);
+    let second_original = frame(200);
+    let first_parked = main_parked_frame(first_original);
+    let second_parked = main_parked_frame(second_original);
+    let mut backend = FakeBackend {
+        focused: Some(incoming_first.clone()),
+        frontmost: Some(incoming_first.app.clone()),
+        observation: Some(observation(&outgoing, frame(50))),
+        managed_outcome: Some(macos::ApplyOutcome::Unavailable),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(outgoing.clone(), frame(50));
+    backend.frames.insert(incoming_first.clone(), first_parked);
+    backend
+        .frames
+        .insert(incoming_second.clone(), second_parked);
+    let mut runtime = runtime_with_parked(
+        backend,
+        [
+            (incoming_first.clone(), first_original),
+            (incoming_second.clone(), second_original),
+        ],
+    );
+    bind(&mut runtime, WorkspaceId::ONE, &outgoing);
+    let target = WorkspaceId::new(2).unwrap();
+    bind(&mut runtime, target, &incoming_first);
+    bind(&mut runtime, target, &incoming_second);
+
+    // First cycle attempts focus-follow -> switch to workspace 2, which rolls back
+    // when layout_workspace returns Unavailable.
+    assert!(
+        runtime
+            .cycle(outputs.clone(), &AtomicBool::new(false))
+            .is_err()
+    );
+    assert_eq!(runtime.parked.get(&incoming_first), Some(&first_original));
+    assert_eq!(runtime.parked.get(&incoming_second), Some(&second_original));
+    assert_eq!(runtime.suppressed_focus, Some(incoming_first));
+
+    // Next cycle does not loop into another focus-follow switch while focus is unchanged.
+    runtime.backend.managed_outcome = None;
+    let status = runtime.cycle(outputs, &AtomicBool::new(false)).unwrap();
+    assert_eq!(status.active, vec![WorkspaceId::ONE, WorkspaceId::SIX]);
+}

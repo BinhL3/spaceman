@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::{
     Model, NativeObservation, PhysicalWindowId, Placement, Reconciliation, ReconciliationEvidence,
     Settings, Slot, layout_tree::LayoutTree, reconcile,
@@ -82,17 +80,10 @@ impl Engine {
 
     #[must_use]
     pub fn bound_windows(&self) -> Vec<PhysicalWindowId> {
-        let slots: HashMap<_, _> = self
-            .model
-            .workspace
-            .slots
-            .iter()
-            .map(|slot| (slot.id, slot))
-            .collect();
         self.layout
             .slots()
             .into_iter()
-            .filter_map(|id| slots.get(&id)?.bound_window().cloned())
+            .filter_map(|id| self.model.slot(id)?.bound_window().cloned())
             .collect()
     }
 
@@ -271,17 +262,11 @@ impl Engine {
 }
 
 fn placements_for(layout: &LayoutTree, model: &Model, output: crate::Rect) -> Vec<Placement> {
-    let slots: HashMap<_, _> = model
-        .workspace
-        .slots
-        .iter()
-        .map(|slot| (slot.id, slot))
-        .collect();
     layout
         .placements(output)
         .into_iter()
         .filter_map(|(id, frame)| {
-            let slot = slots.get(&id)?;
+            let slot = model.slot(id)?;
             Some(Placement {
                 slot: id,
                 window: slot.bound_window().cloned(),

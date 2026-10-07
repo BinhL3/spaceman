@@ -64,15 +64,11 @@ pub(crate) fn reply(should_terminate: bool) {
 pub(crate) fn cancel_pending() {
     let pending = GATE.with(|gate| {
         let mut gate = gate.borrow_mut();
-        match gate.take() {
-            Some(Gate::Pending(actions)) => {
-                *gate = Some(Gate::Idle(actions));
-                true
-            }
-            state => {
-                *gate = state;
-                false
-            }
+        if let Some(Gate::Pending(actions)) = &*gate {
+            *gate = Some(Gate::Idle(actions.clone()));
+            true
+        } else {
+            false
         }
     });
     if pending {
@@ -87,18 +83,18 @@ unsafe extern "C-unwind" fn application_should_terminate(
 ) -> NSApplicationTerminateReply {
     GATE.with(|gate| {
         let mut gate = gate.borrow_mut();
-        match gate.take() {
-            Some(Gate::Allowed) => NSApplicationTerminateReply::TerminateNow,
+        match &*gate {
+            Some(Gate::Allowed) => {
+                *gate = None;
+                NSApplicationTerminateReply::TerminateNow
+            }
             Some(Gate::Idle(actions)) => {
+                let actions = actions.clone();
                 let _ = actions.send(Action::Terminate);
                 *gate = Some(Gate::Pending(actions));
                 NSApplicationTerminateReply::TerminateLater
             }
-            Some(Gate::Pending(actions)) => {
-                *gate = Some(Gate::Pending(actions));
-                NSApplicationTerminateReply::TerminateLater
-            }
-            None => NSApplicationTerminateReply::TerminateLater,
+            Some(Gate::Pending(_)) | None => NSApplicationTerminateReply::TerminateLater,
         }
     })
 }

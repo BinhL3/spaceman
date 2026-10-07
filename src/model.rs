@@ -90,6 +90,11 @@ impl Default for Model {
 }
 
 impl Model {
+    #[must_use]
+    pub(crate) fn slot(&self, id: SlotId) -> Option<&Slot> {
+        self.workspace.slots.iter().find(|slot| slot.id == id)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         let mut slot_ids = std::collections::HashSet::new();
         let mut windows = std::collections::HashSet::new();

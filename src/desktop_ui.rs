@@ -15,7 +15,7 @@ pub(crate) fn window_frame() -> Div {
     div().size_full().bg(rgb(CANVAS)).text_color(rgb(TEXT))
 }
 
-pub(crate) fn settings_copy(title: impl IntoElement, description: impl IntoElement) -> Div {
+fn settings_copy(title: impl IntoElement, description: impl IntoElement) -> Div {
     div()
         .min_w(px(0.0))
         .flex_1()
@@ -78,7 +78,6 @@ pub(crate) fn success_badge(label: impl IntoElement) -> Div {
 }
 
 pub(crate) fn toggle(position: f32) -> AnyElement {
-    let color_position = position.clamp(0.0, 1.0);
     div()
         .w(px(24.0))
         .h(px(16.0))
@@ -87,13 +86,13 @@ pub(crate) fn toggle(position: f32) -> AnyElement {
         .flex()
         .items_center()
         .rounded(px(4.0))
-        .bg(mix_color(rgb(0x3a3a3a), rgb(ACCENT), color_position))
+        .bg(mix_color(rgb(0x3a3a3a), rgb(ACCENT), position))
         .child(
             div()
                 .ml(px(8.0 * position.clamp(-0.04, 1.04)))
                 .size(px(12.0))
                 .rounded(px(2.0))
-                .bg(mix_color(rgb(0xc8c8c8), rgb(0xfafafa), color_position)),
+                .bg(mix_color(rgb(0xc8c8c8), rgb(0xfafafa), position)),
         )
         .into_any_element()
 }

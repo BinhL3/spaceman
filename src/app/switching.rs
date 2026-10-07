@@ -15,16 +15,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
         self.synchronize_foreground(&outputs);
-        if !self.workspaces.is_enabled(workspace) {
-            return Err(format!("Workspace {workspace} is not configured"));
-        }
-        let selector = self.workspaces.assignment(workspace).clone();
-        if !self.scope.manages_selector(&selector) {
-            return Err(format!(
-                "Workspace {} is outside the managed display scope",
-                workspace
-            ));
-        }
+        let selector = self.ensure_managed_workspace(workspace)?;
         let output = output_for(&self.workspaces, workspace, &outputs);
         let display_id = outputs.resolve(&selector).id.clone();
         let previous = self
@@ -71,11 +62,20 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         // outgoing workspace afterwards exposes a fully formed workspace and
         // the bare desktop never shows. Failures before parking leave the
         // screen untouched.
+        let incoming_originals: HashMap<_, _> = incoming
+            .iter()
+            .filter_map(|window| {
+                self.parked
+                    .get(window)
+                    .copied()
+                    .map(|frame| (window.clone(), frame))
+            })
+            .collect();
         let mut restored = Vec::new();
         for window in &incoming {
             if cancelled.load(Ordering::Acquire) {
                 log_event!("switch cancelled while revealing incoming windows");
-                self.rollback_switch(Vec::new(), &restored, output, &outputs);
+                self.rollback_switch(Vec::new(), &restored, &incoming_originals, output, &outputs);
                 return Err("workspace switch cancelled".into());
             }
             if !self.parked.contains_key(window) {
@@ -93,7 +93,13 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                         window,
                         outcome
                     );
-                    self.rollback_switch(Vec::new(), &restored, output, &outputs);
+                    self.rollback_switch(
+                        Vec::new(),
+                        &restored,
+                        &incoming_originals,
+                        output,
+                        &outputs,
+                    );
                     return Err(format!(
                         "Workspace {} could not restore all of its windows",
                         workspace
@@ -102,15 +108,23 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             }
         }
         if !self.wait_for_reveal(&incoming, cancelled) {
-            self.rollback_switch(Vec::new(), &restored, output, &outputs);
+            self.rollback_switch(Vec::new(), &restored, &incoming_originals, output, &outputs);
+            if cancelled.load(Ordering::Acquire) {
+                return Err("workspace switch cancelled".into());
+            }
             return Err(format!(
                 "Workspace {workspace} stayed inactive because its windows did not finish restoring"
             ));
         }
         let layout = self.layout_workspace(workspace, output, cancelled);
+        if cancelled.load(Ordering::Acquire) {
+            log_event!("switch cancelled while laying out incoming windows");
+            self.rollback_switch(Vec::new(), &incoming, &incoming_originals, output, &outputs);
+            return Err("workspace switch cancelled".into());
+        }
         if layout.blocked {
             log_event!("switch rollback: workspace {} layout blocked", workspace);
-            self.rollback_switch(Vec::new(), &incoming, output, &outputs);
+            self.rollback_switch(Vec::new(), &incoming, &incoming_originals, output, &outputs);
             return Err(format!(
                 "Workspace {} stayed inactive because its windows could not be laid out",
                 workspace
@@ -120,7 +134,13 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         for window in &outgoing {
             if cancelled.load(Ordering::Acquire) {
                 log_event!("switch cancelled while parking outgoing windows");
-                self.rollback_switch(parked_outgoing, &incoming, output, &outputs);
+                self.rollback_switch(
+                    parked_outgoing,
+                    &incoming,
+                    &incoming_originals,
+                    output,
+                    &outputs,
+                );
                 return Err("workspace switch cancelled".into());
             }
             match self.park_window(window, output, &outputs) {
@@ -134,7 +154,13 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                         window,
                         outcome
                     );
-                    self.rollback_switch(parked_outgoing, &incoming, output, &outputs);
+                    self.rollback_switch(
+                        parked_outgoing,
+                        &incoming,
+                        &incoming_originals,
+                        output,
+                        &outputs,
+                    );
                     return Err(format!(
                         "Workspace {} stayed active because a window could not be parked",
                         previous
@@ -271,13 +297,18 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         &mut self,
         parked_outgoing: Vec<crate::PhysicalWindowId>,
         revealed: &[crate::PhysicalWindowId],
+        incoming_originals: &HashMap<crate::PhysicalWindowId, crate::Rect>,
         output: crate::Rect,
         outputs: &macos::DisplayOutputs,
     ) {
+        self.suppressed_focus = self.backend.focused_window();
         for window in parked_outgoing {
             self.restore_window(&window);
         }
         for window in revealed {
+            if let Some(&original) = incoming_originals.get(window) {
+                let _ = self.mark_parked(window.clone(), original);
+            }
             // A pending restore may land after rollback. Supersede that write
             // even when its recovery entry has not yet been retired.
             let _ = self.park_window(window, output, outputs);
@@ -342,12 +373,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     fn windows_for_bundle(&self, bundle_id: &str) -> Vec<crate::PhysicalWindowId> {
         WorkspaceId::all()
             .flat_map(|workspace| self.workspaces.engine(workspace).bound_windows())
-            .filter(|window| {
-                self.known_apps.iter().any(|apps| {
-                    apps.get(&window.app)
-                        .is_some_and(|known| known == bundle_id)
-                })
-            })
+            .filter(|window| self.bundle_id(&window.app) == Some(bundle_id))
             .collect()
     }
 
@@ -358,27 +384,19 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         outputs: macos::DisplayOutputs,
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
-        if !self.workspaces.is_enabled(target) {
-            return Err(format!("Workspace {target} is not configured"));
-        }
-        let target_selector = self.workspaces.assignment(target).clone();
-        if !self.scope.manages_selector(&target_selector) {
-            return Err(format!(
-                "Workspace {} is outside the managed display scope",
-                target
-            ));
-        }
-        let source = if let Some(source) = self.workspaces.workspace_of(&window) {
+        self.ensure_managed_workspace(target)?;
+        let source = if let Some(source) = self.workspaces.workspace_of_any(&window) {
             source
         } else {
             self.cycle(outputs.clone(), cancelled)?;
             self.workspaces
-                .workspace_of(&window)
+                .workspace_of_any(&window)
                 .ok_or("Window is not managed by Spaceman")?
         };
         if source == target {
             return Ok(self.status(0, &outputs));
         }
+        let is_floating = self.workspaces.floating_workspace_of(&window).is_some();
         let source_output = output_for(&self.workspaces, source, &outputs);
         let target_output = output_for(&self.workspaces, target, &outputs);
         let target_is_active = self.is_visible(target, &outputs);
@@ -390,16 +408,21 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         {
             return Err("Window could not be parked in the target workspace".into());
         }
-        self.workspaces
-            .move_window(&window, target)
-            .ok_or("Window could not be moved")?;
+        if is_floating {
+            self.workspaces.own_floating(window.clone(), target);
+        } else {
+            self.workspaces
+                .move_window(&window, target)
+                .ok_or("Window could not be moved")?;
+            self.exit_fullscreen_if_split(target);
+        }
         self.clear_fullscreen_restore_if_inactive(source);
         self.clear_relocation_evidence(source, target, &window);
         if !target_is_active {
             self.suppressed_focus = Some(window.clone());
         }
         let mut failed = 0;
-        if self.is_visible(source, &outputs) {
+        if !is_floating && self.is_visible(source, &outputs) {
             let layout = self.layout_workspace(source, source_output, cancelled);
             failed += layout.failed;
         }
@@ -412,8 +435,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             {
                 failed += 1;
             }
-            let layout = self.layout_workspace(target, target_output, cancelled);
-            failed += layout.failed;
+            if !is_floating {
+                let layout = self.layout_workspace(target, target_output, cancelled);
+                failed += layout.failed;
+            }
             let _ = self.backend.focus_window(&window);
         }
         self.persist_workspace_state_if_changed()?;

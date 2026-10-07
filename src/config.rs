@@ -7,7 +7,7 @@ use crate::{DisplaySelector, ObservedWindow, WorkspaceId, Workspaces};
 #[derive(Clone, Debug, Default)]
 pub struct Config {
     rules: Vec<WindowRule>,
-    workspace_monitors: Vec<(WorkspaceId, String)>,
+    workspace_monitors: Vec<(WorkspaceId, DisplaySelector)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -107,7 +107,7 @@ impl Config {
             {
                 return Err(format!("workspace {} is configured more than once", id));
             }
-            workspace_monitors.push((id, workspace.monitor));
+            workspace_monitors.push((id, DisplaySelector::parse(&workspace.monitor)));
         }
         Ok(Self {
             rules,
@@ -124,26 +124,46 @@ impl Config {
         }
     }
 
-    #[must_use]
-    pub fn disposition(&self, bundle_id: &str, window: &ObservedWindow) -> WindowDisposition {
+    fn matching_rule(&self, bundle_id: &str, window: &ObservedWindow) -> Option<&WindowRule> {
         self.rules
             .iter()
             .find(|rule| rule.matcher.matches(bundle_id, window))
+    }
+
+    #[must_use]
+    pub fn disposition(&self, bundle_id: &str, window: &ObservedWindow) -> WindowDisposition {
+        self.matching_rule(bundle_id, window)
             .map_or(WindowDisposition::Managed, |rule| rule.action)
     }
 
-    fn workspace_monitors(&self) -> impl Iterator<Item = (WorkspaceId, &str)> {
-        self.workspace_monitors
+    #[must_use]
+    pub fn route_matches_title(&self, bundle_id: &str, window: &ObservedWindow) -> bool {
+        self.matching_rule(bundle_id, window).is_some_and(|rule| {
+            matches!(rule.action, WindowDisposition::Route(_)) && rule.matcher.title.is_some()
+        })
+    }
+
+    #[must_use]
+    pub fn has_bundle_route(&self, bundle_id: &str) -> bool {
+        self.rules
             .iter()
-            .map(|(workspace, monitor)| (*workspace, monitor.as_str()))
+            .find(|rule| {
+                rule.matcher.title.is_none()
+                    && rule
+                        .matcher
+                        .bundle_id
+                        .as_deref()
+                        .is_some_and(|value| value == bundle_id)
+            })
+            .is_some_and(|rule| matches!(rule.action, WindowDisposition::Route(_)))
     }
 
     pub fn configure_workspaces(&self, workspaces: &mut Workspaces) {
         for workspace in self.named_workspaces() {
             workspaces.enable(workspace);
         }
-        for (workspace, monitor) in self.workspace_monitors() {
-            workspaces.set_assignment(workspace, DisplaySelector::parse(monitor));
+        for (workspace, selector) in &self.workspace_monitors {
+            workspaces.set_assignment(*workspace, selector.clone());
         }
     }
 

@@ -151,7 +151,10 @@ fn windows_opened_after_the_recall_closes_are_adopted_normally() {
     ));
     runtime.cycle(outputs(), &cancelled).unwrap();
 
-    assert_eq!(runtime.workspaces.workspace_of(&later), Some(workspace(3)));
+    assert_eq!(
+        runtime.workspaces.workspace_of(&later),
+        Some(WorkspaceId::ONE)
+    );
     assert!(!runtime.memory.recalls.contains_key(&restored.app));
     assert!(runtime.backend.journal.iter().any(|event| matches!(
         event,
@@ -248,4 +251,68 @@ fn memory_records_only_arrangements_that_settle() {
     runtime.cycle(outputs(), &cancelled).unwrap();
 
     assert_eq!(runtime.memory.memory.get(BUNDLE).unwrap().windows.len(), 2);
+}
+
+#[test]
+fn apps_launched_after_the_startup_recall_window_open_on_the_active_workspace() {
+    let window = relaunched(10);
+    let mut runtime = runtime(backend_with(&[(window.clone(), frame(50))]));
+    runtime.restore_window_memory(memory(&[(3, frame(50))]));
+    runtime.memory.started_at = Some(Instant::now() - crate::app::memory::RECALL_WINDOW);
+
+    runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+
+    assert_eq!(
+        runtime.workspaces.workspace_of(&window),
+        Some(WorkspaceId::ONE)
+    );
+    assert!(!runtime.parked.contains_key(&window));
+    assert!(recalls(&runtime).is_empty());
+}
+
+#[test]
+fn quitting_and_relaunching_an_already_seen_app_opens_on_the_active_workspace() {
+    let first = relaunched(10);
+    let mut runtime = runtime(backend_with(&[(first.clone(), frame(50))]));
+    runtime.restore_window_memory(memory(&[(3, frame(50))]));
+    let cancelled = AtomicBool::new(false);
+    runtime.cycle(outputs(), &cancelled).unwrap();
+    assert_eq!(runtime.workspaces.workspace_of(&first), Some(workspace(3)));
+
+    // The app quits and relaunches as a new process during the same session:
+    // it should open on the active workspace rather than recalling again.
+    let second = crate::PhysicalWindowId {
+        app: AppInstanceId {
+            pid: 3,
+            launched_at: 3,
+        },
+        window_id: 20,
+    };
+    runtime.backend.frames.remove(&first);
+    runtime.backend.frames.insert(second.clone(), frame(50));
+    runtime.backend.running_apps = Some(HashSet::from([second.app.clone()]));
+    runtime.backend.observation = Some(observation_for(BUNDLE, &second, frame(50)));
+    runtime.cycle(outputs(), &cancelled).unwrap();
+
+    assert_eq!(
+        runtime.workspaces.workspace_of(&second),
+        Some(WorkspaceId::ONE)
+    );
+    assert!(!runtime.parked.contains_key(&second));
+}
+
+#[test]
+fn app_with_no_manageable_windows_does_not_open_or_expire_a_recall() {
+    let helper = relaunched(10);
+    let backend = FakeBackend {
+        observation: Some(observation_for_windows(BUNDLE, &helper, &[])),
+        ..FakeBackend::default()
+    };
+    let mut runtime = runtime(backend);
+    runtime.restore_window_memory(memory(&[(3, frame(50))]));
+
+    runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+
+    assert!(runtime.memory.recalls.is_empty());
+    assert!(recalls(&runtime).is_empty());
 }

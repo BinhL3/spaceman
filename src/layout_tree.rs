@@ -76,7 +76,14 @@ impl LayoutTree {
         if existing == retained && existing.len() == slots.len() {
             return;
         }
-        self.root = match self.root.clone() {
+        let root = std::mem::replace(
+            &mut self.root,
+            Node::Split {
+                axis: fallback_axis,
+                children: Vec::new(),
+            },
+        );
+        self.root = match root {
             Node::Split { axis, children } => Node::Split {
                 axis,
                 children: retain_children(children, &retained),
@@ -86,7 +93,6 @@ impl LayoutTree {
                 children: Vec::new(),
             }),
         };
-        let existing = self.slots().into_iter().collect::<HashSet<_>>();
         for slot in slots.iter().filter(|slot| !existing.contains(&slot.id)) {
             self.append(fallback_axis, slot.id, slot.weight);
         }
@@ -105,7 +111,7 @@ impl LayoutTree {
         }
         let mut leaves = HashSet::new();
         validate_node(&self.root, true, &mut leaves)?;
-        if leaves != expected || leaves.len() != slots.len() {
+        if leaves != expected {
             return Err("layout leaves do not exactly match workspace slots".into());
         }
         Ok(())

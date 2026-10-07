@@ -258,36 +258,28 @@ pub struct Anomaly {
 #[derive(Debug, Default)]
 pub struct AnomalyTracker {
     pending: HashMap<(AnomalyKind, u32), Instant>,
-    active: HashMap<(AnomalyKind, u32), (Anomaly, Instant)>,
+    active: BTreeMap<(AnomalyKind, u32), (Anomaly, Instant)>,
 }
 
 impl AnomalyTracker {
     pub fn update(&mut self, now: Instant, current: Vec<Anomaly>) -> Vec<JournalEvent> {
         let mut events = Vec::new();
-        let mut present = HashMap::new();
+        let mut present = BTreeMap::new();
         for anomaly in current {
             present.insert((anomaly.kind, anomaly.window), anomaly);
         }
-        let mut ended: Vec<_> = self
+        for (_, (anomaly, began)) in self
             .active
-            .keys()
-            .filter(|key| !present.contains_key(key))
-            .copied()
-            .collect();
-        ended.sort();
-        for key in ended {
-            if let Some((anomaly, began)) = self.active.remove(&key) {
-                events.push(JournalEvent::Anomaly {
-                    state: AnomalyState::End,
-                    anomaly,
-                    duration_ms: Some(duration_ms(now.saturating_duration_since(began))),
-                });
-            }
+            .extract_if(.., |key, _| !present.contains_key(key))
+        {
+            events.push(JournalEvent::Anomaly {
+                state: AnomalyState::End,
+                anomaly,
+                duration_ms: Some(duration_ms(now.saturating_duration_since(began))),
+            });
         }
         self.pending.retain(|key, _| present.contains_key(key));
-        let mut keys: Vec<_> = present.keys().copied().collect();
-        keys.sort();
-        for key in keys {
+        for (key, anomaly) in present {
             if self.active.contains_key(&key) {
                 continue;
             }
@@ -296,7 +288,6 @@ impl AnomalyTracker {
                 continue;
             }
             self.pending.remove(&key);
-            let anomaly = present.remove(&key).expect("present key");
             events.push(JournalEvent::Anomaly {
                 state: AnomalyState::Begin,
                 anomaly: anomaly.clone(),
@@ -354,10 +345,11 @@ pub fn default_paths() -> Option<(PathBuf, PathBuf)> {
 
 /// Read the rotated generation followed by the live journal, skipping lines
 /// that do not parse (a crash may truncate the final line).
-pub fn read(paths: &[PathBuf]) -> Result<(Vec<JournalLine>, usize), String> {
+pub fn read(paths: &[impl AsRef<Path>]) -> Result<(Vec<JournalLine>, usize), String> {
     let mut lines = Vec::new();
     let mut skipped = 0;
     for path in paths {
+        let path = path.as_ref();
         let file = match std::fs::File::open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -423,12 +415,18 @@ pub fn summarize(lines: &[JournalLine], since_ms: u64, now_ms: u64, skipped: usi
                 parked,
                 remembered_apps,
                 ..
-            } => starts.push(format!(
-                "  {}: v{version}, {}, {slots} saved slots, {parked} parked, memory for {remembered_apps} apps\n",
-                ago(now_ms, line.t),
-                if *restored_state { "resumed saved state" } else { "no saved state" },
-            )),
-            JournalEvent::Stop => stops += 1,
+            } => {
+                open.clear();
+                starts.push(format!(
+                    "  {}: v{version}, {}, {slots} saved slots, {parked} parked, memory for {remembered_apps} apps\n",
+                    ago(now_ms, line.t),
+                    if *restored_state { "resumed saved state" } else { "no saved state" },
+                ));
+            }
+            JournalEvent::Stop => {
+                open.clear();
+                stops += 1;
+            }
             JournalEvent::Restore {
                 reason,
                 requested,
@@ -459,11 +457,12 @@ pub fn summarize(lines: &[JournalLine], since_ms: u64, now_ms: u64, skipped: usi
                         open.insert(key, line.t);
                     }
                     AnomalyState::End => {
-                        let summary = kinds.entry(anomaly.kind).or_default();
-                        let duration = duration_ms.unwrap_or_default();
-                        summary.total_ms += duration;
-                        summary.longest_ms = summary.longest_ms.max(duration);
-                        open.remove(&key);
+                        if open.remove(&key).is_some() || kinds.contains_key(&anomaly.kind) {
+                            let summary = kinds.entry(anomaly.kind).or_default();
+                            let duration = duration_ms.unwrap_or_default();
+                            summary.total_ms += duration;
+                            summary.longest_ms = summary.longest_ms.max(duration);
+                        }
                     }
                 }
             }
@@ -791,7 +790,7 @@ mod tests {
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        let (lines, skipped) = read(&[rotated.clone(), path.clone()]).unwrap();
+        let (lines, skipped) = read(&[&rotated, &path]).unwrap();
         assert_eq!(
             lines.iter().map(|line| line.t).collect::<Vec<_>>(),
             vec![1, 2]

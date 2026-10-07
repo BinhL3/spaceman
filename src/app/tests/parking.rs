@@ -701,3 +701,56 @@ fn persistently_inaccessible_or_closed_hidden_windows_are_forgotten() {
     runtime.cycle(outputs(), &cancelled).unwrap();
     assert_eq!(runtime.workspaces.workspace_of(&stuck), None);
 }
+
+#[test]
+fn mission_control_thumbnail_frames_do_not_trigger_repark_or_escalation() {
+    let tiled = window(10);
+    let parked_window = window(11);
+    let outputs = outputs();
+    let original = outputs.main().frame;
+    let parked_frame = main_parked_frame(original);
+    let expose_thumbnail = crate::Rect {
+        x: 200,
+        y: 200,
+        width: 300,
+        height: 200,
+    };
+    let mut backend = FakeBackend {
+        observation: Some(observation(&tiled, frame(50))),
+        frontmost: Some(tiled.app.clone()),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(tiled.clone(), frame(50));
+    // Accessibility still reports the parked off-screen frame...
+    backend.frames.insert(parked_window.clone(), parked_frame);
+    // ...while the window server reports a scaled-down Mission Control thumbnail on screen.
+    backend
+        .server_frames
+        .insert(parked_window.clone(), expose_thumbnail);
+    let mut runtime = runtime_with_parked(backend, [(parked_window.clone(), original)]);
+    bind(&mut runtime, WorkspaceId::ONE, &tiled);
+    let hidden = WorkspaceId::new(2).unwrap();
+    bind(&mut runtime, hidden, &parked_window);
+
+    for _ in 0..=REPARK_ATTEMPT_LIMIT {
+        let server_frames = runtime.backend.window_server_frames().unwrap();
+        let visible = runtime.visible_workspaces(&outputs);
+        runtime.park_inactive(
+            &outputs,
+            &visible,
+            &server_frames,
+            &AtomicBool::new(false),
+            &mut 0,
+        );
+    }
+
+    assert!(!runtime.repark_attempts.contains_key(&parked_window));
+    assert_eq!(runtime.parked.get(&parked_window), Some(&original));
+    assert_eq!(
+        runtime.workspaces.workspace_of(&parked_window),
+        Some(hidden)
+    );
+    assert!(!runtime.backend.calls.iter().any(
+        |call| matches!(call, BackendCall::SetPosition(window, _) if window == &parked_window)
+    ));
+}

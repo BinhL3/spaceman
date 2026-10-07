@@ -13,7 +13,10 @@ use std::{
 };
 
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSScreen, NSWorkspace};
+use objc2_app_kit::{
+    NSApplicationActivationOptions, NSApplicationActivationPolicy, NSRunningApplication, NSScreen,
+    NSWorkspace,
+};
 use objc2_application_services::{
     AXError, AXIsProcessTrusted, AXObserver, AXUIElement, AXValue, AXValueType,
 };
@@ -222,18 +225,16 @@ impl WindowEventMonitor {
                             thread_invalidation.dirty.store(true, Ordering::Release);
                             known_applications.clone_from(&desired);
                         }
-                        let removed: Vec<_> = registrations
-                            .keys()
-                            .filter(|app| !desired.contains(app))
-                            .cloned()
-                            .collect();
-                        for app in removed {
-                            if let Some(registration) = registrations.remove(&app) {
+                        registrations.retain(|app, registration| {
+                            if desired.contains(app) {
+                                true
+                            } else {
                                 run_loop.remove_source(Some(&registration.source), unsafe {
                                     kCFRunLoopDefaultMode
                                 });
+                                false
                             }
-                        }
+                        });
                         for app in desired {
                             if !registrations.contains_key(&app)
                                 && let Some(registration) =
@@ -318,25 +319,26 @@ impl EventRegistration {
         }
         let observer = unsafe { CFRetained::from_raw(NonNull::new(raw_observer)?) };
         let refcon = Arc::as_ptr(invalidation).cast_mut().cast::<c_void>();
-        let mut window_creation_subscribed = false;
-        for notification in ["AXWindowCreated", "AXFocusedWindowChanged"] {
-            let result = unsafe {
-                observer.add_notification(
-                    &application,
-                    &CFString::from_static_str(notification),
-                    refcon,
-                )
-            };
-            if notification == "AXWindowCreated" {
-                window_creation_subscribed = matches!(
-                    result,
-                    AXError::Success | AXError::NotificationAlreadyRegistered
-                );
-            }
-        }
-        if !window_creation_subscribed {
+        let window_created = unsafe {
+            observer.add_notification(
+                &application,
+                &CFString::from_static_str("AXWindowCreated"),
+                refcon,
+            )
+        };
+        if !matches!(
+            window_created,
+            AXError::Success | AXError::NotificationAlreadyRegistered
+        ) {
             return None;
         }
+        let _ = unsafe {
+            observer.add_notification(
+                &application,
+                &CFString::from_static_str("AXFocusedWindowChanged"),
+                refcon,
+            )
+        };
         subscribe_window_notifications(&observer, &application, refcon);
         let source = unsafe { observer.run_loop_source() };
         run_loop.add_source(Some(&source), unsafe { kCFRunLoopDefaultMode });
@@ -354,14 +356,15 @@ unsafe extern "C-unwind" fn window_event_callback(
     notification: NonNull<CFString>,
     refcon: *mut c_void,
 ) {
-    let notification = unsafe { notification.as_ref() }.to_string();
+    let window_created =
+        unsafe { notification.as_ref() } == &*CFString::from_static_str("AXWindowCreated");
     if let Some(invalidation) = unsafe { refcon.cast::<EventInvalidation>().as_ref() } {
         invalidation.dirty.store(true, Ordering::Release);
-        if notification == "AXWindowCreated" {
+        if window_created {
             invalidation.window_created.store(true, Ordering::Release);
         }
     }
-    if notification == "AXWindowCreated" {
+    if window_created {
         subscribe_one_window(
             unsafe { observer.as_ref() },
             unsafe { element.as_ref() },
@@ -399,14 +402,30 @@ fn subscribe_one_window(observer: &AXObserver, window: &AXUIElement, refcon: *mu
 }
 
 fn running_application_instances() -> Vec<AppInstanceId> {
+    let self_pid = std::process::id() as i32;
     let applications = NSWorkspace::sharedWorkspace().runningApplications();
-    (0..applications.count())
+    let mut seen_pids = HashSet::new();
+    let mut instances: Vec<_> = (0..applications.count())
         .filter_map(|index| {
             let application = applications.objectAtIndex(index);
             let pid = application.processIdentifier();
-            (pid > 0 && pid != std::process::id() as i32).then(|| app_instance(&application))
+            (pid > 0 && pid != self_pid && seen_pids.insert(pid))
+                .then(|| app_instance_with_pid(&application, pid))
         })
-        .collect()
+        .collect();
+    if let Some(windows) = window_server_windows(CGWindowListOption::OptionAll) {
+        for window in windows {
+            if window.pid > 0
+                && window.pid != self_pid
+                && seen_pids.insert(window.pid)
+                && let Some(application) =
+                    NSRunningApplication::runningApplicationWithProcessIdentifier(window.pid)
+            {
+                instances.push(app_instance_with_pid(&application, window.pid));
+            }
+        }
+    }
+    instances
 }
 
 pub fn snapshot_in_outputs(
@@ -418,8 +437,12 @@ pub fn snapshot_in_outputs(
 
 pub fn outputs() -> Result<DisplayOutputs, SnapshotError> {
     let marker = MainThreadMarker::new().ok_or(SnapshotError::MainThreadRequired)?;
-    let primary_height = primary_screen_height(marker)?;
     let screens = NSScreen::screens(marker);
+    let primary_height = (0..screens.count())
+        .map(|index| screens.objectAtIndex(index).frame())
+        .find(|frame| frame.origin.x == 0.0 && frame.origin.y == 0.0)
+        .map(|frame| frame.size.height)
+        .ok_or(SnapshotError::MainScreenUnavailable)?;
     let mut displays = Vec::with_capacity(screens.count());
     for index in 0..screens.count() {
         let screen = screens.objectAtIndex(index);
@@ -487,13 +510,33 @@ pub fn snapshot_in_output(
     let onscreen = onscreen_windows().ok_or(SnapshotError::WindowListUnavailable)?;
 
     let running = NSWorkspace::sharedWorkspace().runningApplications();
-    let applications = (0..running.count())
+    let screen_locked = is_screen_locked();
+    let mut observed_pids = HashSet::new();
+    let mut applications: Vec<_> = (0..running.count())
         .filter_map(|index| {
             let application = running.objectAtIndex(index);
-            let windows = onscreen.get(&application.processIdentifier())?;
-            observe_application(&application, windows, output)
+            let pid = application.processIdentifier();
+            let windows = onscreen.get(&pid)?;
+            observed_pids.insert(pid);
+            observe_application(&application, pid, windows, output, screen_locked)
         })
         .collect();
+    let mut extra_pids: Vec<_> = onscreen
+        .keys()
+        .copied()
+        .filter(|pid| *pid > 0 && !observed_pids.contains(pid))
+        .collect();
+    extra_pids.sort_unstable();
+    for pid in extra_pids {
+        if let Some(application) =
+            NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+            && let Some(windows) = onscreen.get(&pid)
+            && let Some(observed) =
+                observe_application(&application, pid, windows, output, screen_locked)
+        {
+            applications.push(observed);
+        }
+    }
 
     Ok((
         NativeObservation {
@@ -503,15 +546,6 @@ pub fn snapshot_in_output(
         },
         Settings::for_output(output),
     ))
-}
-
-fn primary_screen_height(marker: MainThreadMarker) -> Result<f64, SnapshotError> {
-    let screens = NSScreen::screens(marker);
-    (0..screens.count())
-        .map(|index| screens.objectAtIndex(index).frame())
-        .find(|frame| frame.origin.x == 0.0 && frame.origin.y == 0.0)
-        .map(|frame| frame.size.height)
-        .ok_or(SnapshotError::MainScreenUnavailable)
 }
 
 fn screen_output(screen: &NSScreen, primary_height: f64) -> Rect {
@@ -706,11 +740,9 @@ fn fill_missing_results(
 }
 
 pub fn frame(id: &PhysicalWindowId) -> Result<Rect, WindowAccessError> {
-    if let Some(frame) = with_managed_window_result(id, window_frame)? {
-        return Ok(frame);
-    }
-    evict_managed_window(id);
-    with_managed_window_result(id, window_frame)?.ok_or(WindowAccessError::Unavailable)
+    with_managed_window_result(id, |window| {
+        window_frame(window).ok_or(WindowAccessError::Unavailable)
+    })
 }
 
 /// Point file descriptor 2 (stderr) at the given open file so diagnostics from
@@ -723,30 +755,27 @@ pub fn redirect_stderr_to(file: &std::fs::File) {
 }
 
 pub fn set_position_only(id: &PhysicalWindowId, target: Rect) -> ApplyOutcome {
-    let outcome = match with_managed_window_result(id, |window| {
+    match with_managed_window_result(id, |window| {
         let result = without_window_animations(&id.app, || set_position(window, target));
-        let actual = window_frame(window);
-        if actual.is_some_and(|actual| position_matches(actual, target)) {
-            ApplyOutcome::Applied
+        if window_frame(window).is_some_and(|actual| position_matches(actual, target)) {
+            Ok(())
         } else if matches!(result, AXError::InvalidUIElement) {
-            ApplyOutcome::Gone
+            Err(WindowAccessError::Gone)
         } else {
-            ApplyOutcome::Unavailable
+            Err(WindowAccessError::Unavailable)
         }
     }) {
-        Ok(outcome) => outcome,
+        Ok(()) => ApplyOutcome::Applied,
         Err(WindowAccessError::Gone) => ApplyOutcome::Gone,
         Err(WindowAccessError::Unavailable) => ApplyOutcome::Unavailable,
-    };
-    if matches!(outcome, ApplyOutcome::Gone) {
-        evict_managed_window(id);
     }
-    outcome
 }
 
 fn position_matches(actual: Rect, target: Rect) -> bool {
-    actual.position_approximately_equals(target, crate::reconcile::DEFAULT_FRAME_TOLERANCE)
+    actual.position_approximately_equals(target, POSITION_CONFIRM_TOLERANCE)
 }
+
+const POSITION_CONFIRM_TOLERANCE: i32 = 64;
 
 pub fn focused_window() -> Option<PhysicalWindowId> {
     let id = frontmost_application()?;
@@ -757,16 +786,32 @@ pub fn focused_window() -> Option<PhysicalWindowId> {
 
 pub fn frontmost_application() -> Option<AppInstanceId> {
     let application = NSWorkspace::sharedWorkspace().frontmostApplication()?;
-    Some(app_instance(&application))
+    if is_lock_screen(&application) {
+        return None;
+    }
+    let pid = resolve_application_pid(&application)?;
+    Some(app_instance_with_pid(&application, pid))
+}
+
+const LOCK_SCREEN_BUNDLE_ID: &str = "com.apple.loginwindow";
+
+fn is_lock_screen(application: &NSRunningApplication) -> bool {
+    application
+        .bundleIdentifier()
+        .is_some_and(|bundle| bundle.to_string() == LOCK_SCREEN_BUNDLE_ID)
+}
+
+fn is_screen_locked() -> bool {
+    NSWorkspace::sharedWorkspace()
+        .frontmostApplication()
+        .is_some_and(|app| is_lock_screen(&app))
 }
 
 pub fn focus_window(id: &PhysicalWindowId) -> bool {
     let raised = raise_window_with_focus(id, true);
-    let activated = NSRunningApplication::runningApplicationWithProcessIdentifier(id.app.pid)
-        .is_some_and(|application| {
-            launch_time(&application) == id.app.launched_at
-                && application.activateWithOptions(NSApplicationActivationOptions::empty())
-        });
+    let activated = running_application(&id.app).is_some_and(|application| {
+        application.activateWithOptions(NSApplicationActivationOptions::empty())
+    });
     raised && activated
 }
 
@@ -775,25 +820,26 @@ pub fn raise_window(id: &PhysicalWindowId) -> bool {
 }
 
 fn raise_window_with_focus(id: &PhysicalWindowId, focus: bool) -> bool {
-    let raised = with_managed_window(id, |window| {
+    with_managed_window_result(id, |window| {
         if focus {
             let _ = set_attribute(window, "AXFocused", CFBoolean::new(true));
         }
-        (unsafe { window.perform_action(&CFString::from_static_str("AXRaise")) })
+        if (unsafe { window.perform_action(&CFString::from_static_str("AXRaise")) })
             == AXError::Success
+        {
+            Ok(())
+        } else {
+            Err(WindowAccessError::Unavailable)
+        }
     })
-    .unwrap_or(false);
-    if !raised {
-        evict_managed_window(id);
-    }
-    raised
+    .is_ok()
 }
 
 fn apply_window(
     id: &PhysicalWindowId,
     target: Rect,
     settings: &Settings,
-    onscreen: &HashMap<i32, HashSet<CGWindowID>>,
+    onscreen: &HashMap<i32, HashMap<CGWindowID, i64>>,
 ) -> Option<ApplyResult> {
     if mouse_down() {
         return Some(ApplyResult {
@@ -803,10 +849,17 @@ fn apply_window(
             outcome: ApplyOutcome::Deferred,
         });
     }
-    if !process_incarnation_matches(&id.app)
-        || !onscreen
-            .get(&id.app.pid)
-            .is_some_and(|windows| windows.contains(&id.window_id))
+    let Some(application) = running_application(&id.app) else {
+        return Some(ApplyResult {
+            window: id.clone(),
+            target,
+            actual: None,
+            outcome: ApplyOutcome::Gone,
+        });
+    };
+    if !onscreen
+        .get(&id.app.pid)
+        .is_some_and(|windows| windows.contains_key(&id.window_id))
     {
         return Some(ApplyResult {
             window: id.clone(),
@@ -815,6 +868,7 @@ fn apply_window(
             outcome: ApplyOutcome::Gone,
         });
     }
+    let accessory = application.activationPolicy() == NSApplicationActivationPolicy::Accessory;
     let app = application_element(id.app.pid);
     let windows = attribute::<CFArray>(&app, "AXWindows").ok()?;
     for window in cf_array_items::<AXUIElement>(&windows) {
@@ -823,7 +877,13 @@ fn apply_window(
             continue;
         }
         if !matches!(
-            observe_window(&id.app, window, onscreen.get(&id.app.pid)?, settings.output,),
+            observe_window(
+                id.clone(),
+                accessory,
+                window,
+                onscreen.get(&id.app.pid)?,
+                settings.output,
+            ),
             Ok(WindowObservation::Observed(_))
         ) {
             return Some(ApplyResult {
@@ -916,19 +976,21 @@ impl Drop for WindowAnimationGuard<'_> {
     }
 }
 
-fn with_managed_window<T>(
-    id: &PhysicalWindowId,
-    operation: impl FnMut(&AXUIElement) -> T,
-) -> Option<T> {
-    with_managed_window_result(id, operation).ok()
-}
-
 fn with_managed_window_result<T>(
     id: &PhysicalWindowId,
-    mut operation: impl FnMut(&AXUIElement) -> T,
+    mut operation: impl FnMut(&AXUIElement) -> Result<T, WindowAccessError>,
 ) -> Result<T, WindowAccessError> {
     if let Some(window) = MANAGED_WINDOWS.with(|windows| windows.borrow().get(id).cloned()) {
-        return Ok(operation(&window));
+        match operation(&window) {
+            Ok(value) => return Ok(value),
+            Err(WindowAccessError::Gone) => {
+                evict_managed_window(id);
+                return Err(WindowAccessError::Gone);
+            }
+            Err(WindowAccessError::Unavailable) => {
+                evict_managed_window(id);
+            }
+        }
     }
     if !process_incarnation_matches(&id.app) {
         evict_managed_app(&id.app);
@@ -942,8 +1004,11 @@ fn with_managed_window_result<T>(
     for window in cf_array_items::<AXUIElement>(&windows) {
         set_ax_timeout(window);
         if physical_window_id(&id.app, window).as_ref() == Some(id) {
-            cache_managed_window(id, window);
-            return Ok(operation(window));
+            let result = operation(window);
+            if result.is_ok() {
+                cache_managed_window(id, window);
+            }
+            return result;
         }
     }
     Err(WindowAccessError::Gone)
@@ -986,9 +1051,13 @@ pub fn mouse_position() -> Option<(i32, i32)> {
     Some((point.x.round() as i32, point.y.round() as i32))
 }
 
-fn process_incarnation_matches(id: &AppInstanceId) -> bool {
+fn running_application(id: &AppInstanceId) -> Option<objc2::rc::Retained<NSRunningApplication>> {
     NSRunningApplication::runningApplicationWithProcessIdentifier(id.pid)
-        .is_some_and(|application| launch_time(&application) == id.launched_at)
+        .filter(|application| launch_time(application) == id.launched_at)
+}
+
+fn process_incarnation_matches(id: &AppInstanceId) -> bool {
+    running_application(id).is_some()
 }
 
 pub fn is_process_incarnation_running(id: &AppInstanceId) -> bool {
@@ -999,11 +1068,36 @@ pub fn is_process_incarnation_running(id: &AppInstanceId) -> bool {
     running
 }
 
-fn app_instance(application: &NSRunningApplication) -> AppInstanceId {
+fn app_instance_with_pid(application: &NSRunningApplication, pid: i32) -> AppInstanceId {
     AppInstanceId {
-        pid: application.processIdentifier(),
+        pid,
         launched_at: launch_time(application),
     }
+}
+
+/// Trampoline-launched bundles (such as Xcode's `DeviceHub.app`, whose
+/// `CFBundleExecutable` is `DevicesTrampoline`) can register an `LSASN` whose
+/// `NSRunningApplication.processIdentifier()` reports `-1` even while the real
+/// process owns windows in the window server. Match against window-server
+/// owner PIDs to recover the real process identifier.
+fn resolve_application_pid(application: &NSRunningApplication) -> Option<i32> {
+    let pid = application.processIdentifier();
+    if pid > 0 {
+        return Some(pid);
+    }
+    let windows = window_server_windows(CGWindowListOption::OptionAll)?;
+    let mut checked = HashSet::new();
+    for window in windows {
+        if window.pid <= 0 || !checked.insert(window.pid) {
+            continue;
+        }
+        if NSRunningApplication::runningApplicationWithProcessIdentifier(window.pid)
+            .is_some_and(|candidate| *candidate == *application)
+        {
+            return Some(window.pid);
+        }
+    }
+    None
 }
 
 fn launch_time(application: &NSRunningApplication) -> u64 {
@@ -1051,18 +1145,29 @@ fn window_frame(window: &AXUIElement) -> Option<Rect> {
 
 fn observe_application(
     application: &NSRunningApplication,
-    onscreen: &HashSet<CGWindowID>,
+    pid: i32,
+    onscreen: &HashMap<CGWindowID, i64>,
     output: Rect,
+    screen_locked: bool,
 ) -> Option<AppObservation> {
-    let pid = application.processIdentifier();
     if pid <= 0 || pid == std::process::id() as i32 || application.isHidden() {
         return None;
     }
 
-    let id = app_instance(application);
+    let id = app_instance_with_pid(application, pid);
+    let accessory = application.activationPolicy() == NSApplicationActivationPolicy::Accessory;
     let bundle_id = application
         .bundleIdentifier()
         .map_or_else(|| "unknown".into(), |value| value.to_string());
+    if bundle_id == LOCK_SCREEN_BUNDLE_ID {
+        return None;
+    }
+    if screen_locked {
+        return Some(AppObservation::Unavailable {
+            app: id,
+            error: "screen is locked".into(),
+        });
+    }
     let app_element = application_element(pid);
 
     let windows = match attribute::<CFArray>(&app_element, "AXWindows") {
@@ -1085,23 +1190,37 @@ fn observe_application(
             });
         }
     };
-    let focused = focused_element
+    let focused_id = focused_element
         .as_ref()
-        .and_then(|window| physical_window_id(&id, window))
-        .filter(|window| onscreen.contains(&window.window_id));
+        .and_then(|window| physical_window_id(&id, window));
+    let focused = focused_id
+        .clone()
+        .filter(|window| onscreen.contains_key(&window.window_id));
     let mut observed = Vec::new();
     let mut current_windows = HashSet::new();
-    if let Some(window) = focused_element
-        && let Err(error) = collect_window(&id, &window, onscreen, output, &mut observed)
-    {
-        return Some(AppObservation::Unavailable { app: id, error });
-    }
-    for window in cf_array_items::<AXUIElement>(&windows) {
-        if let Some(window_id) = physical_window_id(&id, window) {
-            current_windows.insert(window_id);
+    let elements = focused_element
+        .as_deref()
+        .into_iter()
+        .map(|window| (window, focused_id.clone()))
+        .chain(cf_array_items::<AXUIElement>(&windows).map(|window| (window, None)));
+    for (window, known_id) in elements {
+        let Some(window_id) = known_id.or_else(|| physical_window_id(&id, window)) else {
+            return Some(AppObservation::Unavailable {
+                app: id,
+                error: "physical window ID unavailable".into(),
+            });
+        };
+        if !current_windows.insert(window_id.clone()) {
+            continue;
         }
-        if let Err(error) = collect_window(&id, window, onscreen, output, &mut observed) {
-            return Some(AppObservation::Unavailable { app: id, error });
+        set_ax_timeout(window);
+        match observe_window(window_id, accessory, window, onscreen, output) {
+            Ok(WindowObservation::Observed(observation)) => {
+                cache_managed_window(&observation.id, window);
+                observed.push(observation);
+            }
+            Ok(WindowObservation::Ignored) => {}
+            Err(error) => return Some(AppObservation::Unavailable { app: id, error }),
         }
     }
     prune_managed_app(&id, &current_windows);
@@ -1120,47 +1239,36 @@ fn observe_application(
     })
 }
 
-fn collect_window(
-    app: &AppInstanceId,
-    window: &AXUIElement,
-    onscreen: &HashSet<CGWindowID>,
-    output: Rect,
-    observed: &mut Vec<ObservedWindow>,
-) -> Result<(), String> {
-    set_ax_timeout(window);
-    if let WindowObservation::Observed(observation) = observe_window(app, window, onscreen, output)?
-        && !observed
-            .iter()
-            .any(|existing| existing.id == observation.id)
-    {
-        cache_managed_window(&observation.id, window);
-        observed.push(observation);
-    }
-    Ok(())
-}
-
 enum WindowObservation {
     Observed(ObservedWindow),
     Ignored,
 }
 
+const MIN_MANAGEABLE_WINDOW_DIMENSION: i32 = 64;
+
 fn observe_window(
-    app: &AppInstanceId,
+    id: PhysicalWindowId,
+    accessory: bool,
     window: &AXUIElement,
-    onscreen: &HashSet<CGWindowID>,
+    onscreen: &HashMap<CGWindowID, i64>,
     output: Rect,
 ) -> Result<WindowObservation, String> {
-    let role = attribute::<CFString>(window, "AXRole")
-        .map_err(|error| format!("AXRole: {error:?}"))?
-        .to_string();
+    let Some(&layer) = onscreen.get(&id.window_id) else {
+        return Ok(WindowObservation::Ignored);
+    };
+    let role =
+        attribute::<CFString>(window, "AXRole").map_err(|error| format!("AXRole: {error:?}"))?;
+    if *role != *CFString::from_static_str("AXWindow") {
+        return Ok(WindowObservation::Ignored);
+    }
     let subrole = match attribute::<CFString>(window, "AXSubrole") {
-        Ok(subrole) => subrole.to_string(),
+        Ok(subrole) => subrole,
         Err(AXError::NoValue | AXError::AttributeUnsupported) => {
             return Ok(WindowObservation::Ignored);
         }
         Err(error) => return Err(format!("AXSubrole: {error:?}")),
     };
-    if role != "AXWindow" || subrole != "AXStandardWindow" {
+    if *subrole != *CFString::from_static_str("AXStandardWindow") {
         return Ok(WindowObservation::Ignored);
     }
 
@@ -1173,14 +1281,23 @@ fn observe_window(
     {
         return Ok(WindowObservation::Ignored);
     }
-    let resizable =
-        is_settable(window, "AXSize").map_err(|error| format!("AXSize settable: {error:?}"))?;
 
     let frame = window_frame(window).ok_or("AX frame was unavailable")?;
-    let id = physical_window_id(app, window).ok_or("physical window ID unavailable")?;
-    if !onscreen.contains(&id.window_id) || !output.contains_center(frame) {
+    if frame.width < MIN_MANAGEABLE_WINDOW_DIMENSION
+        || frame.height < MIN_MANAGEABLE_WINDOW_DIMENSION
+        || !output.contains_center(frame)
+    {
         return Ok(WindowObservation::Ignored);
     }
+    let fullscreen_enabled = button_is_enabled(window, "AXFullScreenButton");
+    let has_close_button = attribute::<AXUIElement>(window, "AXCloseButton").is_ok();
+    if (layer != 0 || accessory) && !fullscreen_enabled && !has_close_button {
+        return Ok(WindowObservation::Ignored);
+    }
+    let modal = optional_bool_attribute(window, "AXModal").unwrap_or(false);
+    let dialog = modal || (!fullscreen_enabled && (has_close_button || accessory));
+    let resizable = !dialog
+        && is_settable(window, "AXSize").map_err(|error| format!("AXSize settable: {error:?}"))?;
     let title = match attribute::<CFString>(window, "AXTitle") {
         Ok(title) => Some(std::sync::Arc::from(title.to_string())),
         Err(_) => None,
@@ -1193,15 +1310,23 @@ fn observe_window(
     }))
 }
 
-fn onscreen_windows() -> Option<HashMap<i32, HashSet<CGWindowID>>> {
+fn button_is_enabled(window: &AXUIElement, name: &'static str) -> bool {
+    let Ok(button) = attribute::<AXUIElement>(window, name) else {
+        return false;
+    };
+    set_ax_timeout(&button);
+    optional_bool_attribute(&button, "AXEnabled").unwrap_or(false)
+}
+
+fn onscreen_windows() -> Option<HashMap<i32, HashMap<CGWindowID, i64>>> {
     let list = CGWindowListCopyWindowInfo(
         CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
         0,
     )?;
-    let mut windows = HashMap::<i32, HashSet<CGWindowID>>::new();
+    let mut windows = HashMap::<i32, HashMap<CGWindowID, i64>>::new();
     for entry in cf_array_items::<CFDictionary>(&list) {
-        if let Some((pid, id)) = window_server_identity(entry) {
-            windows.entry(pid).or_default().insert(id);
+        if let Some((pid, id, layer)) = window_server_identity(entry) {
+            windows.entry(pid).or_default().insert(id, layer);
         }
     }
     Some(windows)
@@ -1281,7 +1406,7 @@ fn window_server_windows(options: CGWindowListOption) -> Option<Vec<WindowServer
     let mut windows = Vec::new();
     let list = CGWindowListCopyWindowInfo(options | CGWindowListOption::ExcludeDesktopElements, 0)?;
     for entry in cf_array_items::<CFDictionary>(&list) {
-        let Some((pid, id)) = window_server_identity(entry) else {
+        let Some((pid, id, _)) = window_server_identity(entry) else {
             continue;
         };
         let Some(frame) = window_server_bounds(entry) else {
@@ -1301,15 +1426,16 @@ fn window_server_frame_map(options: CGWindowListOption) -> Option<HashMap<CGWind
     )
 }
 
-fn window_server_identity(entry: &CFDictionary) -> Option<(i32, u32)> {
-    if dictionary_number(entry, unsafe { kCGWindowLayer }) != Some(0) {
+fn window_server_identity(entry: &CFDictionary) -> Option<(i32, u32, i64)> {
+    let layer = dictionary_number(entry, unsafe { kCGWindowLayer })?;
+    if !matches!(layer, 0 | 3) {
         return None;
     }
     let id = dictionary_number(entry, unsafe { kCGWindowNumber })
         .and_then(|id| u32::try_from(id).ok())?;
     let pid = dictionary_number(entry, unsafe { kCGWindowOwnerPID })
         .and_then(|pid| i32::try_from(pid).ok())?;
-    Some((pid, id))
+    Some((pid, id, layer))
 }
 
 fn window_server_bounds(entry: &CFDictionary) -> Option<Rect> {

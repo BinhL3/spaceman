@@ -82,10 +82,13 @@ impl WorkspaceId {
 
 impl fmt::Display for WorkspaceId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (self.number(), self.letter()) {
-            (Some(number), _) => write!(formatter, "{number}"),
-            (_, Some(letter)) => write!(formatter, "{letter}"),
-            _ => unreachable!("workspace ID is always valid"),
+        match self.number() {
+            Some(number) => write!(formatter, "{number}"),
+            None => write!(
+                formatter,
+                "{}",
+                self.letter().expect("named workspace has a letter")
+            ),
         }
     }
 }
@@ -279,10 +282,10 @@ impl Default for Workspaces {
         Self {
             engines: std::array::from_fn(|_| Engine::default()),
             assignments: std::array::from_fn(|index| {
-                if !(5..WorkspaceId::NUMBERED_COUNT).contains(&index) {
-                    DisplaySelector::Main
-                } else {
+                if (5..WorkspaceId::NUMBERED_COUNT).contains(&index) {
                     DisplaySelector::Secondary
+                } else {
+                    DisplaySelector::Main
                 }
             }),
             active: HashMap::from([
@@ -378,23 +381,19 @@ impl Workspaces {
                 self.floating_owners.insert(window, workspace);
             }
         }
-        for (index, slot) in last_focused
-            .into_iter()
-            .take(WorkspaceId::COUNT)
-            .enumerate()
-        {
-            self.last_focused[index] =
-                slot.filter(|slot| self.has_slot(WorkspaceId::from_index(index), *slot));
-        }
         for index in 0..WorkspaceId::COUNT {
-            let legacy_maximized = maximized
-                .get(index)
-                .copied()
-                .flatten()
-                .filter(|slot| self.has_slot(WorkspaceId::from_index(index), *slot));
-            self.last_focused[index] = legacy_maximized.or(self.last_focused[index]);
+            let workspace = WorkspaceId::from_index(index);
+            let valid_slot = |slots: &[Option<crate::SlotId>]| {
+                slots
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .filter(|slot| self.has_slot(workspace, *slot))
+            };
+            let legacy_maximized = valid_slot(&maximized);
+            self.last_focused[index] = legacy_maximized.or_else(|| valid_slot(&last_focused));
             self.set_fullscreen_layout(
-                WorkspaceId::from_index(index),
+                workspace,
                 fullscreen_layout.get(index).copied().unwrap_or(false)
                     || legacy_maximized.is_some(),
             );
@@ -545,6 +544,11 @@ impl Workspaces {
             .map(|slot| &slot.identity_window().app)
     }
 
+    pub(crate) fn app_owns_windows(&self, app: &crate::AppInstanceId) -> bool {
+        WorkspaceId::all().any(|workspace| self.app_instances(workspace).any(|owner| owner == app))
+            || self.floating_owners.keys().any(|window| &window.app == app)
+    }
+
     pub(crate) fn floating_windows_for_app(
         &self,
         app: &crate::AppInstanceId,
@@ -612,9 +616,11 @@ impl Workspaces {
     }
 
     pub(crate) fn preferred_focus(&self, workspace: WorkspaceId) -> Option<PhysicalWindowId> {
-        let index = workspace.index();
-        self.last_focused[index]
-            .and_then(|slot| self.window_for_slot(workspace, slot))
+        let slot = self.last_focused[workspace.index()]?;
+        self.engine(workspace)
+            .model()
+            .slot(slot)?
+            .bound_window()
             .cloned()
     }
 
@@ -629,37 +635,13 @@ impl Workspaces {
 
     pub(crate) fn prune_intents(&mut self, workspace: WorkspaceId) {
         let index = workspace.index();
-        if self.last_focused[index].is_some_and(|slot| !self.has_slot(workspace, slot)) {
-            self.last_focused[index] = None;
-        }
-        if self.fullscreen_layout[index]
-            && self.engine(workspace).model().workspace.slots.is_empty()
-        {
-            self.fullscreen_layout[index] = false;
-        }
+        self.last_focused[index] =
+            self.last_focused[index].filter(|slot| self.has_slot(workspace, *slot));
+        self.set_fullscreen_layout(workspace, self.fullscreen_layout[index]);
     }
 
     fn has_slot(&self, workspace: WorkspaceId, slot: crate::SlotId) -> bool {
-        self.engine(workspace)
-            .model()
-            .workspace
-            .slots
-            .iter()
-            .any(|candidate| candidate.id == slot)
-    }
-
-    fn window_for_slot(
-        &self,
-        workspace: WorkspaceId,
-        slot: crate::SlotId,
-    ) -> Option<&PhysicalWindowId> {
-        self.engine(workspace)
-            .model()
-            .workspace
-            .slots
-            .iter()
-            .find(|candidate| candidate.id == slot)?
-            .bound_window()
+        self.engine(workspace).model().slot(slot).is_some()
     }
 
     pub(crate) fn inactive_windows_except(

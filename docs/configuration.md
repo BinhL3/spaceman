@@ -53,14 +53,17 @@ Rules run in file order and the first matching rule wins. An unmatched window is
 - `float` excludes the window from tiling and resizing, preserves its native frame, and keeps it with
   the logical workspace where it was first observed.
 - `route` assigns a newly inserted resizable logical window to workspace 1 through 10 or a configured
-  named workspace A through Z. Movable
+  named workspace A through Z. A bundle-level `route` rule (without `title`) applies to the
+  application's initial window while secondary windows opened later stay on the active workspace; a
+  `title`-matched `route` rule routes every matching window. Movable
   non-resizable windows remain floating on the workspace where first observed. A rule does not
   repeatedly route existing slots, including a Ghostty native-tab physical replacement.
 - `ignore` leaves the window entirely alone: never tiled, never owned by a workspace, never moved or
   parked. Use it for applications that insist on positioning their own windows. A previously managed
   window is released the next time it is observed on screen.
 
-An unmatched window of a relaunched application may instead return to a remembered workspace; see
+During the startup recovery window, an unmatched window of an application that has not yet been seen
+in the session may return to a remembered workspace; see
 [Remembered Placements](#remembered-placements). Matching `route` and `ignore` rules always win over
 memory.
 
@@ -74,12 +77,15 @@ application relaunch. Spaceman therefore also remembers, per application bundle 
 workspace each managed window lived on, whether it floated, and its last on-screen frame. It never
 records window titles.
 
-When an application instance that owns no windows yet appears (after a reboot, a relaunch, or a
-Spaceman start without valid workspace state), its windows may claim those placements for 60 seconds:
+During the first 60 seconds after Spaceman starts, when an application bundle is seen for the first
+time and owns no windows yet (such as after a reboot or a Spaceman start without valid workspace
+state), its windows may claim those remembered placements:
 first a window whose frame matches a remembered frame within 8 pixels, then the remaining windows in
 creation order. A claimed window joins its remembered workspace (hidden if that workspace is not
-visible). Windows beyond the remembered count, windows opened after the 60 seconds, and placements on
-workspaces that are no longer enabled or managed are adopted normally. Multi-window applications that
+visible). Applications launched later during the session, or relaunched after already having been seen,
+open on the active workspace instead of recalling historical placements. Windows beyond the remembered
+count, windows opened after the recall window closes, and placements on workspaces that are no longer
+enabled or managed are adopted on the active workspace. Multi-window applications that
 restore windows with identical frames are matched by creation order, which is a best guess.
 
 A changed arrangement replaces an application's memory only after it holds for 10 seconds while the

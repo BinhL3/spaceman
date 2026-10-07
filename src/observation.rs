@@ -164,6 +164,16 @@ pub enum AppObservation {
     },
 }
 
+impl AppObservation {
+    #[must_use]
+    pub const fn app_id(&self) -> &AppInstanceId {
+        match self {
+            Self::Complete { app, .. } => &app.id,
+            Self::Unavailable { app, .. } | Self::Terminated { app } => app,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NativeObservation {
     pub cycle: u64,

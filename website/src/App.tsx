@@ -6,7 +6,7 @@ import {
   useReducedMotion,
   type Variants,
 } from "motion/react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 const RELEASE_VERSION = "0.1.2";
 const DOWNLOAD_URL = `https://pub-6f85d683ffe0419cad0a71508904053a.r2.dev/releases/Spaceman-v${RELEASE_VERSION}-macos-arm64.zip`;
@@ -33,8 +33,8 @@ export function App() {
   const [[workspace, direction], setState] = useState<[number, number]>([0, 1]);
 
   const select = (next: number) =>
-    setState(([current]) =>
-      next === current ? [current, 1] : [next, next > current ? 1 : -1],
+    setState((prev) =>
+      next === prev[0] ? prev : [next, next > prev[0] ? 1 : -1],
     );
 
   useEffect(() => {
@@ -186,23 +186,33 @@ function advanceWarp(dt: number) {
   }
 }
 
+function prepareCanvas(
+  canvas: HTMLCanvasElement,
+  w: number,
+  h: number,
+): CanvasRenderingContext2D | null {
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  const width = Math.round(w * dpr);
+  const height = Math.round(h * dpr);
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  return ctx;
+}
+
 function drawWarp() {
   const vw = window.innerWidth;
   const vh = window.innerHeight;
-  const dpr = Math.min(window.devicePixelRatio || 1, 3);
   for (const canvas of starCanvases) {
     const bounds = canvas.getBoundingClientRect();
     if (bounds.width === 0 || bounds.height === 0) continue;
-    const width = Math.round(bounds.width * dpr);
-    const height = Math.round(bounds.height * dpr);
-    if (canvas.width !== width || canvas.height !== height) {
-      canvas.width = width;
-      canvas.height = height;
-    }
-    const ctx = canvas.getContext("2d");
+    const ctx = prepareCanvas(canvas, bounds.width, bounds.height);
     if (!ctx) continue;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, bounds.width, bounds.height);
     const cx = vw / 2 - bounds.left;
     const cy = vh / 2 - bounds.top;
     for (const star of WARP_STARS) {
@@ -294,7 +304,12 @@ function WorkspaceDemo({
   const frameRef = useRef<HTMLDivElement>(null);
   const copyCanvasRef = useRef<HTMLCanvasElement>(null);
   const [frame, setFrame] = useState<Frame | null>(null);
-  const [mapUri, setMapUri] = useState<string | null>(null);
+  const frameW = frame?.w ?? 0;
+  const frameH = frame?.h ?? 0;
+  const mapUri = useMemo(
+    () => (frameW > 0 && frameH > 0 ? buildDisplacementMap(frameW, frameH) : null),
+    [frameW, frameH],
+  );
 
   useEffect(() => {
     const canvas = copyCanvasRef.current;
@@ -328,10 +343,6 @@ function WorkspaceDemo({
       observer.disconnect();
     };
   }, []);
-
-  useEffect(() => {
-    if (frame) setMapUri(buildDisplacementMap(frame.w, frame.h));
-  }, [frame]);
 
   return (
     <div className="relative flex w-full max-w-[520px] flex-col items-center gap-4">
@@ -568,23 +579,14 @@ function RadarApp() {
     if (!canvas) return;
     const bounds = canvas.getBoundingClientRect();
     if (bounds.width === 0 || bounds.height === 0) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 3);
-    const width = Math.round(bounds.width * dpr);
-    const height = Math.round(bounds.height * dpr);
-    if (canvas.width !== width || canvas.height !== height) {
-      canvas.width = width;
-      canvas.height = height;
-    }
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
     const w = bounds.width;
     const h = bounds.height;
+    const ctx = prepareCanvas(canvas, w, h);
+    if (!ctx) return;
     const cx = w / 2;
     const cy = h / 2;
     const radius = Math.min(w, h) * 0.38;
     const t = reduced ? 0 : performance.now() / 1000;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, h);
 
     // Rings and cross hairs
     ctx.lineWidth = 1;
@@ -802,17 +804,8 @@ function StarMapApp() {
       mapScroll += dt * (1 + s.boost * 45);
       mapScrollStamp = now;
     }
-    const dpr = Math.min(window.devicePixelRatio || 1, 3);
-    const width = Math.round(w * dpr);
-    const height = Math.round(h * dpr);
-    if (canvas.width !== width || canvas.height !== height) {
-      canvas.width = width;
-      canvas.height = height;
-    }
-    const ctx = canvas.getContext("2d");
+    const ctx = prepareCanvas(canvas, w, h);
     if (!ctx) return;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, h);
 
     for (const layer of MAP_LAYERS) {
       const streak = s.boost * layer.speed * 900;

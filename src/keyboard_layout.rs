@@ -181,10 +181,11 @@ fn reverse_lookup(outputs: &[KeyOutput], character: char) -> Result<KeyOutput, R
 
 #[cfg(target_os = "macos")]
 mod macos {
+    use objc2_core_foundation::{CFString, CFType};
+
     use super::*;
 
     type InputSource = *const c_void;
-    const UTF8_ENCODING: u32 = 0x0800_0100;
     const KEY_ACTION_DOWN: u16 = 0;
     const NO_DEAD_KEYS_MASK: u32 = 1;
 
@@ -218,14 +219,6 @@ mod macos {
         fn CFRelease(value: *const c_void);
         fn CFDataGetBytePtr(data: *const c_void) -> *const u8;
         fn CFDataGetLength(data: *const c_void) -> isize;
-        fn CFStringGetLength(string: *const c_void) -> isize;
-        fn CFStringGetMaximumSizeForEncoding(length: isize, encoding: u32) -> isize;
-        fn CFStringGetCString(
-            string: *const c_void,
-            buffer: *mut i8,
-            buffer_size: isize,
-            encoding: u32,
-        ) -> bool;
     }
 
     struct OwnedInputSource(InputSource);
@@ -382,10 +375,10 @@ mod macos {
     ) -> Result<Option<KeyOutput>, ResolveError> {
         let modifier_state = if shift { 2 } else { 0 };
         let no_dead_key = translate_raw(layout, key_code, modifier_state, NO_DEAD_KEYS_MASK)?;
-        let normal = translate_raw(layout, key_code, modifier_state, 0)?;
         let Some(character) = no_dead_key.text else {
             return Ok(None);
         };
+        let normal = translate_raw(layout, key_code, modifier_state, 0)?;
         Ok(Some(KeyOutput {
             key_code,
             character,
@@ -449,19 +442,9 @@ mod macos {
     }
 
     fn cf_string(value: *const c_void) -> Option<String> {
-        if value.is_null() {
-            return None;
-        }
-        let length = unsafe { CFStringGetLength(value) };
-        let maximum = unsafe { CFStringGetMaximumSizeForEncoding(length, UTF8_ENCODING) };
-        let capacity = maximum.checked_add(1)?;
-        let mut bytes = vec![0_i8; usize::try_from(capacity).ok()?];
-        if !unsafe { CFStringGetCString(value, bytes.as_mut_ptr(), capacity, UTF8_ENCODING) } {
-            return None;
-        }
-        let byte_length = bytes.iter().position(|byte| *byte == 0)?;
-        let bytes = unsafe { slice::from_raw_parts(bytes.as_ptr().cast::<u8>(), byte_length) };
-        std::str::from_utf8(bytes).ok().map(str::to_owned)
+        unsafe { value.cast::<CFType>().as_ref() }?
+            .downcast_ref::<CFString>()
+            .map(CFString::to_string)
     }
 }
 

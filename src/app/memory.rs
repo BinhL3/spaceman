@@ -29,6 +29,12 @@ pub(super) struct MemoryState {
     /// Every observed instance's bundle. An instance without an open recall
     /// may have its ownership recorded.
     pub(super) bundles: HashMap<AppInstanceId, String>,
+    /// When window memory was restored for this agent run. Placement recall
+    /// applies only during the startup window after Spaceman launches.
+    pub(super) started_at: Option<Instant>,
+    /// Bundles already seen in this session; mid-session relaunches open on
+    /// the active workspace instead of recalling historical placements.
+    pub(super) seen_bundles: HashSet<String>,
 }
 
 impl MemoryState {
@@ -76,12 +82,13 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         app: &crate::ObservedApplication,
         windows: &[crate::ObservedWindow],
     ) {
-        if self
-            .memory
+        self.memory
             .bundles
-            .insert(app.id.clone(), app.bundle_id.clone())
-            .is_none()
-        {
+            .insert(app.id.clone(), app.bundle_id.clone());
+        if windows.is_empty() {
+            return;
+        }
+        if self.memory.seen_bundles.insert(app.bundle_id.clone()) {
             self.open_recall(app);
         }
         let Some(recall) = self.memory.recalls.get_mut(&app.id) else {
@@ -141,15 +148,18 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         }
     }
 
-    /// Open a recall for an instance seen for the first time if it owns no
-    /// windows yet and its bundle has remembered placements it may claim.
+    /// Open a recall for an instance seen for the first time during startup if
+    /// it owns no windows yet and its bundle has remembered placements it may claim.
     fn open_recall(&mut self, app: &crate::ObservedApplication) {
-        let owns_windows = WorkspaceId::all().any(|workspace| {
-            self.workspaces
-                .app_instances(workspace)
-                .any(|owner| owner == &app.id)
-        }) || !self.workspaces.floating_windows_for_app(&app.id).is_empty();
-        if owns_windows {
+        if self
+            .memory
+            .started_at
+            .is_none_or(|started| started.elapsed() >= RECALL_WINDOW)
+            || self.config.has_bundle_route(&app.bundle_id)
+        {
+            return;
+        }
+        if self.workspaces.app_owns_windows(&app.id) {
             return;
         }
         let remembered = self

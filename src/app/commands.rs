@@ -20,10 +20,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             (crate::Axis::Horizontal, Direction::Down | Direction::Up)
                 | (crate::Axis::Vertical, Direction::Left | Direction::Right)
         );
-        let local_tiles = self
-            .navigation_tiles(&outputs)
-            .into_iter()
+        let tiles = self.navigation_tiles(&outputs);
+        let local_tiles = tiles
+            .iter()
             .filter(|tile| tile.workspace == workspace)
+            .cloned()
             .collect::<Vec<_>>();
         if let Some(target) = crate::navigation::target(&local_tiles, &window, direction) {
             if !self
@@ -44,22 +45,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         {
             return self.relayout_persist(workspace, &outputs, cancelled);
         }
-        let Some((target_workspace, target_window)) =
-            self.spatial_target(&window, direction, &outputs)
-        else {
+        let Some(target) = crate::navigation::target(&tiles, &window, direction) else {
             return Ok(self.status(0, &outputs));
         };
-        if target_workspace != workspace {
-            return self.move_window(window, target_workspace, outputs, cancelled);
-        }
-        if !self
-            .workspaces
-            .engine_mut(workspace)
-            .swap_windows(&window, &target_window)
-        {
-            return Ok(self.status(0, &outputs));
-        }
-        self.relayout_persist(workspace, &outputs, cancelled)
+        self.move_window(window, target.workspace, outputs, cancelled)
     }
 
     pub(super) fn drop_window(

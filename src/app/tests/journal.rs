@@ -3,10 +3,12 @@ use crate::journal::{AnomalyKind, JournalEvent, WindowRole};
 use super::*;
 
 fn anomaly_kinds(runtime: &mut WorkspaceRuntime<FakeBackend>) -> Vec<(AnomalyKind, u32)> {
+    let outputs = outputs();
+    let visible = runtime.visible_workspaces(&outputs);
     let server = runtime.backend.window_server_frames().unwrap();
     let windows = runtime.arranged_windows(&server);
     let mut kinds: Vec<_> = runtime
-        .anomalies(&outputs(), &windows, &server)
+        .anomalies(&outputs, &visible, &windows, &server)
         .into_iter()
         .map(|anomaly| (anomaly.kind, anomaly.window))
         .collect();

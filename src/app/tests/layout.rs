@@ -849,3 +849,92 @@ fn directional_focus_steps_through_a_fullscreen_stack_then_crosses_displays() {
     assert_eq!(focus(&mut runtime, Direction::Right), 40);
     assert!(runtime.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
 }
+
+#[test]
+fn opening_a_new_tiled_window_exits_fullscreen_layout_and_splits_side_by_side() {
+    let first = window(10);
+    let second = window(20);
+    let outputs = outputs();
+    let cancelled = AtomicBool::new(false);
+    let mut backend = FakeBackend {
+        focused: Some(first.clone()),
+        observation: Some(observation(&first, frame(50))),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(first.clone(), frame(50));
+    let mut runtime = runtime(backend);
+    runtime.cycle(outputs.clone(), &cancelled).unwrap();
+    runtime
+        .toggle_fullscreen_layout(outputs.clone(), &cancelled)
+        .unwrap();
+    assert!(runtime.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
+    assert_eq!(runtime.backend.frames[&first], outputs.main().frame);
+
+    runtime.backend.frames.insert(second.clone(), frame(400));
+    runtime.backend.focused = Some(second.clone());
+    runtime.backend.observation = Some(observation_for_windows(
+        "com.example.Test",
+        &second,
+        &[
+            (first.clone(), outputs.main().frame),
+            (second.clone(), frame(400)),
+        ],
+    ));
+    let status = runtime.cycle(outputs, &cancelled).unwrap();
+
+    assert!(!runtime.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
+    assert!(matches!(
+        status.layouts[0].mode,
+        status_item::WorkspaceLayoutMode::Split(_)
+    ));
+    assert_eq!(runtime.backend.frames[&first].width, 500);
+    assert_eq!(runtime.backend.frames[&second].x, 500);
+    assert_eq!(runtime.backend.frames[&second].width, 500);
+}
+
+#[test]
+fn opening_a_floating_window_preserves_fullscreen_layout() {
+    let tiled = window(10);
+    let dialog = window(20);
+    let outputs = outputs();
+    let cancelled = AtomicBool::new(false);
+    let mut backend = FakeBackend {
+        focused: Some(tiled.clone()),
+        observation: Some(observation(&tiled, frame(50))),
+        ..FakeBackend::default()
+    };
+    backend.frames.insert(tiled.clone(), frame(50));
+    let mut runtime = runtime(backend);
+    runtime.cycle(outputs.clone(), &cancelled).unwrap();
+    runtime
+        .toggle_fullscreen_layout(outputs.clone(), &cancelled)
+        .unwrap();
+    assert!(runtime.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
+
+    let mut observed = observation_for_windows(
+        "com.example.Test",
+        &dialog,
+        &[
+            (tiled.clone(), outputs.main().frame),
+            (dialog.clone(), frame(300)),
+        ],
+    );
+    if let crate::AppObservation::Complete { windows, .. } = &mut observed.applications[0] {
+        windows
+            .iter_mut()
+            .find(|window| window.id == dialog)
+            .unwrap()
+            .resizable = false;
+    }
+    runtime.backend.frames.insert(dialog.clone(), frame(300));
+    runtime.backend.observation = Some(observed);
+    runtime.cycle(outputs.clone(), &cancelled).unwrap();
+
+    assert!(runtime.workspaces.uses_fullscreen_layout(WorkspaceId::ONE));
+    assert_eq!(runtime.backend.frames[&tiled], outputs.main().frame);
+    assert_eq!(runtime.backend.frames[&dialog], frame(300));
+    assert_eq!(
+        runtime.workspaces.floating_workspace_of(&dialog),
+        Some(WorkspaceId::ONE)
+    );
+}

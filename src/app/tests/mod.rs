@@ -344,6 +344,19 @@ fn runtime(backend: FakeBackend) -> WorkspaceRuntime<FakeBackend> {
     WorkspaceRuntime::with_backend(ManagementScope::Both, backend, HashMap::new())
 }
 
+fn runtime_with_parked(
+    backend: FakeBackend,
+    parked: impl IntoIterator<Item = (crate::PhysicalWindowId, crate::Rect)>,
+) -> WorkspaceRuntime<FakeBackend> {
+    WorkspaceRuntime::with_backend(ManagementScope::Both, backend, parked.into_iter().collect())
+}
+
+fn main_parked_frame(normal: crate::Rect) -> crate::Rect {
+    let outputs = outputs();
+    let displays = outputs.frames().collect::<Vec<_>>();
+    crate::geometry::parked_frame(outputs.main().frame, &displays, normal)
+}
+
 fn runtime_with_config(backend: FakeBackend, config: Config) -> WorkspaceRuntime<FakeBackend> {
     WorkspaceRuntime::with_backend_and_config(
         ManagementScope::Both,

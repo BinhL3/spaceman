@@ -21,7 +21,7 @@ Spaceman currently:
   to the main display when a preferred display disconnects;
 - persists active workspaces, nested split layouts, tile order and weights, and parked-window recovery
   metadata across Spaceman restarts, and remembers each application's window placements by bundle
-  identifier so relaunched applications and reboots return windows to their workspaces;
+  identifier so reboots and startup recovery return windows to their workspaces;
 - journals window arrangements and model/screen disagreements locally, summarized by
   `spaceman doctor`;
 - can register its signed app bundle with macOS to launch automatically at login;

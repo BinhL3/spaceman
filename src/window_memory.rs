@@ -115,7 +115,7 @@ impl WindowMemory {
                 .apps
                 .iter()
                 .filter(|(candidate, _)| candidate.as_str() != bundle_id)
-                .min_by_key(|(candidate, app)| (app.updated_at, (*candidate).clone()))
+                .min_by_key(|(_, app)| app.updated_at)
                 .map(|(candidate, _)| candidate.clone())
             else {
                 break;
@@ -144,11 +144,11 @@ pub fn assign<K: Ord + Clone>(
     let mut assignments = Vec::new();
     let mut unmatched = Vec::new();
     for (id, frame) in ordered {
-        let exact = remembered
+        let exact = claimed
             .iter()
-            .enumerate()
-            .position(|(index, candidate)| {
-                !claimed[index]
+            .zip(remembered)
+            .position(|(&is_claimed, candidate)| {
+                !is_claimed
                     && candidate
                         .frame
                         .approximately_equals(frame, FRAME_MATCH_TOLERANCE)

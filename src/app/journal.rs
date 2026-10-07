@@ -87,15 +87,12 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         };
         let now = Instant::now();
         self.journal.last_check = Some(now);
+        let visible = self.visible_workspaces(outputs);
         let windows = self.arranged_windows(&server_frames);
-        let anomalies = self.anomalies(outputs, &windows, &server_frames);
+        let anomalies = self.anomalies(outputs, &visible, &windows, &server_frames);
         let arrangement = Arrangement {
             displays: outputs.frames().collect(),
-            active: self
-                .visible_workspaces(outputs)
-                .iter()
-                .map(|resolved| resolved.workspace)
-                .collect(),
+            active: visible.iter().map(|resolved| resolved.workspace).collect(),
             windows: windows.into_iter().map(|(_, window)| window).collect(),
         };
         let snapshot_due = self
@@ -132,12 +129,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     ArrangedWindow {
                         window: id.window_id,
                         pid: id.app.pid,
-                        bundle_id: self
-                            .memory
-                            .bundles
-                            .get(&id.app)
-                            .cloned()
-                            .unwrap_or_default(),
+                        bundle_id: self.bundle_id(&id.app).unwrap_or_default().to_owned(),
                         frame: server_frames.get(&id.window_id).copied(),
                         owner,
                         role,
@@ -180,6 +172,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     pub(super) fn anomalies(
         &self,
         outputs: &macos::DisplayOutputs,
+        visible_workspaces: &[ResolvedWorkspace],
         windows: &[(crate::PhysicalWindowId, ArrangedWindow)],
         server_frames: &HashMap<u32, crate::Rect>,
     ) -> Vec<Anomaly> {
@@ -189,8 +182,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 .iter()
                 .any(|display| display.contains_center(frame))
         };
-        let visible: HashSet<_> = self
-            .visible_workspaces(outputs)
+        let visible: HashSet<_> = visible_workspaces
             .iter()
             .map(|resolved| resolved.workspace)
             .collect();
@@ -238,7 +230,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 report(AnomalyKind::ParkedVisible, arranged, None);
             }
         }
-        for tile in self.navigation_tiles(outputs) {
+        for tile in self.navigation_tiles_for(visible_workspaces) {
             if self.parked.contains_key(&tile.window)
                 || self.constrained[tile.workspace.index()].contains_key(&tile.window)
             {
