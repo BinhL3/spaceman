@@ -1,47 +1,91 @@
-//! Scrolling Strip, a Spaceman Lab: a workspace's tiles as one horizontal row of wide columns.
-//! At most two columns are on screen, filling the display edge to edge; the rest are parked
-//! off-screen by the same durable parking that hides inactive workspaces. No private APIs and no
-//! frames past a display edge: every visible column sits wholly inside the display.
+//! Scrolling Strip, a Spaceman Lab: a workspace's tiles as one horizontal ribbon of columns seen
+//! through a viewport camera, as in niri. Each column keeps its own width (a share of the
+//! display); the camera slides along the ribbon on a spring and only moves when the focused
+//! column would otherwise leave the screen (niri's minimal scroll).
+//!
+//! Past a free display edge an off-screen column keeps a [`PEEK_PX`] sliver visible, so it
+//! glides off and back on instead of vanishing. Against an edge shared with another monitor a
+//! column stays inside the display, and once the camera rests the columns beyond it are parked
+//! like an inactive workspace's windows. Everything here is pure geometry: the worker decides
+//! rest layouts with it, and the main thread samples a [`StripMotion`] every display frame.
+
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Rect, SlotId};
+use crate::{
+    PhysicalWindowId, Rect, SlotId, WorkspaceId,
+    motion::{CameraSpring, ScrollingDisplayBounds},
+};
 
-/// A column's preferred width while it is the focused one.
+/// How much of an off-screen column stays visible past a free display edge.
+pub const PEEK_PX: i32 = 16;
+
+/// Device-pixel scale motion settles against: within a quarter of a Retina pixel.
+pub const SETTLE_SCALE: f64 = 2.0;
+
+/// The longest a motion is assumed to run before it counts as settled anyway.
+pub const MAX_MOTION: Duration = Duration::from_secs(3);
+
+/// A column's width as a share of its display.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StripWidth {
-    /// 50%, beside an equal neighbor.
-    Half,
-    /// 66%, with the neighbor peeking in the remaining 34%.
+    /// 33%: three columns side by side.
+    Third,
+    /// 50%, niri's default: two columns fill the display.
     #[default]
+    Half,
+    /// 66%, with a neighbor showing in the remaining third.
     TwoThirds,
-    /// 100%: the column alone, its neighbors one step away.
+    /// 80%.
+    FourFifths,
+    /// 100%: the column alone.
     Full,
 }
 
 impl StripWidth {
-    #[must_use]
-    pub const fn narrower(self) -> Self {
+    /// Every preset, narrowest first; `⌥-` and `⌥=` step through them.
+    pub const PRESETS: [Self; 5] = [
+        Self::Third,
+        Self::Half,
+        Self::TwoThirds,
+        Self::FourFifths,
+        Self::Full,
+    ];
+
+    const fn index(self) -> usize {
         match self {
-            Self::Full => Self::TwoThirds,
-            Self::TwoThirds | Self::Half => Self::Half,
+            Self::Third => 0,
+            Self::Half => 1,
+            Self::TwoThirds => 2,
+            Self::FourFifths => 3,
+            Self::Full => 4,
         }
     }
 
     #[must_use]
+    pub const fn narrower(self) -> Self {
+        Self::PRESETS[self.index().saturating_sub(1)]
+    }
+
+    #[must_use]
     pub const fn wider(self) -> Self {
-        match self {
-            Self::Half => Self::TwoThirds,
-            Self::TwoThirds | Self::Full => Self::Full,
+        let next = self.index() + 1;
+        if next < Self::PRESETS.len() {
+            Self::PRESETS[next]
+        } else {
+            self
         }
     }
 
     #[must_use]
     pub const fn percent(self) -> i32 {
         match self {
+            Self::Third => 33,
             Self::Half => 50,
             Self::TwoThirds => 66,
+            Self::FourFifths => 80,
             Self::Full => 100,
         }
     }
@@ -49,103 +93,289 @@ impl StripWidth {
     /// This column's share of `width` points.
     #[must_use]
     pub const fn share(self, width: i32) -> i32 {
-        width.saturating_mul(self.percent()) / 100
+        let (numerator, denominator) = match self {
+            Self::Third => (1, 3),
+            Self::Half => (1, 2),
+            Self::TwoThirds => (2, 3),
+            Self::FourFifths => (4, 5),
+            Self::Full => (1, 1),
+        };
+        (width as i64 * numerator / denominator) as i32
     }
 }
 
-/// One column of the strip: a bound slot in layout order and its preferred width.
+/// One column of the strip: a bound slot in layout order and its width.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StripColumn {
     pub slot: SlotId,
     pub width: StripWidth,
 }
 
-/// Where each column goes for one viewport.
+/// A column's place on the ribbon: its left edge in points from the ribbon's start, and its
+/// width in points.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RibbonColumn {
+    pub slot: SlotId,
+    pub x: i32,
+    pub width: i32,
+}
+
+/// Lays `columns` end to end for a display `view_width` points wide.
+#[must_use]
+pub fn ribbon(columns: &[StripColumn], view_width: i32) -> Vec<RibbonColumn> {
+    let mut x = 0;
+    columns
+        .iter()
+        .map(|column| {
+            let width = column.width.share(view_width).max(1);
+            let placed = RibbonColumn {
+                slot: column.slot,
+                x,
+                width,
+            };
+            x += width;
+            placed
+        })
+        .collect()
+}
+
+/// The ribbon's total width.
+#[must_use]
+pub fn ribbon_width(ribbon: &[RibbonColumn]) -> i32 {
+    ribbon.last().map_or(0, |column| column.x + column.width)
+}
+
+/// `camera` kept where the ribbon covers the whole view where it can.
+#[must_use]
+pub fn clamp_camera(camera: f64, view_width: i32, total: i32) -> f64 {
+    camera.clamp(0.0, f64::from((total - view_width).max(0)))
+}
+
+/// Niri's minimal scroll: the camera stays put while `column` is wholly in view, and otherwise
+/// moves the least distance that brings it in. A column wider than the view aligns its left
+/// edge.
+#[must_use]
+pub fn minimal_scroll(camera: f64, view_width: i32, column: RibbonColumn, total: i32) -> f64 {
+    let (x, width, view) = (
+        f64::from(column.x),
+        f64::from(column.width),
+        f64::from(view_width),
+    );
+    let target = if width >= view || x < camera {
+        x
+    } else if x + width > camera + view {
+        x + width - view
+    } else {
+        camera
+    };
+    clamp_camera(target, view_width, total)
+}
+
+/// The camera that puts `anchor` at the view's left edge, for a strip restored from disk.
+#[must_use]
+pub fn anchor_camera(ribbon: &[RibbonColumn], anchor: Option<SlotId>, view_width: i32) -> f64 {
+    let x = anchor
+        .and_then(|anchor| ribbon.iter().find(|column| column.slot == anchor))
+        .map_or(0, |column| column.x);
+    clamp_camera(f64::from(x), view_width, ribbon_width(ribbon))
+}
+
+/// A column's left edge on screen for a camera: where the ribbon puts it, clamped so a column
+/// past a free edge still peeks and one past a shared edge stays on its own display.
+#[must_use]
+pub fn column_x(
+    output: Rect,
+    bounds: &ScrollingDisplayBounds,
+    world_x: f64,
+    width: i32,
+    camera: f64,
+) -> i32 {
+    let desired = (f64::from(output.x) + world_x - camera).round() as i32;
+    bounds.clamp_column_x(desired, width, PEEK_PX)
+}
+
+/// Where a column rests once the camera stops.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ColumnRest {
+    /// At least partly in view, at this frame.
+    Visible(Rect),
+    /// Out of view past a free edge, showing a sliver at this frame. Recorded as parked.
+    Peeking(Rect),
+    /// Out of view past an edge shared with another display: parked like a hidden
+    /// workspace's window.
+    Parked,
+}
+
+/// Every column's rest for one camera, in ribbon order.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StripLayout {
-    /// On-screen columns, left to right, each wholly inside the area.
-    pub visible: Vec<(SlotId, Rect)>,
-    /// Columns outside the viewport, in strip order. They are parked.
-    pub hidden: Vec<SlotId>,
-    /// The leftmost visible column: the next layout's viewport anchor.
+    pub columns: Vec<(SlotId, ColumnRest)>,
+    /// The leftmost column in view: what a restart scrolls back to.
     pub anchor: Option<SlotId>,
 }
 
-/// Lays out `columns` (strip order) in `area` around the `active` column.
-///
-/// A single column fills the area. A `Full` active column shows alone. Otherwise two adjacent
-/// columns share the area: the active one at its preferred width, its neighbor in the rest. The
-/// viewport stays where `anchor` put it while the active column is already inside it, and
-/// otherwise slides the least distance that brings the active column in, entering from the side
-/// it was stepped toward.
-#[must_use]
-pub fn compute_strip_layout(
-    area: Rect,
-    columns: &[StripColumn],
-    active: Option<SlotId>,
-    anchor: Option<SlotId>,
-) -> StripLayout {
-    let position = |slot: Option<SlotId>| {
-        slot.and_then(|slot| columns.iter().position(|column| column.slot == slot))
-    };
-    let Some(first) = columns.first() else {
-        return StripLayout::default();
-    };
-    if columns.len() == 1 {
-        return StripLayout {
-            visible: vec![(first.slot, area)],
-            hidden: Vec::new(),
-            anchor: Some(first.slot),
-        };
-    }
-    let anchor_index = position(anchor);
-    let active_index = position(active).or(anchor_index).unwrap_or(0);
-    let focused = columns[active_index];
-    let (left, widths) = if focused.width == StripWidth::Full {
-        (active_index, vec![area.width])
-    } else {
-        let last_left = columns.len() - 2;
-        let left = match anchor_index {
-            Some(anchor)
-                if anchor <= last_left && (anchor..=anchor + 1).contains(&active_index) =>
-            {
-                anchor
-            }
-            Some(anchor) if active_index > anchor => active_index - 1,
-            _ => active_index,
-        }
-        .min(last_left);
-        let share = focused.width.share(area.width);
-        let rest = area.width - share;
-        (
-            left,
-            if left == active_index {
-                vec![share, rest]
-            } else {
-                vec![rest, share]
-            },
-        )
-    };
-    let mut x = area.x;
-    let visible = widths
-        .iter()
-        .enumerate()
-        .map(|(offset, &width)| {
-            let frame = Rect { x, width, ..area };
-            x += width;
-            (columns[left + offset].slot, frame)
+impl StripLayout {
+    /// Columns in view and their frames.
+    pub fn visible(&self) -> impl Iterator<Item = (SlotId, Rect)> + '_ {
+        self.columns.iter().filter_map(|(slot, rest)| match rest {
+            ColumnRest::Visible(frame) => Some((*slot, *frame)),
+            _ => None,
         })
-        .collect::<Vec<_>>();
-    let hidden = columns
+    }
+
+    /// Columns out of view, peeking or parked.
+    pub fn hidden(&self) -> impl Iterator<Item = SlotId> + '_ {
+        self.columns
+            .iter()
+            .filter(|(_, rest)| !matches!(rest, ColumnRest::Visible(_)))
+            .map(|(slot, _)| *slot)
+    }
+
+    #[must_use]
+    pub fn rest(&self, slot: SlotId) -> Option<ColumnRest> {
+        self.columns
+            .iter()
+            .find(|(column, _)| *column == slot)
+            .map(|(_, rest)| *rest)
+    }
+}
+
+/// Where every column of `ribbon` rests in `output` with the camera at `camera`.
+#[must_use]
+pub fn rest_layout(
+    output: Rect,
+    bounds: &ScrollingDisplayBounds,
+    ribbon: &[RibbonColumn],
+    camera: f64,
+) -> StripLayout {
+    let (left, right) = (output.x, output.x + output.width);
+    let columns: Vec<_> = ribbon
         .iter()
-        .enumerate()
-        .filter(|(index, _)| !(left..left + widths.len()).contains(index))
-        .map(|(_, column)| column.slot)
+        .map(|column| {
+            let desired = (f64::from(output.x) + f64::from(column.x) - camera).round() as i32;
+            let frame = Rect {
+                x: bounds.clamp_column_x(desired, column.width, PEEK_PX),
+                y: output.y,
+                width: column.width,
+                height: output.height,
+            };
+            let overlap = (desired + column.width).min(right) - desired.max(left);
+            let shared = if desired >= right {
+                bounds.adjacent_right
+            } else {
+                bounds.adjacent_left
+            };
+            let rest = if overlap > 0 {
+                ColumnRest::Visible(frame)
+            } else if shared {
+                ColumnRest::Parked
+            } else {
+                ColumnRest::Peeking(frame)
+            };
+            (column.slot, rest)
+        })
         .collect();
-    StripLayout {
-        visible,
-        hidden,
-        anchor: Some(columns[left].slot),
+    let anchor = columns
+        .iter()
+        .find(|(_, rest)| matches!(rest, ColumnRest::Visible(_)))
+        .map(|(slot, _)| *slot);
+    StripLayout { columns, anchor }
+}
+
+/// One window riding a [`StripMotion`]: its column's resting ribbon position and width, and a
+/// spring carrying it there from where it was before the ribbon changed (a neighbor resized or
+/// columns reordered).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MotionColumn {
+    pub window: PhysicalWindowId,
+    pub x: i32,
+    pub width: i32,
+    /// Offset from `x`, springing to zero.
+    pub shift: Option<CameraSpring>,
+}
+
+impl MotionColumn {
+    fn world_x(&self, now: Instant) -> f64 {
+        f64::from(self.x) + self.shift.map_or(0.0, |shift| shift.position(now))
+    }
+}
+
+/// A strip's camera glide, handed from the worker to the main thread. Closed form: the main
+/// thread samples it at each display frame without asking the worker anything, and the worker
+/// samples the same springs to retarget mid-glide.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StripMotion {
+    pub workspace: WorkspaceId,
+    pub display_id: String,
+    pub output: Rect,
+    pub bounds: ScrollingDisplayBounds,
+    pub camera: CameraSpring,
+    pub columns: Vec<MotionColumn>,
+}
+
+impl StripMotion {
+    /// Each window's top-left corner at `now`.
+    #[must_use]
+    pub fn positions(&self, now: Instant) -> Vec<(PhysicalWindowId, (i32, i32))> {
+        let camera = self.camera.position(now);
+        self.columns
+            .iter()
+            .map(|column| {
+                let x = column_x(
+                    self.output,
+                    &self.bounds,
+                    column.world_x(now),
+                    column.width,
+                    camera,
+                );
+                (column.window.clone(), (x, self.output.y))
+            })
+            .collect()
+    }
+
+    /// Each window's top-left corner once everything has arrived.
+    #[must_use]
+    pub fn final_positions(&self) -> Vec<(PhysicalWindowId, (i32, i32))> {
+        let camera = self.camera.target();
+        self.columns
+            .iter()
+            .map(|column| {
+                let x = column_x(
+                    self.output,
+                    &self.bounds,
+                    f64::from(column.x),
+                    column.width,
+                    camera,
+                );
+                (column.window.clone(), (x, self.output.y))
+            })
+            .collect()
+    }
+
+    /// Whether the camera and every column have arrived.
+    #[must_use]
+    pub fn is_settled(&self, now: Instant) -> bool {
+        self.camera.is_settled(now, SETTLE_SCALE)
+            && self
+                .columns
+                .iter()
+                .filter_map(|column| column.shift)
+                .all(|shift| shift.is_settled(now, SETTLE_SCALE))
+    }
+
+    /// The first moment at or after `from` when the motion counts as settled, found in steps of
+    /// a 240 Hz frame and capped at [`MAX_MOTION`].
+    #[must_use]
+    pub fn settles_at(&self, from: Instant) -> Instant {
+        let step = Duration::from_micros(4_167);
+        let mut at = from;
+        while at < from + MAX_MOTION {
+            if self.is_settled(at) {
+                return at;
+            }
+            at += step;
+        }
+        from + MAX_MOTION
     }
 }
 
@@ -161,6 +391,7 @@ pub struct StripState {
     pub default_width: StripWidth,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub widths: Vec<(SlotId, StripWidth)>,
+    /// The leftmost column in view when the camera last rested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<SlotId>,
 }

@@ -65,8 +65,9 @@ impl LabFeature {
     pub const fn summary(self) -> &'static str {
         match self {
             Self::ScrollingStrip => {
-                "Keep windows wide on a horizontal strip instead of shrinking tiles. Toggle per \
-                 workspace with ⌥⇧S, step with ⌥H/⌥L, cycle width (50% · 66% · 100%) with ⌥-/⌥=."
+                "Keep windows wide on a horizontal strip that glides instead of shrinking tiles. \
+                 Toggle per workspace with ⌥⇧S, step with ⌥H/⌥L, size columns (33% to 100%) \
+                 with ⌥-/⌥=."
             }
         }
     }

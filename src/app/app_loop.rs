@@ -6,6 +6,7 @@ mod actions;
 mod automatic;
 mod controls;
 mod dispatch;
+mod glide;
 mod hotkey_health;
 mod probe;
 
@@ -144,6 +145,8 @@ pub struct MainThreadAgent {
     update_revision: u64,
     /// Tiling was on when Install & Restart began, so a failed install resumes it.
     resume_after_update: bool,
+    /// Scrolling Strip glides, presented at the display's refresh rate.
+    glides: glide::GlidePresenter,
 }
 
 impl MainThreadAgent {
@@ -233,6 +236,7 @@ impl MainThreadAgent {
             updater: crate::updater::Updater::start(),
             update_revision: 0,
             resume_after_update: false,
+            glides: glide::GlidePresenter::new(),
         };
         status_item::set_update(agent.updater.status().ready_version());
         if automatic {
@@ -273,6 +277,7 @@ impl MainThreadAgent {
                 Ok(result) => result,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
+                    self.glides.cancel();
                     self.hotkeys = None;
                     self.pending_inputs.clear();
                     self.gesture_tracker.clear();
@@ -290,6 +295,12 @@ impl MainThreadAgent {
                 }
             };
             match result {
+                WorkerResult::Strip(command) => {
+                    if self.automatic {
+                        self.glides.handle(command);
+                    }
+                    continue;
+                }
                 WorkerResult::Status { result, debug } if self.automatic => {
                     self.worker.finish_command();
                     self.cancelled.store(false, Ordering::Release);
@@ -394,6 +405,7 @@ impl MainThreadAgent {
         }
 
         if self.automatic {
+            self.glides.tick_without_link();
             self.tick_automatic();
         }
 
@@ -419,6 +431,7 @@ impl MainThreadAgent {
     }
 
     fn stop_automatic_and_restore(&mut self) {
+        self.glides.cancel();
         self.automatic = false;
         self.cancelled.store(true, Ordering::Release);
         self.hotkeys = None;

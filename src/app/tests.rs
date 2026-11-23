@@ -72,9 +72,15 @@ struct FakeBackend {
     config_path: Option<PathBuf>,
     fail_persist_config: bool,
     persisted_monitors: Vec<(WorkspaceId, DisplaySelector)>,
+    /// Strip cameras glide (as with the real main thread) instead of jumping.
+    animate_strip: bool,
 }
 
 impl WorkspaceBackend for FakeBackend {
+    fn presents_motion(&self) -> bool {
+        self.animate_strip
+    }
+
     fn confirms_no_windows(&mut self, app: &AppInstanceId) -> bool {
         self.close_probes.push(app.clone());
         self.apps_confirming_no_windows.contains(app)

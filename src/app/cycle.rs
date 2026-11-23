@@ -62,11 +62,16 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let windows: Vec<_> = visible
             .iter()
             .flat_map(|resolved| {
-                let hidden = self.strip_hidden_windows(resolved.workspace, resolved.output);
+                // A strip reveals and hides its own columns as its viewport moves.
+                let columns: HashSet<_> = if self.uses_strip(resolved.workspace) {
+                    self.strip_windows(resolved.workspace).into_iter().collect()
+                } else {
+                    HashSet::new()
+                };
                 self.workspaces
                     .windows(resolved.workspace)
                     .into_iter()
-                    .filter(move |window| !hidden.contains(window))
+                    .filter(move |window| !columns.contains(window))
             })
             .collect();
         for window in windows {
@@ -221,7 +226,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 },
             )?;
             if self.uses_strip(resolved.workspace) {
-                failed += self.park_strip_columns(resolved.workspace, &outputs);
+                failed += self.settle_strip_columns(resolved.workspace, &outputs);
             }
         }
         let mut attempted_focus_restore = HashSet::new();

@@ -1,5 +1,8 @@
 use super::*;
 
+mod debug;
+pub(super) use debug::RuntimeDebug;
+
 pub(super) struct CycleStatus {
     pub(super) close_recheck: Option<Instant>,
     pub(super) active: Vec<WorkspaceId>,
@@ -7,48 +10,6 @@ pub(super) struct CycleStatus {
     pub(super) menu: Vec<status_item::DisplayWorkspaces>,
     pub(super) failed: usize,
     pub(super) hud: Option<UiHudEvent>,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-pub(super) struct RuntimeDebug {
-    frontmost: Option<AppInstanceId>,
-    focused: Option<crate::PhysicalWindowId>,
-    active_workspaces: Vec<WorkspaceId>,
-    displays: Vec<DebugDisplay>,
-    tiles: Vec<NavigationTile>,
-    floating: Vec<DebugFloatingWindow>,
-    /// Managed windows left visible across workspace switches because they
-    /// repeatedly reject parking positions.
-    parking_exempt: Vec<crate::PhysicalWindowId>,
-    targets: DebugTargets,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-struct DebugFloatingWindow {
-    window: crate::PhysicalWindowId,
-    workspace: WorkspaceId,
-    /// Present exactly when the window is parked off-screen.
-    parked_original_frame: Option<crate::Rect>,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-struct DebugDisplay {
-    id: String,
-    name: String,
-    frame: crate::Rect,
-    workspace: WorkspaceId,
-    axis: crate::Axis,
-    fullscreen_layout: bool,
-    strip_layout: bool,
-    layout: Vec<crate::Rect>,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-struct DebugTargets {
-    left: Option<crate::PhysicalWindowId>,
-    down: Option<crate::PhysicalWindowId>,
-    up: Option<crate::PhysicalWindowId>,
-    right: Option<crate::PhysicalWindowId>,
 }
 
 pub(super) struct LayoutStatus {
@@ -126,6 +87,8 @@ pub(super) struct WorkspaceRuntime<B = MacWorkspaceBackend> {
     pub(super) memory: MemoryState,
     pub(super) journal: JournalState,
     pub(super) displays: super::displays::DisplayWatch,
+    /// Scrolling Strip cameras and the glides waiting for the main thread.
+    pub(super) strip_views: super::strip::StripViews,
 }
 
 impl WorkspaceRuntime<MacWorkspaceBackend> {
@@ -186,6 +149,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 (result, outputs)
             }
             WorkerCommand::RestoreAll(outputs) => {
+                self.strip_views.halt_all();
+                for workspace in WorkspaceId::all() {
+                    self.strip_views.reset(workspace);
+                }
                 if let Some(outputs) = &outputs {
                     self.note_outputs(outputs);
                 }
@@ -226,6 +193,18 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 | WorkerAction::MoveApp(..)
         ) {
             self.pending_focus = None;
+        }
+        if !matches!(
+            action,
+            WorkerAction::Retile
+                | WorkerAction::Focus(_)
+                | WorkerAction::CycleFocus
+                | WorkerAction::Resize(_)
+                | WorkerAction::Reorder(_)
+                | WorkerAction::Balance
+        ) {
+            // Anything else may hide, move or re-tile a strip's windows: stop its glide first.
+            self.strip_views.halt_all();
         }
         if let Some(result) = self.strip_action(&action, &outputs, cancelled) {
             return result;
@@ -343,6 +322,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             memory: MemoryState::default(),
             journal: JournalState::default(),
             displays: super::displays::DisplayWatch::default(),
+            strip_views: super::strip::StripViews::default(),
         }
     }
 
@@ -499,67 +479,6 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             }));
         }
         tiles
-    }
-
-    pub(super) fn debug_state(&mut self, outputs: &macos::DisplayOutputs) -> RuntimeDebug {
-        let visible = self.visible_workspaces(outputs);
-        let tiles = self.navigation_tiles_for(&visible);
-        let focused = self.backend.focused_window();
-        let target = |direction| {
-            focused.as_ref().and_then(|focused| {
-                crate::navigation::target(&tiles, focused, direction)
-                    .map(|tile| tile.window.clone())
-            })
-        };
-        let targets = DebugTargets {
-            left: target(Direction::Left),
-            down: target(Direction::Down),
-            up: target(Direction::Up),
-            right: target(Direction::Right),
-        };
-        let floating = self
-            .workspaces
-            .floating_entries()
-            .map(|(window, workspace)| DebugFloatingWindow {
-                parked_original_frame: self.parked.get(window).copied(),
-                window: window.clone(),
-                workspace,
-            })
-            .collect();
-        RuntimeDebug {
-            frontmost: self.backend.frontmost_application(),
-            focused,
-            active_workspaces: visible.iter().map(|resolved| resolved.workspace).collect(),
-            displays: visible
-                .into_iter()
-                .filter_map(|resolved| {
-                    let display = outputs
-                        .displays()
-                        .iter()
-                        .find(|display| display.id == resolved.display_id)?;
-                    Some(DebugDisplay {
-                        id: display.id.clone(),
-                        name: display.name.clone(),
-                        frame: display.frame,
-                        workspace: resolved.workspace,
-                        axis: self.workspaces.engine(resolved.workspace).root_axis(),
-                        fullscreen_layout: self
-                            .workspaces
-                            .uses_fullscreen_layout(resolved.workspace),
-                        strip_layout: self.uses_strip(resolved.workspace),
-                        layout: self.preview_layout(resolved.workspace, HUD_PREVIEW_RECT),
-                    })
-                })
-                .collect(),
-            tiles,
-            floating,
-            parking_exempt: {
-                let mut windows: Vec<_> = self.parking_exempt.iter().cloned().collect();
-                windows.sort_by_key(|window| (window.app.pid, window.window_id));
-                windows
-            },
-            targets,
-        }
     }
 
     pub(super) fn layout_workspace(
@@ -733,8 +652,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     }
 
     fn preview_layout(&self, workspace: WorkspaceId, output: crate::Rect) -> Vec<crate::Rect> {
-        if let Some(strip) = self.strip_layout(workspace, output) {
-            return strip.visible.into_iter().map(|(_, frame)| frame).collect();
+        if let Some(strip) = self.strip_preview(workspace, output) {
+            return strip;
         }
         let mut layout = self.workspaces.engine(workspace).preview(output);
         if self.workspaces.uses_fullscreen_layout(workspace) {

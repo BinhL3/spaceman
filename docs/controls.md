@@ -55,15 +55,17 @@ Layout first. Pointer dragging and resizing are ignored while the mode is active
 not expanded. Removing or moving away the workspace's final tiled window exits Fullscreen Layout.
 
 Scrolling Strip (a Lab, off by default; turn it on in Settings › Labs) lays a workspace's tiles out
-as one horizontal row of wide columns. The focused column takes its width (66% by default, 50%, or
-100%) and its neighbor the rest, so the display is always filled edge to edge; columns outside the
-viewport are parked off-screen exactly like an inactive workspace's windows, and pause, quit, and
-restart restore them. On a strip, `Option+H`/`Option+L` step along the strip (focusing a column that
-is already on screen never moves the viewport; past either end they continue to the adjacent
-display), `Option+Shift+H`/`Option+Shift+L` move the focused column, `Option+-`/`Option+=` step its
-width through 50% · 66% · 100% (columns you have not sized follow the last width you picked), and
-Option-backtick cycles columns. Focusing a parked column any other way (a click, the Dock,
-Command-Tab) slides the viewport to it. Turning on Fullscreen Layout or pressing `Option+/` leaves the
+as one horizontal ribbon of columns, each 33%, 50% (the default), 66%, 80% or 100% of the display,
+and glides a viewport along it at the display's refresh rate. Columns out of view keep a 16-point
+sliver past a free display edge and are parked behind an edge shared with another display; either way
+their frames are recorded like an inactive workspace's windows, and pause, quit, and restart restore
+them. On a strip, `Option+H`/`Option+L` step along the strip (the viewport only moves when the
+focused column would leave the screen, and taps faster than the glide bend it toward the newest
+column; past either end they continue to the adjacent display), `Option+Shift+H`/`Option+Shift+L`
+move the focused column, `Option+-`/`Option+=` step its width through 33% · 50% · 66% · 80% · 100%
+(columns you have not sized follow the last width you picked), and Option-backtick cycles columns.
+Focusing a column out of view any other way (a click, the Dock, Command-Tab) glides the viewport to
+it. Turning on Fullscreen Layout or pressing `Option+/` leaves the
 strip. Pointer dragging and resizing are ignored on a strip.
 
 `Option+Shift+Space` floats the focused window: it leaves the tiles, keeps its exact frame and

@@ -1,9 +1,10 @@
 use super::*;
+use crate::{AppInstanceId, motion::SpringParams};
 
 const AREA: Rect = Rect {
     x: 0,
     y: 25,
-    width: 1440,
+    width: 1200,
     height: 875,
 };
 
@@ -18,168 +19,259 @@ fn columns(widths: &[StripWidth]) -> Vec<StripColumn> {
         .collect()
 }
 
-fn four() -> Vec<StripColumn> {
-    columns(&[StripWidth::TwoThirds; 4])
+fn free() -> ScrollingDisplayBounds {
+    ScrollingDisplayBounds::new(AREA, [])
+}
+
+/// A second monitor to the right of `AREA`.
+fn seam_right() -> ScrollingDisplayBounds {
+    ScrollingDisplayBounds::new(
+        AREA,
+        [Rect {
+            x: AREA.width,
+            ..AREA
+        }],
+    )
 }
 
 fn frame(x: i32, width: i32) -> Rect {
     Rect { x, width, ..AREA }
 }
 
-#[test]
-fn empty_and_single_column_strips_fill_the_area() {
-    assert_eq!(
-        compute_strip_layout(AREA, &[], None, None),
-        StripLayout::default()
-    );
-    let single = columns(&[StripWidth::Half]);
-    let layout = compute_strip_layout(AREA, &single, Some(SlotId(1)), None);
-    assert_eq!(layout.visible, vec![(SlotId(1), AREA)]);
-    assert!(layout.hidden.is_empty());
-    assert_eq!(layout.anchor, Some(SlotId(1)));
-}
-
-#[test]
-fn two_thirds_column_shares_the_display_with_a_peeking_neighbor() {
-    let layout = compute_strip_layout(AREA, &four(), Some(SlotId(1)), None);
-    assert_eq!(
-        layout.visible,
-        vec![(SlotId(1), frame(0, 950)), (SlotId(2), frame(950, 490))]
-    );
-    assert_eq!(layout.hidden, vec![SlotId(3), SlotId(4)]);
-    assert_eq!(layout.anchor, Some(SlotId(1)));
-}
-
-#[test]
-fn half_columns_split_the_display_evenly() {
-    let strip = columns(&[StripWidth::Half; 3]);
-    let layout = compute_strip_layout(AREA, &strip, Some(SlotId(2)), Some(SlotId(1)));
-    assert_eq!(
-        layout.visible,
-        vec![(SlotId(1), frame(0, 720)), (SlotId(2), frame(720, 720))]
-    );
-    assert_eq!(layout.hidden, vec![SlotId(3)]);
-}
-
-#[test]
-fn full_column_shows_alone() {
-    let mut strip = four();
-    strip[1].width = StripWidth::Full;
-    let layout = compute_strip_layout(AREA, &strip, Some(SlotId(2)), Some(SlotId(1)));
-    assert_eq!(layout.visible, vec![(SlotId(2), AREA)]);
-    assert_eq!(layout.hidden, vec![SlotId(1), SlotId(3), SlotId(4)]);
-    assert_eq!(layout.anchor, Some(SlotId(2)));
-}
-
-#[test]
-fn focusing_a_column_already_on_screen_never_moves_the_viewport() {
-    let layout = compute_strip_layout(AREA, &four(), Some(SlotId(2)), Some(SlotId(1)));
-    assert_eq!(
-        layout.visible,
-        vec![(SlotId(1), frame(0, 490)), (SlotId(2), frame(490, 950))]
-    );
-    assert_eq!(layout.anchor, Some(SlotId(1)));
-}
-
-#[test]
-fn stepping_past_the_viewport_slides_it_by_one_column() {
-    // Right: the incoming column enters on the right.
-    let right = compute_strip_layout(AREA, &four(), Some(SlotId(3)), Some(SlotId(1)));
-    assert_eq!(
-        right.visible,
-        vec![(SlotId(2), frame(0, 490)), (SlotId(3), frame(490, 950))]
-    );
-    assert_eq!(right.hidden, vec![SlotId(1), SlotId(4)]);
-    assert_eq!(right.anchor, Some(SlotId(2)));
-    // Left: it enters on the left.
-    let left = compute_strip_layout(AREA, &four(), Some(SlotId(2)), Some(SlotId(3)));
-    assert_eq!(
-        left.visible,
-        vec![(SlotId(2), frame(0, 950)), (SlotId(3), frame(950, 490))]
-    );
-    assert_eq!(left.anchor, Some(SlotId(2)));
-}
-
-#[test]
-fn viewport_clamps_to_the_ends_of_the_strip() {
-    let last = compute_strip_layout(AREA, &four(), Some(SlotId(4)), None);
-    assert_eq!(
-        last.visible,
-        vec![(SlotId(3), frame(0, 490)), (SlotId(4), frame(490, 950))]
-    );
-    // An anchor on the last column (left there by a full-width view) still shows two.
-    let anchored_last = compute_strip_layout(AREA, &four(), Some(SlotId(4)), Some(SlotId(4)));
-    assert_eq!(anchored_last.visible, last.visible);
-    assert_eq!(anchored_last.anchor, Some(SlotId(3)));
-}
-
-#[test]
-fn unknown_active_column_falls_back_to_the_anchor_then_the_first() {
-    let anchored = compute_strip_layout(AREA, &four(), Some(SlotId(99)), Some(SlotId(3)));
-    assert_eq!(anchored.anchor, Some(SlotId(3)));
-    let first = compute_strip_layout(AREA, &four(), None, None);
-    assert_eq!(first.anchor, Some(SlotId(1)));
-}
-
-#[test]
-fn every_viewport_fills_the_area_with_columns_wholly_inside_it() {
-    let widths = [StripWidth::Half, StripWidth::TwoThirds, StripWidth::Full];
-    for count in 1..=5 {
-        for width in widths {
-            let strip = columns(&vec![width; count]);
-            for active in 0..=count as u64 {
-                for anchor in 0..=count as u64 {
-                    let layout = compute_strip_layout(
-                        AREA,
-                        &strip,
-                        Some(SlotId(active)),
-                        Some(SlotId(anchor)),
-                    );
-                    let total: i32 = layout.visible.iter().map(|(_, frame)| frame.width).sum();
-                    assert_eq!(total, AREA.width);
-                    assert_eq!(layout.visible.len() + layout.hidden.len(), count);
-                    for (_, frame) in &layout.visible {
-                        assert!(frame.x >= AREA.x && frame.x + frame.width <= AREA.x + AREA.width);
-                        assert!(frame.width * 100 >= AREA.width * 34 || count == 1);
-                        assert_eq!((frame.y, frame.height), (AREA.y, AREA.height));
-                    }
-                    if (1..=count as u64).contains(&active) {
-                        assert!(
-                            layout
-                                .visible
-                                .iter()
-                                .any(|(slot, _)| *slot == SlotId(active))
-                        );
-                    }
-                }
-            }
-        }
+fn window(id: u32) -> PhysicalWindowId {
+    PhysicalWindowId {
+        app: AppInstanceId {
+            pid: 1,
+            launched_at: 1,
+        },
+        window_id: id,
     }
 }
 
 #[test]
-fn widths_step_between_half_two_thirds_and_full() {
-    assert_eq!(StripWidth::default(), StripWidth::TwoThirds);
-    assert_eq!(StripWidth::TwoThirds.wider(), StripWidth::Full);
+fn presets_step_through_a_third_to_full_and_stop_at_the_ends() {
+    assert_eq!(StripWidth::default(), StripWidth::Half);
+    let percents: Vec<_> = StripWidth::PRESETS.iter().map(|w| w.percent()).collect();
+    assert_eq!(percents, [33, 50, 66, 80, 100]);
+    let mut width = StripWidth::Third;
+    for expected in &StripWidth::PRESETS[1..] {
+        width = width.wider();
+        assert_eq!(width, *expected);
+    }
     assert_eq!(StripWidth::Full.wider(), StripWidth::Full);
-    assert_eq!(StripWidth::Full.narrower(), StripWidth::TwoThirds);
-    assert_eq!(StripWidth::TwoThirds.narrower(), StripWidth::Half);
-    assert_eq!(StripWidth::Half.narrower(), StripWidth::Half);
+    assert_eq!(StripWidth::Full.narrower(), StripWidth::FourFifths);
+    assert_eq!(StripWidth::Third.narrower(), StripWidth::Third);
+    assert_eq!(StripWidth::Third.share(1200), 400);
+    assert_eq!(StripWidth::TwoThirds.share(1200), 800);
+    assert_eq!(StripWidth::FourFifths.share(1200), 960);
+}
+
+#[test]
+fn the_ribbon_lays_columns_end_to_end() {
+    let strip = ribbon(
+        &columns(&[StripWidth::Half, StripWidth::TwoThirds, StripWidth::Third]),
+        1200,
+    );
+    let placed: Vec<_> = strip
+        .iter()
+        .map(|column| (column.x, column.width))
+        .collect();
+    assert_eq!(placed, [(0, 600), (600, 800), (1400, 400)]);
+    assert_eq!(ribbon_width(&strip), 1800);
+    assert_eq!(ribbon_width(&[]), 0);
+}
+
+#[test]
+fn minimal_scroll_only_moves_when_the_column_leaves_the_view() {
+    let strip = ribbon(&columns(&[StripWidth::Half; 4]), 1200);
+    let total = ribbon_width(&strip);
+    // Already in view: the camera stays put.
+    assert_eq!(minimal_scroll(0.0, 1200, strip[1], total), 0.0);
+    // Past the right edge: just far enough to show its right edge.
+    assert_eq!(minimal_scroll(0.0, 1200, strip[2], total), 600.0);
+    assert_eq!(minimal_scroll(0.0, 1200, strip[3], total), 1200.0);
+    // Past the left edge: its left edge.
+    assert_eq!(minimal_scroll(1200.0, 1200, strip[1], total), 600.0);
+    // Mid-glide the same rule applies from wherever the camera is aimed.
+    assert_eq!(minimal_scroll(300.0, 1200, strip[2], total), 600.0);
+    // A column as wide as the view aligns its left edge.
+    let wide = ribbon(&columns(&[StripWidth::Half, StripWidth::Full]), 1200);
+    assert_eq!(minimal_scroll(0.0, 1200, wide[1], 1800), 600.0);
+    // The camera never leaves the ribbon.
+    assert_eq!(clamp_camera(-50.0, 1200, total), 0.0);
+    assert_eq!(clamp_camera(5000.0, 1200, total), 1200.0);
+    assert_eq!(clamp_camera(10.0, 1200, 600), 0.0);
+}
+
+#[test]
+fn a_restored_anchor_puts_its_column_at_the_left_edge() {
+    let strip = ribbon(&columns(&[StripWidth::Half; 4]), 1200);
+    assert_eq!(anchor_camera(&strip, Some(SlotId(2)), 1200), 600.0);
+    assert_eq!(anchor_camera(&strip, Some(SlotId(4)), 1200), 1200.0);
+    assert_eq!(anchor_camera(&strip, Some(SlotId(99)), 1200), 0.0);
+    assert_eq!(anchor_camera(&strip, None, 1200), 0.0);
+}
+
+#[test]
+fn off_screen_columns_peek_sixteen_points_past_free_edges() {
+    let strip = ribbon(&columns(&[StripWidth::Half; 5]), 1200);
+    let layout = rest_layout(AREA, &free(), &strip, 1200.0);
+    assert_eq!(
+        layout.columns,
+        vec![
+            (SlotId(1), ColumnRest::Peeking(frame(-600 + PEEK_PX, 600))),
+            (SlotId(2), ColumnRest::Peeking(frame(-600 + PEEK_PX, 600))),
+            (SlotId(3), ColumnRest::Visible(frame(0, 600))),
+            (SlotId(4), ColumnRest::Visible(frame(600, 600))),
+            (SlotId(5), ColumnRest::Peeking(frame(1200 - PEEK_PX, 600))),
+        ]
+    );
+    assert_eq!(layout.anchor, Some(SlotId(3)));
+    assert_eq!(
+        layout.hidden().collect::<Vec<_>>(),
+        [SlotId(1), SlotId(2), SlotId(5)]
+    );
+}
+
+#[test]
+fn a_partly_visible_column_runs_off_a_free_edge() {
+    let strip = ribbon(&columns(&[StripWidth::TwoThirds; 3]), 1200);
+    let layout = rest_layout(AREA, &free(), &strip, 400.0);
+    assert_eq!(
+        layout.visible().collect::<Vec<_>>(),
+        vec![(SlotId(1), frame(-400, 800)), (SlotId(2), frame(400, 800))]
+    );
+    assert_eq!(layout.anchor, Some(SlotId(1)));
+}
+
+#[test]
+fn columns_never_cross_an_edge_shared_with_another_display() {
+    let strip = ribbon(&columns(&[StripWidth::TwoThirds; 3]), 1200);
+    let layout = rest_layout(AREA, &seam_right(), &strip, 0.0);
+    assert_eq!(
+        layout.columns,
+        vec![
+            (SlotId(1), ColumnRest::Visible(frame(0, 800))),
+            // Partly in view: kept inside the display rather than shown on the next one.
+            (SlotId(2), ColumnRest::Visible(frame(400, 800))),
+            (SlotId(3), ColumnRest::Parked),
+        ]
+    );
+    // The free left edge still peeks.
+    let layout = rest_layout(AREA, &seam_right(), &strip, 1200.0);
+    assert_eq!(
+        layout.rest(SlotId(1)),
+        Some(ColumnRest::Peeking(frame(-800 + PEEK_PX, 800)))
+    );
+}
+
+fn glide(from: f64, to: f64, start: Instant, bounds: ScrollingDisplayBounds) -> StripMotion {
+    let strip = ribbon(&columns(&[StripWidth::Half; 4]), 1200);
+    let mut camera = CameraSpring::at_rest(SpringParams::default(), from, start);
+    camera.retarget(to, start);
+    StripMotion {
+        workspace: WorkspaceId::ONE,
+        display_id: "main".into(),
+        output: AREA,
+        bounds,
+        camera,
+        columns: strip
+            .iter()
+            .map(|column| MotionColumn {
+                window: window(column.slot.0 as u32),
+                x: column.x,
+                width: column.width,
+                shift: None,
+            })
+            .collect(),
+    }
+}
+
+fn x_of(positions: &[(PhysicalWindowId, (i32, i32))], id: u32) -> i32 {
+    positions
+        .iter()
+        .find(|(window, _)| window.window_id == id)
+        .map(|(_, (x, _))| *x)
+        .unwrap()
+}
+
+#[test]
+fn a_glide_slides_through_many_intermediate_frames_at_120_hz() {
+    let start = Instant::now();
+    let motion = glide(0.0, 600.0, start, free());
+    let frame = Duration::from_micros(8_333);
+    let settled = motion.settles_at(start);
+    let frames = (settled - start).as_micros() / frame.as_micros();
+    assert!((20..90).contains(&frames), "{frames} frames");
+    let mut previous = x_of(&motion.positions(start), 3);
+    assert_eq!(previous, 1200 - PEEK_PX);
+    let mut distinct = 0;
+    for index in 1..=frames as u32 {
+        let x = x_of(&motion.positions(start + frame * index), 3);
+        assert!(x <= previous, "column 3 moves only left");
+        distinct += usize::from(x != previous);
+        previous = x;
+    }
+    assert!(distinct >= 15, "{distinct} distinct positions");
+    assert_eq!(x_of(&motion.final_positions(), 3), 600);
+    assert_eq!(x_of(&motion.final_positions(), 1), -600 + PEEK_PX);
+    assert!(motion.is_settled(settled));
+    assert!(!motion.is_settled(start + frame));
+}
+
+#[test]
+fn retargeting_mid_glide_keeps_position_and_velocity() {
+    let start = Instant::now();
+    let mut motion = glide(0.0, 600.0, start, free());
+    let mid = start + Duration::from_millis(60);
+    let before = motion.camera.sample(mid);
+    motion.camera.retarget(1200.0, mid);
+    let after = motion.camera.sample(mid);
+    assert!((before.position - after.position).abs() < 1e-9);
+    assert!((before.velocity - after.velocity).abs() < 1e-9);
+    assert!(before.position > 0.0 && before.position < 600.0);
+    assert_eq!(motion.camera.target(), 1200.0);
+}
+
+#[test]
+fn nothing_slides_onto_the_neighbouring_display() {
+    let start = Instant::now();
+    let motion = glide(1200.0, 0.0, start, seam_right());
+    let mut at = start;
+    while at < motion.settles_at(start) {
+        for (_, (x, _)) in motion.positions(at) {
+            assert!(x + 600 <= AREA.width, "x {x} crosses the seam");
+        }
+        at += Duration::from_millis(4);
+    }
+}
+
+#[test]
+fn a_shifted_column_springs_back_to_its_place() {
+    let start = Instant::now();
+    let mut motion = glide(0.0, 0.0, start, free());
+    let mut shift = CameraSpring::at_rest(SpringParams::default(), 200.0, start);
+    shift.retarget(0.0, start);
+    motion.columns[1].shift = Some(shift);
+    assert_eq!(x_of(&motion.positions(start), 2), 800);
+    assert!(!motion.is_settled(start + Duration::from_millis(30)));
+    let settled = motion.settles_at(start);
+    assert_eq!(x_of(&motion.positions(settled), 2), 600);
 }
 
 #[test]
 fn unsized_columns_follow_the_last_width_picked() {
     let mut state = StripState::default();
-    assert_eq!(state.width(SlotId(1)), StripWidth::TwoThirds);
+    assert_eq!(state.width(SlotId(1)), StripWidth::Half);
     state.set_width(SlotId(2), StripWidth::Full);
     assert_eq!(state.width(SlotId(2)), StripWidth::Full);
     assert_eq!(state.width(SlotId(3)), StripWidth::Full);
-    state.set_width(SlotId(1), StripWidth::Half);
+    state.set_width(SlotId(1), StripWidth::Third);
     assert_eq!(state.width(SlotId(2)), StripWidth::Full);
-    assert_eq!(state.width(SlotId(3)), StripWidth::Half);
+    assert_eq!(state.width(SlotId(3)), StripWidth::Third);
     state.anchor = Some(SlotId(2));
     state.retain_slots(|slot| slot != SlotId(2));
-    assert_eq!(state.widths, vec![(SlotId(1), StripWidth::Half)]);
+    assert_eq!(state.widths, vec![(SlotId(1), StripWidth::Third)]);
     assert_eq!(state.anchor, None);
 }
 
@@ -194,14 +286,14 @@ fn state_serializes_only_what_differs_from_the_default() {
         anchor: Some(SlotId(3)),
         ..StripState::default()
     };
-    state.set_width(SlotId(3), StripWidth::Full);
+    state.set_width(SlotId(3), StripWidth::FourFifths);
     let encoded = serde_json::to_value(&state).unwrap();
     assert_eq!(
         encoded,
         serde_json::json!({
             "enabled": true,
-            "default_width": "full",
-            "widths": [[3, "full"]],
+            "default_width": "four_fifths",
+            "widths": [[3, "four_fifths"]],
             "anchor": 3
         })
     );

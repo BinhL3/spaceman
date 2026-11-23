@@ -42,6 +42,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return;
         };
         if self.awaiting_display_repark(&window.id)
+            // A strip glide is carrying it out of view; its recovery frame was recorded first.
+            || self
+                .workspaces
+                .workspace_of(&window.id)
+                .is_some_and(|workspace| self.strip_in_motion(workspace))
             || self
                 .recently_parked
                 .get(&window.id)

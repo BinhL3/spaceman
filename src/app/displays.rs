@@ -8,7 +8,7 @@ use super::*;
 /// since they changed.
 #[derive(Default)]
 pub(super) struct DisplayWatch {
-    known: Option<macos::DisplayOutputs>,
+    pub(super) known: Option<macos::DisplayOutputs>,
     repark_pending: HashSet<crate::PhysicalWindowId>,
 }
 

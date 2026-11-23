@@ -304,6 +304,8 @@ enum WorkerResult {
     Restored {
         failed: usize,
     },
+    /// A Scrolling Strip glide for the main thread to present, or to stop.
+    Strip(strip::StripCommand),
 }
 
 /// Startup state initialized before the Rune event loop starts: single-agent

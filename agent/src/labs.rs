@@ -60,7 +60,9 @@ fn card(ui: &Ui, p: Paint, feature: LabFeature) -> El {
             .key("copy")
             .font(DESCRIPTION)
             .color(p.faint())
-            .wrap(),
+            .wrap()
+            .grow(1.0)
+            .shrink(),
     );
     controls::card(p, &format!("{}-card", feature.id()), vec![switch, note])
 }
@@ -68,8 +70,9 @@ fn card(ui: &Ui, p: Paint, feature: LabFeature) -> El {
 const fn note(feature: LabFeature) -> &'static str {
     match feature {
         LabFeature::ScrollingStrip => {
-            "Zero private APIs: columns off screen are parked like hidden workspaces, and pause \
-             or quit brings every one back. Tell us how it feels on GitHub."
+            "Zero private APIs: columns glide at your display's refresh rate, columns out of \
+             view are recorded like hidden workspaces, and pause or quit brings every one back. \
+             Tell us how it feels on GitHub."
         }
     }
 }
