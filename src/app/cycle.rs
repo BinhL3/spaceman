@@ -599,24 +599,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .collect();
         if inserted_here {
             self.exit_fullscreen_if_split(workspace);
-            // A new strip column takes focus, so the viewport opens onto it.
-            if self.uses_strip(workspace)
-                && let Some(window) =
-                    reconciliation
-                        .decisions
-                        .iter()
-                        .rev()
-                        .find_map(|decision| match decision {
-                            Decision::WindowInserted { window, .. }
-                                if self.workspaces.workspace_of(window) == Some(workspace) =>
-                            {
-                                Some(window.clone())
-                            }
-                            _ => None,
-                        })
-            {
-                self.workspaces.remember_focus(workspace, &window);
-            }
+            self.focus_inserted_strip_column(workspace, &reconciliation.decisions);
         }
         for target in &routed_targets {
             self.exit_fullscreen_if_split(*target);

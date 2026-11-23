@@ -34,12 +34,16 @@ Keys on a strip                                                               //
 
 Following focus                                                               // strip.follow
 ├── Click / Dock / Command-Tab onto any column, even a parked one -> viewport slides to it
-└── New tiled window -> becomes the focused column
+├── New tiled window -> becomes the focused column
+└── Option+Shift+Space -> the column floats out and the strip closes the gap; tiling it again
+                          brings it back as the focused column
 
 Persistence and recovery                                                      // strip.persist
 ├── workspace-state.json "strip": enabled, widths, default width, anchor (all optional)
 ├── Switch away -> every column parked; back -> only the viewport revealed
 ├── Pause / quit / restart -> every parked column restored (parked-windows.json)
+├── An app drags a parked column back on screen -> re-parked, like an inactive workspace's window
+├── Display added or removed -> parked columns re-parked against the new displays
 └── Ghostty native-tab replacement -> keeps the slot, its position and its width
 ```
 
@@ -50,8 +54,10 @@ Unit (FakeBackend), `src/app/tests/strip.rs`:
 `pause_and_quit_restore_every_strip_parked_window`,
 `switching_away_parks_every_column_and_back_reveals_only_the_viewport`,
 `reordering_and_width_cycling_follow_the_focused_column`,
-`turning_the_strip_off_reveals_every_column_in_the_split_layout`, and
-`ghostty_native_tab_replacement_keeps_the_strip_column_and_width`. Viewport math: `src/strip/tests.rs`
+`turning_the_strip_off_reveals_every_column_in_the_split_layout`,
+`ghostty_native_tab_replacement_keeps_the_strip_column_and_width`,
+`a_strip_column_that_drifts_back_on_screen_is_re_parked`, and
+`docking_a_display_re_parks_hidden_strip_columns`. Viewport math: `src/strip/tests.rs`
 (every combination of 1-5 columns, widths, focus and anchor fills the area with columns inside it).
 Persistence: `persisted_strip_round_trips_and_excludes_fullscreen_layout`. Config:
 `parses_labs_with_every_experiment_off_by_default`, `labs_switches_round_trip_and_survive_other_edits`
@@ -77,7 +83,4 @@ Focus a window on the workspace
   of scrolling. No private APIs are involved.
 - **A closed column's neighbor appears on the next cycle.** Reconciliation retires the closed window
   first; the column that slides into view is restored by the following observation cycle.
-- **An app that drags a parked column back on screen in the background** (Electron re-asserting its
-  bounds) is not pushed back while its workspace is visible; it stays recorded as parked and is
-  restored normally when focused or on pause.
 - The HUD's layout preview still draws the split layout for a strip workspace.

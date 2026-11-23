@@ -57,6 +57,55 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         ))
     }
 
+    /// The placements a visible workspace shows, as navigation sees them: Fullscreen Layout
+    /// fills the display, and a strip shows only its viewport's columns.
+    pub(super) fn shown_placements(&self, resolved: &ResolvedWorkspace) -> Vec<Placement> {
+        let (workspace, output) = (resolved.workspace, resolved.output);
+        let mut placements = self
+            .workspaces
+            .engine(workspace)
+            .placements(&Settings::for_output(output));
+        if self.workspaces.uses_fullscreen_layout(workspace) {
+            for placement in &mut placements {
+                placement.frame = output;
+            }
+        }
+        if let Some(strip) = self.strip_layout(workspace, output) {
+            placements.retain_mut(|placement| {
+                strip
+                    .visible
+                    .iter()
+                    .find(|(slot, _)| *slot == placement.slot)
+                    .map(|(_, frame)| placement.frame = *frame)
+                    .is_some()
+            });
+        }
+        placements
+    }
+
+    /// A window that just joined a strip becomes its active column, so the viewport opens
+    /// onto it.
+    pub(super) fn focus_inserted_strip_column(
+        &mut self,
+        workspace: WorkspaceId,
+        decisions: &[Decision],
+    ) {
+        if !self.uses_strip(workspace) {
+            return;
+        }
+        let inserted = decisions.iter().rev().find_map(|decision| match decision {
+            Decision::WindowInserted { window, .. }
+                if self.workspaces.workspace_of(window) == Some(workspace) =>
+            {
+                Some(window.clone())
+            }
+            _ => None,
+        });
+        if let Some(window) = inserted {
+            self.workspaces.remember_focus(workspace, &window);
+        }
+    }
+
     /// Windows the strip keeps off-screen in `output`; empty outside strip mode.
     pub(super) fn strip_hidden_windows(
         &self,
@@ -176,6 +225,24 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         }
     }
 
+    /// Parked columns outside the viewports of `visible` strips. Parking treats them like the
+    /// windows of inactive workspaces: re-parked when their app drags them back on screen or a
+    /// display change uncovers them.
+    pub(super) fn parked_strip_columns(
+        &self,
+        visible: &[ResolvedWorkspace],
+    ) -> Vec<(WorkspaceId, crate::PhysicalWindowId)> {
+        visible
+            .iter()
+            .flat_map(|resolved| {
+                self.strip_hidden_windows(resolved.workspace, resolved.output)
+                    .into_iter()
+                    .filter(|window| self.parked.contains_key(window))
+                    .map(move |window| (resolved.workspace, window))
+            })
+            .collect()
+    }
+
     /// Restores parked columns now inside the viewport. Outside strip mode every parked window
     /// of the workspace comes back, which is how turning the strip off reveals its columns.
     fn reveal_strip_columns(
@@ -214,7 +281,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         for window in hidden {
             match self.park_window(&window, output, outputs) {
                 macos::ApplyOutcome::Applied => {}
-                macos::ApplyOutcome::Gone => self.forget_window(workspace, &window),
+                // Only the window server or the process exiting proves a window gone.
+                macos::ApplyOutcome::Gone if self.confirm_gone(&window) => {
+                    self.forget_window(workspace, &window);
+                }
                 _ => failed += 1,
             }
         }

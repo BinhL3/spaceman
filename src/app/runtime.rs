@@ -258,9 +258,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             WorkerAction::ToggleFloat => self.toggle_float(outputs, cancelled),
             WorkerAction::ToggleStrip => self.toggle_strip(outputs, cancelled),
             WorkerAction::MarkWrong => {
-            self.mark_wrong();
-            Ok(self.status(0, &outputs))
-        }
+                self.mark_wrong();
+                Ok(self.status(0, &outputs))
+            }
         }
     }
 
@@ -489,25 +489,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     ) -> Vec<NavigationTile> {
         let mut tiles = Vec::new();
         for resolved in visible {
-            let mut placements = self
-                .workspaces
-                .engine(resolved.workspace)
-                .placements(&Settings::for_output(resolved.output));
-            if self.workspaces.uses_fullscreen_layout(resolved.workspace) {
-                for placement in &mut placements {
-                    placement.frame = resolved.output;
-                }
-            }
-            if let Some(strip) = self.strip_layout(resolved.workspace, resolved.output) {
-                placements.retain_mut(|placement| {
-                    strip
-                        .visible
-                        .iter()
-                        .find(|(slot, _)| *slot == placement.slot)
-                        .map(|(_, frame)| placement.frame = *frame)
-                        .is_some()
-                });
-            }
+            let placements = self.shown_placements(resolved);
             tiles.extend(placements.into_iter().filter_map(|placement| {
                 placement.window.map(|window| NavigationTile {
                     workspace: resolved.workspace,

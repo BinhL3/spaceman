@@ -193,7 +193,10 @@ fn pause_and_quit_restore_every_strip_parked_window() {
     let recovery = runtime.parked.clone();
     assert_eq!(recovery.len(), 2);
 
-    let result = runtime.execute(WorkerCommand::RestoreAll, &AtomicBool::new(false));
+    let result = runtime.execute(
+        WorkerCommand::RestoreAll(Some(outputs())),
+        &AtomicBool::new(false),
+    );
 
     assert!(matches!(result, Some(WorkerResult::Restored { failed: 0 })));
     assert!(runtime.parked.is_empty());
@@ -358,4 +361,74 @@ fn ghostty_native_tab_replacement_keeps_the_strip_column_and_width() {
     );
     assert_eq!(runtime.backend.frames[&replacement], full);
     assert!(runtime.parked.contains_key(&other));
+}
+
+/// An app that drags a parked strip column back on screen in the background is pushed back
+/// off, like a hidden workspace's window.
+#[test]
+fn a_strip_column_that_drifts_back_on_screen_is_re_parked() {
+    let (mut runtime, windows) = four_windows(LAB_ON);
+    press(&mut runtime, WorkerAction::ToggleStrip).unwrap();
+    press(&mut runtime, WorkerAction::Focus(Direction::Right)).unwrap();
+    press(&mut runtime, WorkerAction::Focus(Direction::Right)).unwrap();
+    let ghostty = &windows[0];
+    let recovery = runtime.parked[ghostty];
+    runtime.backend.frames.insert(ghostty.clone(), frame(40));
+    runtime.backend.frontmost = None;
+    runtime.recently_parked.clear();
+
+    runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+
+    let at = runtime.backend.frames[ghostty];
+    assert!(
+        !outputs()
+            .frames()
+            .any(|display| display.contains_center(at)),
+        "still on screen at {at:?}"
+    );
+    assert_eq!(runtime.parked.get(ghostty), Some(&recovery));
+    assert_eq!(
+        runtime.workspaces.workspace_of(ghostty),
+        Some(WorkspaceId::ONE)
+    );
+}
+
+/// Docking a display can uncover columns parked against the laptop's edge. They are re-parked
+/// against the new displays at once, and focus follow cannot re-home them meanwhile.
+#[test]
+fn docking_a_display_re_parks_hidden_strip_columns() {
+    let (mut runtime, windows) = four_windows(LAB_ON);
+    let laptop = macos::DisplayOutputs::new(vec![outputs().displays()[0].clone()]).unwrap();
+    let cancelled = AtomicBool::new(false);
+    runtime.cycle(laptop.clone(), &cancelled).unwrap();
+    runtime
+        .execute(
+            WorkerCommand::Action(WorkerAction::ToggleStrip, laptop),
+            &cancelled,
+        )
+        .unwrap();
+    let hidden: Vec<_> = windows
+        .iter()
+        .filter(|window| runtime.parked.contains_key(*window))
+        .cloned()
+        .collect();
+    assert_eq!(hidden.len(), 2);
+    runtime.backend.frontmost = None;
+
+    runtime.cycle(outputs(), &cancelled).unwrap();
+
+    for window in &hidden {
+        assert!(runtime.parked.contains_key(window));
+        assert_eq!(
+            runtime.workspaces.workspace_of(window),
+            Some(WorkspaceId::ONE)
+        );
+        let at = runtime.backend.frames[window];
+        assert!(
+            !outputs()
+                .frames()
+                .any(|display| display.contains_center(at)),
+            "{window:?} shows at {at:?}"
+        );
+    }
 }
