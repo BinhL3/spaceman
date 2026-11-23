@@ -106,14 +106,11 @@ objc2-service-management = { version = "0.3.2", default-features = false, featur
 members = ["agent"]
 
 [workspace.lints.rust]
-
 unsafe_op_in_unsafe_fn = "deny"
 unused_must_use = "deny"
-
 unsafe_code = "deny"
 
 [workspace.lints.clippy]
-
 await_holding_lock = "deny"
 await_holding_refcell_ref = "deny"
 dbg_macro = "deny"
@@ -124,7 +121,6 @@ let_underscore_must_use = "deny"
 todo = "warn"
 undocumented_unsafe_blocks = "deny"
 unwrap_used = "warn"
-
 
 [lints]
 workspace = true
