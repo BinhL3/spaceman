@@ -92,6 +92,7 @@ pause, quit, or hotkey loss.
   ([known defect](fullscreen-layout.md#gotchas)).
 - Floating windows (rules, modal/dialog windows without an enabled fullscreen button, or non-resizable
   windows) are owned by a workspace (and can be moved between workspaces) but are never tiled or
-  resized.
+  resized. A window that already holds a tile keeps it while it looks like a dialog, such as a
+  browser window showing a file-picker sheet; only a `float` rule releases a tile.
 - New windows open on the active workspace of the display under the window's center unless matched by
   an explicit `route` rule or startup placement recall.

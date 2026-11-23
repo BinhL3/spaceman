@@ -321,7 +321,7 @@ fn floating_rule_owns_window_without_adding_it_to_layout() {
 }
 
 #[test]
-fn tiled_window_becoming_non_resizable_moves_to_floating_ownership() {
+fn tiled_window_keeps_its_tile_while_it_reports_non_resizable() {
     let window = window(10);
     let normal = frame(50);
     let mut observed = observation(&window, normal);
@@ -339,19 +339,20 @@ fn tiled_window_becoming_non_resizable_moves_to_floating_ownership() {
 
     runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
 
-    assert_eq!(runtime.workspaces.workspace_of(&window), None);
     assert_eq!(
-        runtime.workspaces.floating_workspace_of(&window),
+        runtime.workspaces.workspace_of(&window),
         Some(WorkspaceId::ONE)
     );
-    assert!(
+    assert_eq!(runtime.workspaces.floating_workspace_of(&window), None);
+    assert_eq!(
         runtime
             .workspaces
             .engine(WorkspaceId::ONE)
             .model()
             .workspace
             .slots
-            .is_empty()
+            .len(),
+        1
     );
 }
 

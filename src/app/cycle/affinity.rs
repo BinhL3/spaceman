@@ -80,7 +80,13 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     affinities.insert(window.id.clone(), FrozenWindowAffinity::Ignored);
                     continue;
                 }
-                let floating = !window.resizable || disposition == WindowDisposition::Floating;
+                // A window that already holds a tile keeps it while it looks like a
+                // dialog: an attached sheet (a file picker) disables its fullscreen
+                // button, and floating it until the sheet closed would re-tile it at
+                // the end of the layout.
+                let tiled = self.workspaces.workspace_of(&window.id).is_some();
+                let floating =
+                    disposition == WindowDisposition::Floating || (!window.resizable && !tiled);
                 if floating {
                     if let Some(owner) = self.workspaces.workspace_of(&window.id) {
                         self.forget_window(owner, &window.id);
