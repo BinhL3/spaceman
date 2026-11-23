@@ -167,6 +167,9 @@ pub(crate) struct WorkspaceState {
     /// workspace into fullscreen layout mode.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     maximized: Vec<Option<crate::SlotId>>,
+    /// Scrolling Strip (a Lab) per workspace; references to missing slots are pruned on restore.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    strip: Vec<crate::strip::StripState>,
 }
 
 impl WorkspaceState {
@@ -177,6 +180,7 @@ impl WorkspaceState {
             || self.last_focused.len() > WorkspaceId::COUNT
             || self.fullscreen_layout.len() > WorkspaceId::COUNT
             || self.maximized.len() > WorkspaceId::COUNT
+            || self.strip.len() > WorkspaceId::COUNT
         {
             return Err("workspace state contains more than 36 workspaces".into());
         }
@@ -298,6 +302,7 @@ pub struct Workspaces {
     enabled: HashSet<WorkspaceId>,
     last_focused: [Option<crate::SlotId>; WorkspaceId::COUNT],
     fullscreen_layout: [bool; WorkspaceId::COUNT],
+    strip: [crate::strip::StripState; WorkspaceId::COUNT],
 }
 
 impl Default for Workspaces {
@@ -316,6 +321,7 @@ impl Default for Workspaces {
             enabled: WorkspaceId::numbered().collect(),
             last_focused: std::array::from_fn(|_| None),
             fullscreen_layout: [false; WorkspaceId::COUNT],
+            strip: std::array::from_fn(|_| crate::strip::StripState::default()),
         }
     }
 }
@@ -349,6 +355,7 @@ impl Workspaces {
             last_focused: trimmed(&self.last_focused, Option::is_some),
             fullscreen_layout: trimmed(&self.fullscreen_layout, |enabled| *enabled),
             maximized: Vec::new(),
+            strip: trimmed(&self.strip, |strip| !strip.is_default()),
         }
     }
 
@@ -364,6 +371,7 @@ impl Workspaces {
             last_focused,
             fullscreen_layout,
             maximized,
+            strip,
         } = state;
         for (index, slots) in slots.into_iter().take(WorkspaceId::COUNT).enumerate() {
             let workspace = WorkspaceId::from_index(index);
@@ -416,6 +424,12 @@ impl Workspaces {
                 fullscreen_layout.get(index).copied().unwrap_or(false)
                     || legacy_maximized.is_some(),
             );
+            if let Some(strip) = strip.get(index).cloned() {
+                let enabled = strip.enabled;
+                self.strip[index] = strip;
+                self.set_strip_layout(workspace, enabled);
+                self.prune_intents(workspace);
+            }
         }
     }
 
@@ -741,9 +755,41 @@ impl Workspaces {
         self.fullscreen_layout[workspace.index()]
     }
 
+    /// Turning Fullscreen Layout on turns the Scrolling Strip off: one workspace shows one
+    /// arrangement.
     pub(crate) fn set_fullscreen_layout(&mut self, workspace: WorkspaceId, enabled: bool) {
-        self.fullscreen_layout[workspace.index()] =
-            enabled && !self.engine(workspace).model().workspace.slots.is_empty();
+        let enabled = enabled && !self.engine(workspace).model().workspace.slots.is_empty();
+        self.fullscreen_layout[workspace.index()] = enabled;
+        if enabled {
+            self.strip[workspace.index()].enabled = false;
+        }
+    }
+
+    /// The workspace's own Scrolling Strip switch, whether or not the Lab is on.
+    pub(crate) fn uses_strip_layout(&self, workspace: WorkspaceId) -> bool {
+        self.strip[workspace.index()].enabled
+    }
+
+    /// Turning the Scrolling Strip on turns Fullscreen Layout off. Unlike Fullscreen Layout it
+    /// survives an empty workspace, so the next window opens into the strip.
+    pub(crate) fn set_strip_layout(&mut self, workspace: WorkspaceId, enabled: bool) {
+        self.strip[workspace.index()].enabled = enabled;
+        if enabled {
+            self.fullscreen_layout[workspace.index()] = false;
+        }
+    }
+
+    pub(crate) fn strip(&self, workspace: WorkspaceId) -> &crate::strip::StripState {
+        &self.strip[workspace.index()]
+    }
+
+    pub(crate) fn strip_mut(&mut self, workspace: WorkspaceId) -> &mut crate::strip::StripState {
+        &mut self.strip[workspace.index()]
+    }
+
+    /// The slot focus last rested on in `workspace`.
+    pub(crate) fn last_focused_slot(&self, workspace: WorkspaceId) -> Option<crate::SlotId> {
+        self.last_focused[workspace.index()]
     }
 
     pub(crate) fn prune_intents(&mut self, workspace: WorkspaceId) {
@@ -751,6 +797,8 @@ impl Workspaces {
         self.last_focused[index] =
             self.last_focused[index].filter(|slot| self.has_slot(workspace, *slot));
         self.set_fullscreen_layout(workspace, self.fullscreen_layout[index]);
+        let engine = &self.engines[index];
+        self.strip[index].retain_slots(|slot| engine.model().slot(slot).is_some());
     }
 
     fn has_slot(&self, workspace: WorkspaceId, slot: crate::SlotId) -> bool {

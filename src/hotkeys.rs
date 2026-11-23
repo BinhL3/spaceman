@@ -8,6 +8,7 @@ use crate::{
     Direction, DisplayTarget, ResizeDirection, WorkspaceId,
     app::{Action, WorkerAction},
     keyboard_layout::{LayoutFingerprint, LayoutSnapshot, LogicalKey, SemanticKey},
+    labs::LabsConfig,
 };
 
 const EVENT_CLASS_KEYBOARD: u32 = u32::from_be_bytes(*b"keyb");
@@ -96,9 +97,37 @@ struct Registration {
 }
 
 impl HotkeyPlan {
-    pub(crate) fn current(enabled: &[WorkspaceId]) -> Result<Self, String> {
+    pub(crate) fn current(enabled: &[WorkspaceId], labs: LabsConfig) -> Result<Self, String> {
         let layout = LayoutSnapshot::current().map_err(|error| error.to_string())?;
-        Self::from_layout(enabled, &layout)
+        let mut plan = Self::from_layout(enabled, &layout)?;
+        plan.add_labs(enabled, labs, &layout)?;
+        Ok(plan)
+    }
+
+    /// Shortcuts of Labs features that are on. A feature that is off claims no chord.
+    fn add_labs(
+        &mut self,
+        enabled: &[WorkspaceId],
+        labs: LabsConfig,
+        layout: &LayoutSnapshot,
+    ) -> Result<(), String> {
+        // A named workspace S keeps ⌥⇧S for "move window to workspace S".
+        let s_claimed = enabled
+            .iter()
+            .any(|workspace| workspace.letter() == Some('S'));
+        if !labs.scrolling_strip || s_claimed {
+            return Ok(());
+        }
+        let key = layout
+            .resolve(LogicalKey::Character('s'))
+            .map_err(|error| error.to_string())?;
+        self.registrations.push(registration(
+            key,
+            OPTION_KEY | SHIFT_KEY,
+            WorkerAction::ToggleStrip,
+            "toggle scrolling strip".into(),
+        ));
+        reject_collisions(&self.registrations)
     }
 
     fn from_layout(enabled: &[WorkspaceId], layout: &LayoutSnapshot) -> Result<Self, String> {
@@ -549,6 +578,49 @@ mod tests {
         assert_eq!(
             chords, unique,
             "every planned chord must be registered once"
+        );
+    }
+    #[test]
+    fn scrolling_strip_shortcut_registers_only_while_its_lab_is_on() {
+        let mut keys = vec![(1, 's', false, false)];
+        keys.extend([
+            (60, 'h', false, false),
+            (61, 'j', false, false),
+            (62, 'k', false, false),
+            (63, 'l', false, false),
+            (64, 'f', false, false),
+            (65, '/', false, false),
+            (66, '-', false, false),
+            (67, '=', false, false),
+            (68, '`', false, false),
+        ]);
+        let layout = LayoutSnapshot::for_test(keys, vec![]);
+        let numbered = WorkspaceId::numbered().collect::<Vec<_>>();
+        let plan_with = |enabled: &[WorkspaceId], scrolling_strip| {
+            let mut plan = HotkeyPlan::from_layout(enabled, &layout).unwrap();
+            plan.add_labs(enabled, LabsConfig { scrolling_strip }, &layout)
+                .unwrap();
+            plan
+        };
+        let off = plan_with(&numbered, false);
+        assert_eq!(action(&off, "toggle scrolling strip"), None);
+        let on = plan_with(&numbered, true);
+        let strip = on
+            .registrations
+            .iter()
+            .find(|registration| registration.action == WorkerAction::ToggleStrip)
+            .unwrap();
+        assert_eq!(
+            (strip.key_code, strip.modifiers),
+            (1, OPTION_KEY | SHIFT_KEY)
+        );
+        assert_eq!(on.registrations.len(), off.registrations.len() + 1);
+
+        let mut with_s = numbered;
+        with_s.push(WorkspaceId::named('S').unwrap());
+        assert_eq!(
+            action(&plan_with(&with_s, true), "toggle scrolling strip"),
+            None
         );
     }
 
