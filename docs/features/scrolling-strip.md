@@ -10,9 +10,13 @@ edge and are recorded like an inactive workspace's windows. An experiment: off b
 
 ```ts
 Lab switch (Settings › Labs card / [labs] scrolling_strip / config set labs.scrolling_strip)
-├── Off (default) -> Option+Shift+S not registered; ctl strip answers
+├── Off (default) -> the strip's shortcut not registered; ctl strip answers
 │                    "Scrolling Strip is off (enable it in Settings › Labs)"; every workspace tiles as usual
-└── On  -> hot-reloads: worker gate opens, Option+Shift+S registers           // strip.lab
+├── On  -> hot-reloads: worker gate opens, the strip's shortcut registers     // strip.lab
+├── Shortcut (card recorder / [labs] scrolling_strip_shortcut, default alt+shift+s)
+│   └── hot-reloads; claims its chord ahead of built-ins, [shortcuts] bindings still win;
+│       Backspace in the recorder puts the default back                       // strip.shortcut
+└── How it works (card button) -> dialog: the strip under the display, and its keys
 
 Toggle (focused workspace) Option+Shift+S / ctl strip                         // strip.toggle
 ├── On : columns at their widths from the left edge, no glide; the rest peek or park durably
@@ -26,6 +30,9 @@ Ribbon and camera (pure math: src/strip.rs)                                   //
 │                  out of view past a free edge -> 16 pt sliver (PEEK_PX), recorded as parked
 │                  out of view past an edge shared with another display -> parked
 └── Nothing ever crosses a shared edge (ScrollingDisplayBounds clamps it inside)
+    └── Curtain (StripMotion::curtain): a column held at a shared edge stays under the neighbor
+        sliding across it: arriving, it is uncovered as the neighbor slides off; leaving, it is
+        covered, then parked by the settling layout
 
 Glide (src/app/strip/motion.rs -> src/app/app_loop/glide.rs)                   // strip.glide
 ├── Worker: records every column the glide takes out of view in parked-windows.json and resizes
@@ -37,9 +44,14 @@ Glide (src/app/strip/motion.rs -> src/app/app_loop/glide.rs)                   /
 │                no readback, enhanced UI held off for the whole glide); its clock runs up to
 │                50 ms behind the worker's so the first frame shown is the start of the motion
 ├── Cycles mid-glide -> every column the window server lists keeps its slot
-├── Rapid taps -> the running spring is retargeted, one continuous glide
-├── Settled -> link stops; worker lays the strip out once, peeks/parks out-of-view columns,
-│              retires recovery frames of columns back in view
+├── Rapid taps -> the running spring is retargeted, one continuous glide; a tap steps on from
+│                 the column the last one aimed at, even before it has focus
+├── Curtain -> the sliding columns are raised over a tucked one if the window server stacks it
+│              in front; a column arriving across a shared edge is focused once the glide settles
+├── Focus refused mid-glide -> retried when the glide settles instead of failing the key
+├── Settled -> link stops; worker lays the strip out once, peeks/parks out-of-view columns
+│              (a recorded column still on screen at a shared edge too), retires recovery
+│              frames of columns back in view
 └── Switch, move, toggle, pause or quit mid-glide -> glide halted before windows are touched
 
 Keys on a strip                                                               // strip.keys
@@ -60,6 +72,7 @@ Persistence and recovery                                                      //
 ├── Switch away -> every column parked; back -> only the viewport revealed, then peeks
 ├── Pause / quit / restart -> every peeking or parked column restored (parked-windows.json)
 ├── An app drags an out-of-view column back -> put back at its sliver or parking spot
+├── Heal never re-homes or exempts a column of a visible strip: the strip places it
 ├── Display added or removed -> parked columns re-parked; peeks past a new seam parked
 └── Ghostty native-tab replacement -> keeps the slot, its position and its width
 ```
@@ -76,20 +89,29 @@ Unit (FakeBackend), `src/app/tests/strip.rs`:
 `a_strip_column_that_drifts_back_on_screen_is_put_back`,
 `docking_a_display_parks_columns_that_peeked_past_the_new_seam`,
 `a_focus_step_glides_and_settles_into_the_rest_layout`, `rapid_taps_retarget_one_glide`, and
-`switching_workspaces_halts_a_running_glide`, `a_cycle_mid_glide_keeps_a_column_caught_off_screen`. Ribbon, camera and glide math: `src/strip/tests.rs`
+`switching_workspaces_halts_a_running_glide`, `a_cycle_mid_glide_keeps_a_column_caught_off_screen`,
+`gliding_across_a_shared_edge_and_back_never_exempts_a_column_from_parking`,
+`a_column_arriving_across_a_shared_edge_is_uncovered_then_focused`, and
+`rapid_taps_step_from_a_deferred_focus_and_retry_a_refused_one`. Curtain and free-edge slide-in:
+`a_column_crossing_a_shared_edge_stays_under_the_neighbor_sliding_across_it`,
+`free_edges_tuck_nothing`, `a_column_arriving_past_a_free_edge_slides_in_from_its_sliver`. Ribbon, camera and glide math: `src/strip/tests.rs`
 (minimal scroll, peeks, seams, 120 Hz intermediate frames, retarget continuity). Enhanced UI hand-off:
 `a_restore_owed_during_a_hold_is_paid_when_the_last_sink_closes` (`src/macos/presenter/holds.rs`).
 Persistence: `persisted_strip_round_trips_and_excludes_fullscreen_layout`. Config:
 `parses_labs_with_every_experiment_off_by_default`, `labs_switches_round_trip_and_survive_other_edits`
 (CLI), `labs_switch_round_trips_and_leaves_an_all_off_table_out` (Settings). Shortcut gating:
-`scrolling_strip_shortcut_registers_only_while_its_lab_is_on`.
+`scrolling_strip_shortcut_registers_only_while_its_lab_is_on` (also a picked chord),
+`the_strip_shortcut_defaults_to_option_shift_s_and_reads_any_chord`,
+`chords_print_back_in_config_syntax_and_as_menu_symbols`, and the recorder's
+`recorded_chords_round_trip_through_the_config_syntax` (`agent/src/labs/shortcut.rs`).
 
 ## How To Get To It (User POV)
 
 ```ts
 Settings › Labs -> Scrolling Strip switch on
 Focus a window on the workspace
-└── Option+Shift+S / spaceman ctl strip -> toggle
+└── Option+Shift+S (or the shortcut picked on the card) / spaceman ctl strip -> toggle
+Settings › Labs -> How it works -> the strip and its keys
 ```
 
 ## Existing Checks
@@ -108,6 +130,14 @@ Focus a window on the workspace
 - **No gaps or padding yet.** Settings › Layout's gaps, edge padding and single-window width don't
   apply to a strip: its columns run edge to edge.
 - **Shared edges.** A column partly in view on the side of another display is kept inside its own
-  display, so it sits under its neighbor instead of running off the edge.
+  display, so it sits under its neighbor instead of running off the edge. That only looks right
+  while the neighbor is stacked above it: the glide raises the neighbor when the window server
+  says otherwise, and holds the arriving column's focus (which would raise it) until the glide
+  settles. Before this, a column leaving across the seam stayed on screen after the glide; heal
+  then took it for its app un-parking itself and, the second time, exempted it from parking for
+  the session.
+- **Peek sliver vs. macOS clamping.** macOS keeps a window's title bar below the menu bar but
+  doesn't pull a window back horizontally: parking keeps 1 point on screen and stays put, and the
+  strip's 16-point sliver is wider than that.
 - **A closed column's neighbor appears on the next cycle.** Reconciliation retires the closed window
   first; the column that comes into view is laid out by the following observation cycle.

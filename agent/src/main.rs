@@ -76,6 +76,7 @@ pub struct Ui {
     pub(crate) per_edge: Option<bool>,
     /// Scenes render fixed data and ignore the live agent and file.
     pub(crate) fixture: bool,
+    pub(crate) labs: labs::LabsView,
 }
 
 impl Ui {
@@ -111,6 +112,7 @@ impl Ui {
             spacing_draft: None,
             per_edge: None,
             fixture: false,
+            labs: labs::LabsView::default(),
         };
         ui.look_up_apps();
         if let Some(step) = initial_tour {
@@ -272,6 +274,15 @@ impl Ui {
     /// Switches a Labs feature in `config.toml`; the agent reloads it from there.
     pub fn set_lab(&mut self, feature: spaceman::labs::LabFeature, enabled: bool) {
         self.edit(|doc| doc.set_lab(feature, enabled));
+    }
+
+    /// Sets a Labs feature's shortcut in `config.toml`; the agent registers it from there.
+    pub fn set_lab_shortcut(
+        &mut self,
+        feature: spaceman::labs::LabFeature,
+        shortcut: spaceman::labs::LabShortcut,
+    ) {
+        self.edit(|doc| doc.set_lab_shortcut(feature, shortcut));
     }
 
     pub fn mark_wrong(&self) {

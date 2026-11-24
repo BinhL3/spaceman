@@ -138,11 +138,14 @@ Core controls:
 | `Option+-`, `Option+=` | Shrink/grow the focused tile by 50 pixels |
 | `Option+Shift+F` | Toggle Fullscreen Layout without native fullscreen |
 | `Option+Shift+Space` | Float the focused window above the tiles, or tile it again |
-| `Option+Shift+S` | Toggle the Scrolling Strip (Labs: enable it in Settings › Labs first) |
+| `Option+Shift+S` | Toggle the Scrolling Strip (Labs: enable it in Settings › Labs first; the card can change the shortcut) |
 | Three-finger swipe left/right | Next/previous occupied workspace on the display under the pointer |
 
 The swipe shares three fingers with macOS's "Swipe between full-screen applications"; set that to
 four fingers or off in Trackpad settings so only one of them moves.
+
+Every shortcut can be rebound in `config.toml`'s `[shortcuts]` table, for example to match a Linux
+tiling setup; see [Configuration › Shortcuts](docs/configuration.md#shortcuts).
 
 Character shortcuts follow the active macOS keyboard layout. Workspace digits remain the physical
 ANSI number row, and Tab remains physical Tab. See [Controls](docs/controls.md) for drag, resize,

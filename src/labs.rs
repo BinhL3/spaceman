@@ -5,21 +5,71 @@
 //! Gate a feature where its work starts (the worker action, the hotkey registration), not only
 //! where its UI shows: with every switch off, Spaceman behaves exactly as if Labs did not exist.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// The `[labs]` table. Omitted from `config.toml` while every switch is off.
+use crate::shortcuts::{Chord, Key, Modifiers, parse_chord};
+
+/// The `[labs]` table. Omitted from `config.toml` while every switch is off and every
+/// shortcut is its default.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LabsConfig {
     #[serde(default)]
     pub scrolling_strip: bool,
+    /// The chord that turns the strip on or off for the focused workspace, in `[shortcuts]`
+    /// syntax (`"alt+shift+s"`).
+    #[serde(default, skip_serializing_if = "LabShortcut::is_default")]
+    pub scrolling_strip_shortcut: LabShortcut,
+}
+
+/// A Labs feature's own shortcut: a chord written as a `[shortcuts]` key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LabShortcut(pub Chord);
+
+impl LabShortcut {
+    /// `⌥⇧S`, the strip's shortcut until one is picked.
+    pub const STRIP_DEFAULT: &str = "alt+shift+s";
+
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl Default for LabShortcut {
+    fn default() -> Self {
+        Self(Chord {
+            modifiers: Modifiers {
+                option: true,
+                shift: true,
+                ..Modifiers::default()
+            },
+            key: Key::Character('s'),
+        })
+    }
+}
+
+impl Serialize for LabShortcut {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0.config_name())
+    }
+}
+
+impl<'de> Deserialize<'de> for LabShortcut {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let source = String::deserialize(deserializer)?;
+        parse_chord(&source)
+            .map(Self)
+            .map_err(|error| serde::de::Error::custom(format!("shortcut {source:?}: {error}")))
+    }
 }
 
 impl LabsConfig {
-    /// Whether every switch is off, so the table can be left out of the file.
+    /// Whether every switch is off and every shortcut its default, so the table can be left
+    /// out of the file.
     #[must_use]
-    pub const fn is_default(&self) -> bool {
-        !self.scrolling_strip
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
     }
 
     #[must_use]
@@ -65,18 +115,24 @@ impl LabFeature {
     pub const fn summary(self) -> &'static str {
         match self {
             Self::ScrollingStrip => {
-                "Keep windows wide on a horizontal strip that glides instead of shrinking tiles. \
-                 Toggle per workspace with ⌥⇧S, step with ⌥H/⌥L, size columns (33% to 100%) \
-                 with ⌥-/⌥=."
+                "Keep windows wide on a horizontal strip that glides instead of shrinking tiles."
             }
         }
     }
 
-    /// The shortcut that turns it on where it applies.
+    /// The shortcut that turns it on where it applies, as `labs` has it.
     #[must_use]
-    pub const fn shortcut(self) -> &'static str {
+    pub const fn shortcut(self, labs: &LabsConfig) -> Chord {
         match self {
-            Self::ScrollingStrip => "⌥⇧S",
+            Self::ScrollingStrip => labs.scrolling_strip_shortcut.0,
+        }
+    }
+
+    /// Its shortcut's key in `[labs]`.
+    #[must_use]
+    pub const fn shortcut_id(self) -> &'static str {
+        match self {
+            Self::ScrollingStrip => "scrolling_strip_shortcut",
         }
     }
 
@@ -109,6 +165,35 @@ mod tests {
             labs.set(*feature, false);
         }
         assert_eq!(LabFeature::from_id("warp_drive"), None);
+    }
+
+    #[test]
+    fn the_strip_shortcut_defaults_to_option_shift_s_and_reads_any_chord() {
+        assert_eq!(
+            parse_chord(LabShortcut::STRIP_DEFAULT).map(LabShortcut),
+            Ok(LabShortcut::default())
+        );
+        let labs: LabsConfig = toml::from_str("scrolling_strip = true").unwrap();
+        assert_eq!(LabFeature::ScrollingStrip.shortcut(&labs).symbols(), "⌥⇧S");
+        let picked: LabsConfig =
+            toml::from_str("scrolling_strip_shortcut = \"ctrl+alt+s\"").unwrap();
+        assert_eq!(
+            LabFeature::ScrollingStrip.shortcut(&picked).symbols(),
+            "⌃⌥S"
+        );
+        assert!(!picked.is_default());
+        assert_eq!(
+            toml::to_string(&picked).unwrap(),
+            "scrolling_strip = false\nscrolling_strip_shortcut = \"ctrl+alt+s\"\n"
+        );
+        assert_eq!(
+            toml::to_string(&LabsConfig::default()).unwrap(),
+            "scrolling_strip = false\n"
+        );
+        for bad in ["\"s\"", "\"shift+s\"", "\"alt+banana\"", "5"] {
+            let source = format!("scrolling_strip_shortcut = {bad}");
+            assert!(toml::from_str::<LabsConfig>(&source).is_err(), "{bad}");
+        }
     }
 
     #[test]

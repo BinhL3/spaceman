@@ -1,5 +1,5 @@
 pub(crate) fn version() -> String {
-    format!("spaceman {}", env!("CARGO_PKG_VERSION"))
+    format!("spaceman {}", spaceman::build_version())
 }
 
 pub(crate) fn is_help_flag(arg: &str) -> bool {
@@ -46,7 +46,7 @@ pub(crate) fn root(executable: &str) -> String {
     let mut sections = vec![
         format!(
             "Spaceman {} — macOS tiling window manager",
-            env!("CARGO_PKG_VERSION")
+            spaceman::build_version()
         ),
         String::new(),
         format!("Usage: {executable} <command> [args...]"),
@@ -171,7 +171,8 @@ pub(crate) fn config_help(executable: &str) -> String {
         "  single_window_max_width  0 | 320-16384  Center a lone window at this width (default: 0, off)",
         "",
         "Labs keys (experimental, off by default):",
-        "  labs.scrolling_strip  true | false  Scrolling Strip layout; toggle per workspace with ⌥⇧S",
+        "  labs.scrolling_strip  true | false  Scrolling Strip layout; toggle per workspace with its",
+        "                        shortcut ([labs] scrolling_strip_shortcut, default ⌥⇧S)",
         "",
         "Notes:",
         "  - Respects SPACEMAN_CONFIG and SPACEMAN_APPLICATION_SUPPORT.",
@@ -264,7 +265,7 @@ pub(crate) fn ctl_help(executable: &str) -> String {
         "  open <url-or-target>       Open Settings on a spaceman:// link, pane, feature, or Lab",
         "  open-settings              Open the Spaceman Settings window",
         "  open-accessibility         Open Accessibility onboarding / System Settings",
-        "  check-for-updates          Trigger a Sparkle update check",
+        "  check-for-updates          Check for Spaceman updates",
         "  toggle-launch-at-login     Toggle Launch at Login registration",
         "  restart | quit             Restore windows and restart or quit the agent",
     ]

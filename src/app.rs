@@ -336,6 +336,7 @@ pub struct PreparedAgent {
     cancelled: Arc<AtomicBool>,
     scope: ManagementScope,
     hotkey_workspaces: Vec<WorkspaceId>,
+    shortcuts: crate::shortcuts::Shortcuts,
     hud: bool,
     labs: crate::labs::LabsConfig,
     controls: Receiver<ControlRequest>,
@@ -348,7 +349,7 @@ pub fn prepare() -> Result<(PreparedAgent, UiBridge), String> {
     log_event!(
         "agent started (pid {}, version {})",
         std::process::id(),
-        env!("CARGO_PKG_VERSION")
+        crate::updater::build_version()
     );
     let scope = ManagementScope::from_environment()?;
     let parked = load_parked()?;
@@ -356,6 +357,7 @@ pub fn prepare() -> Result<(PreparedAgent, UiBridge), String> {
         recover_startup_metadata(Config::load(), load_workspace_state());
     let hud = config.hud();
     let labs = config.labs();
+    let shortcuts = config.shortcuts().clone();
     let mut configured_workspaces = Workspaces::default();
     config.configure_workspaces(&mut configured_workspaces);
     let mut hotkey_workspaces = WorkspaceId::numbered()
@@ -402,6 +404,7 @@ pub fn prepare() -> Result<(PreparedAgent, UiBridge), String> {
             cancelled,
             scope,
             hotkey_workspaces,
+            shortcuts,
             hud,
             labs,
             controls,
@@ -464,6 +467,7 @@ impl PreparedAgent {
                 scope: self.scope,
                 events,
                 hotkey_workspaces: self.hotkey_workspaces,
+                shortcuts: self.shortcuts,
                 hud: self.hud,
                 labs: self.labs,
                 trusted,

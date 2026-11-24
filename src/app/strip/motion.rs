@@ -8,7 +8,7 @@
 use super::*;
 use crate::{
     motion::{CameraSpring, ScrollingDisplayBounds, SpringParams},
-    strip::{MotionColumn, RibbonColumn, StripLayout, StripMotion},
+    strip::{Curtain, MotionColumn, RibbonColumn, StripLayout, StripMotion},
 };
 
 /// How long after the springs settle the worker waits before its own layout pass, so the main
@@ -64,6 +64,11 @@ pub(in crate::app) struct StripView {
     shifts: HashMap<crate::SlotId, CameraSpring>,
     /// When the running glide settles.
     settles_at: Option<Instant>,
+    /// Columns the running glide holds against a shared edge ([`StripMotion::curtain`]).
+    tucked: HashSet<crate::PhysicalWindowId>,
+    /// A column to focus once the glide settles: one tucked under its neighbor until then,
+    /// or one its app refused to focus while the glide moved its windows.
+    focus: Option<crate::PhysicalWindowId>,
 }
 
 /// Every workspace's strip view, plus the glides to hand to the main thread.
@@ -96,6 +101,31 @@ impl StripViews {
             .map(|at| at + SETTLE_GRACE)
     }
 
+    /// Whether the running glide holds `window` against a shared edge.
+    pub(in crate::app) fn tucked(
+        &self,
+        workspace: WorkspaceId,
+        window: &crate::PhysicalWindowId,
+    ) -> bool {
+        self.in_motion(workspace) && self.views[workspace.index()].tucked.contains(window)
+    }
+
+    /// When the running glide's settling layout is due.
+    pub(in crate::app) fn settle_deadline(&self, workspace: WorkspaceId) -> Option<Instant> {
+        self.views[workspace.index()]
+            .settles_at
+            .map(|at| at + SETTLE_GRACE)
+    }
+
+    /// Focuses `window` once the running glide settles, or nothing (`None`).
+    pub(in crate::app) fn focus_on_settle(
+        &mut self,
+        workspace: WorkspaceId,
+        window: Option<crate::PhysicalWindowId>,
+    ) {
+        self.views[workspace.index()].focus = window;
+    }
+
     fn in_motion(&self, workspace: WorkspaceId) -> bool {
         matches!(
             self.views[workspace.index()].camera,
@@ -118,6 +148,8 @@ impl StripViews {
                 view.camera = Some(ViewportCamera::Static(spring.target()));
                 view.shifts.clear();
                 view.settles_at = None;
+                view.tucked.clear();
+                view.focus = None;
                 self.outbox
                     .push(StripCommand::Halt(WorkspaceId::from_index(index)));
             }
@@ -324,6 +356,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             issued: now,
         };
         let settles_at = motion.settles_at(now);
+        let curtain = motion.curtain(now);
+        self.stack_curtain(&curtain);
         log_event!(
             "workspace {workspace}: strip glide {:.0} -> {:.0} over {}ms ({} windows)",
             current_camera,
@@ -334,6 +368,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let view = &mut self.strip_views.views[workspace.index()];
         view.camera = Some(ViewportCamera::Animating(camera));
         view.settles_at = Some(settles_at);
+        view.tucked = curtain.tucked.into_iter().collect();
         self.strip_views.outbox.retain(
             |command| !matches!(command, StripCommand::Glide(m) if m.workspace == workspace),
         );
@@ -355,14 +390,15 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 view.camera = Some(ViewportCamera::Static(spring.target()));
                 view.shifts.clear();
                 view.settles_at = None;
-                settled.push(WorkspaceId::from_index(index));
+                view.tucked.clear();
+                settled.push((WorkspaceId::from_index(index), view.focus.take()));
             }
         }
         let Some(outputs) = self.strip_outputs().cloned() else {
             return;
         };
         let cancelled = AtomicBool::new(false);
-        for workspace in settled {
+        for (workspace, focus) in settled {
             if !self.is_visible(workspace, &outputs) {
                 continue;
             }
@@ -371,10 +407,50 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 "workspace {workspace}: strip glide settled ({} failed)",
                 layout.failed
             );
+            // Unless focus went somewhere else meanwhile (a click, Command-Tab).
+            if let Some(target) =
+                focus.filter(|target| self.current_focus().as_ref() == Some(target))
+                && let Err(error) = self.focus_tile(None, &target)
+            {
+                log_event!("workspace {workspace}: strip focus after glide: {error}");
+            }
         }
         if let Err(error) = self.persist_workspace_state_if_changed() {
             log_event!("failed to persist workspace state: {error}");
         }
+    }
+
+    /// Raises the columns sliding across a tucked one above it, back to front so they keep
+    /// their own order, unless the window server already stacks them that way.
+    fn stack_curtain(&mut self, curtain: &Curtain) {
+        if curtain.tucked.is_empty() || curtain.over.is_empty() {
+            return;
+        }
+        let order = self.backend.onscreen_window_order().unwrap_or_default();
+        let rank =
+            |window: &crate::PhysicalWindowId| order.iter().position(|id| *id == window.window_id);
+        // Front-most first: every column sliding over must rank ahead of every tucked one. A
+        // tucked column the window server doesn't list (off every display) could arrive in
+        // front, so the sliding columns are raised then too.
+        let backmost_over = curtain.over.iter().filter_map(rank).max();
+        let stacked = curtain.tucked.iter().all(|tucked| {
+            matches!((rank(tucked), backmost_over), (Some(tucked), Some(over)) if tucked > over)
+        });
+        if stacked {
+            return;
+        }
+        let mut over = curtain.over.clone();
+        self.order_back_to_front(&mut over, |window| window.window_id);
+        for window in &over {
+            if !self.backend.raise_window(window) {
+                log_event!("strip curtain: could not raise {:?}", window);
+            }
+        }
+        log_event!(
+            "strip curtain: raised {} column(s) over {} tucked",
+            over.len(),
+            curtain.tucked.len()
+        );
     }
 
     /// The displays as last seen by a command.

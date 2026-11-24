@@ -21,7 +21,7 @@ fails after the old registrations are released, it pauses and reports `Hotkeys u
 | `Option+-` / `Option+=` | Shrink/grow the focused tile by 50 pixels at its immediate split |
 | `Option+Shift+F` | Toggle the workspace-wide Fullscreen Layout without entering native fullscreen |
 | `Option+Shift+Space` | Float the focused window above the tiles, or tile it again |
-| `Option+Shift+S` | Toggle the Scrolling Strip on the active workspace (Labs; registered only while `[labs] scrolling_strip` is on) |
+| `Option+Shift+S` | Toggle the Scrolling Strip on the active workspace (Labs; registered only while `[labs] scrolling_strip` is on; change it on the Labs card or with `[labs] scrolling_strip_shortcut`) |
 | Three-finger swipe left/right | Next/previous workspace on the display under the pointer |
 
 A three-finger horizontal swipe steps through the workspaces that the display's menu section lists
@@ -30,8 +30,13 @@ next one, as with macOS Spaces. Spaceman only listens to the trackpad, so macOS 
 same swipe: set "Swipe between full-screen applications" to four fingers or off in Trackpad
 settings. Four-finger swipes and vertical swipes are left to macOS.
 
+Every shortcut above can be rebound, unbound, or replaced in the config file's `[shortcuts]` table;
+see [Configuration › Shortcuts](configuration.md#shortcuts). The table lists the built-in defaults.
+
 Named workspace shortcuts are registered only when referenced by config. If a configured letter
-overlaps a built-in shortcut, the workspace shortcut takes precedence.
+overlaps a built-in shortcut, the workspace shortcut takes precedence. A `[shortcuts]` binding claims
+its chord before both, so binding `alt+h` replaces the built-in Focus Left and a named workspace H's
+switch shortcut too, and whichever was skipped is logged in `agent.log`.
 
 Spaceman remembers the last-focused logical tile in each workspace and restores that focus when the
 workspace becomes active again. Pressing an already-active workspace shortcut preserves the current
@@ -66,7 +71,10 @@ column; past either end they continue to the adjacent display), `Option+Shift+H`
 move the focused column, `Option+-`/`Option+=` step its width through 33% · 50% · 66% · 80% · 100%
 (columns you have not sized follow the last width you picked), and Option-backtick cycles columns.
 Focusing a column out of view any other way (a click, the Dock, Command-Tab) glides the viewport to
-it. Turning on Fullscreen Layout or pressing `Option+/` leaves the
+it. Next to another display, a column crossing the shared edge waits at the edge under its
+neighbor, which slides over or off it, so nothing shows on the other display; a column arriving
+that way takes focus once the glide ends. The Labs card's How it works dialog shows the strip and
+its keys. Turning on Fullscreen Layout or pressing `Option+/` leaves the
 strip. Pointer dragging and resizing are ignored on a strip.
 
 `Option+Shift+Space` floats the focused window: it leaves the tiles, keeps its exact frame and
@@ -128,8 +136,11 @@ and a copy Spaceman can't replace offers `Download`.
 
 ## CLI
 
-The installed CLI is `~/.local/bin/spaceman`. Add `~/.local/bin` to `PATH`, or invoke that absolute
-path. Commands that alter layouts require automatic tiling to be enabled.
+Homebrew cask installs link the bundled CLI into `$(brew --prefix)/bin/spaceman` (typically
+`/opt/homebrew/bin/spaceman`, already on `PATH`). Source installs (`scripts/install-app.sh`) link
+`~/.local/bin/spaceman` (add `~/.local/bin` to `PATH` or invoke that absolute path), and direct ZIP
+installs bundle the CLI at `/Applications/Spaceman.app/Contents/MacOS/spaceman`. Commands that
+alter layouts require automatic tiling to be enabled.
 
 ```sh
 spaceman ctl status

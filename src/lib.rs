@@ -32,6 +32,7 @@ pub mod permission_guide;
 pub mod reconcile;
 pub mod runtime;
 mod serde_map;
+pub mod shortcuts;
 pub mod spacing;
 #[allow(unsafe_code)]
 pub mod state_file;
@@ -45,6 +46,7 @@ pub mod swipe;
 mod termination;
 #[cfg(target_os = "macos")]
 mod updater;
+pub use updater::build_version;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod url_handler;

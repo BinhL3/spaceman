@@ -80,6 +80,7 @@ pub(crate) fn blank_fixture() -> Ui {
         spacing_draft: None,
         per_edge: None,
         fixture: true,
+        labs: labs::LabsView::default(),
     };
     reset_fixture(&mut ui, Pane::Rules);
     ui
@@ -96,6 +97,7 @@ pub(crate) fn reset_fixture(ui: &mut Ui, pane: Pane) {
     ui.displays_at = None;
     ui.highlight_lab = None;
     ui.highlight_feature = None;
+    ui.labs = labs::LabsView::default();
     ui.doc = Doc::parse(include_str!("../fixtures/config.toml"));
     ui.look_up_apps();
     ui.agent = Some(UiAgentSnapshot {
@@ -159,6 +161,7 @@ mod tests {
             "Activity/activity",
             "Labs/labs",
             "Labs/labs-on",
+            "Labs/labs-how-it-works",
             "HUD/hud-switch",
             "HUD/hud-empty",
             "HUD/hud-fullscreen",

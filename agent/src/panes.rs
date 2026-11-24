@@ -107,7 +107,7 @@ impl Pane {
             Pane::Workspaces => workspaces::pane(ui, p),
             Pane::Shortcuts => shortcuts::pane(p),
             Pane::Activity => activity::pane(ui, p),
-            Pane::Labs => labs::pane(ui, p),
+            Pane::Labs => labs::pane(ui, p, layer),
         }
     }
 

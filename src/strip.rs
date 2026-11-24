@@ -300,6 +300,15 @@ impl MotionColumn {
     }
 }
 
+/// See [`StripMotion::curtain`].
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Curtain {
+    /// Columns held inside the display at a shared edge for part of the glide.
+    pub tucked: Vec<PhysicalWindowId>,
+    /// Columns that slide across a tucked one and must stay above it.
+    pub over: Vec<PhysicalWindowId>,
+}
+
 /// A strip's camera glide, handed from the worker to the main thread. Closed form: the main
 /// thread samples it at each display frame without asking the worker anything, and the worker
 /// samples the same springs to retarget mid-glide.
@@ -353,6 +362,58 @@ impl StripMotion {
                 (column.window.clone(), (x, self.output.y))
             })
             .collect()
+    }
+
+    /// What the glide must keep stacked: the columns it holds against an edge shared with
+    /// another display, now or once it arrives, and the columns that slide across them.
+    ///
+    /// A column can't cross a shared edge without showing on the other display, so it waits
+    /// inside the display at that edge (see [`column_x`]) while its neighbor slides over or off
+    /// it. With the neighbor on top, an arriving column is uncovered like a curtain drawn back
+    /// and a leaving one is covered before it is parked; on top itself, it would pop over its
+    /// neighbor on the first frame.
+    #[must_use]
+    pub fn curtain(&self, now: Instant) -> Curtain {
+        let (left, right) = (self.output.x, self.output.x + self.output.width);
+        let (camera_now, camera_end) = (self.camera.position(now), self.camera.target());
+        let place = |world_x: f64, width: i32, camera: f64| {
+            let desired = (f64::from(self.output.x) + world_x - camera).round() as i32;
+            let x = column_x(self.output, &self.bounds, world_x, width, camera);
+            let tucked = x != desired && x >= left && x + width <= right;
+            (x, tucked)
+        };
+        let spans: Vec<_> = self
+            .columns
+            .iter()
+            .map(|column| {
+                let (now_x, tucked_now) = place(column.world_x(now), column.width, camera_now);
+                let (end_x, tucked_end) = place(f64::from(column.x), column.width, camera_end);
+                let tucked =
+                    (tucked_now || tucked_end).then_some(if tucked_now { now_x } else { end_x });
+                (
+                    column,
+                    now_x.min(end_x),
+                    now_x.max(end_x) + column.width,
+                    tucked,
+                )
+            })
+            .collect();
+        let mut curtain = Curtain::default();
+        for (column, from, to, tucked) in &spans {
+            if tucked.is_some() {
+                curtain.tucked.push(column.window.clone());
+                continue;
+            }
+            let crosses = spans.iter().any(|(other, _, _, spot)| {
+                spot.is_some_and(|x| {
+                    other.window != column.window && *from < x + other.width && x < *to
+                })
+            });
+            if crosses {
+                curtain.over.push(column.window.clone());
+            }
+        }
+        curtain
     }
 
     /// Whether the camera and every column have arrived.

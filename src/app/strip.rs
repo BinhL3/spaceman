@@ -32,6 +32,20 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         self.config.labs().scrolling_strip && self.workspaces.uses_strip_layout(workspace)
     }
 
+    /// Whether `window` is a column of a strip on a visible display. The strip owns where such
+    /// a window is: in view, peeking, parked past a shared edge, or held at that edge mid-glide.
+    /// None of that is the window's app un-parking it.
+    pub(super) fn is_strip_column(&self, window: &crate::PhysicalWindowId) -> bool {
+        self.workspaces
+            .workspace_of(window)
+            .is_some_and(|workspace| {
+                self.uses_strip(workspace)
+                    && self
+                        .strip_outputs()
+                        .is_some_and(|outputs| self.is_visible(workspace, outputs))
+            })
+    }
+
     /// Bound windows in strip order (the layout's left-to-right slot order).
     pub(super) fn strip_windows(&self, workspace: WorkspaceId) -> Vec<crate::PhysicalWindowId> {
         self.workspaces.engine(workspace).bound_windows()
@@ -415,7 +429,23 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     }
                     _ => failed += 1,
                 },
-                ColumnRest::Parked if !self.parked.contains_key(&window) => to_park.push(window),
+                // Not parked yet, or recorded when a glide took it out of view and still on
+                // screen: a column leaving past a shared edge waits at the edge under its
+                // neighbor until the glide ends, and parks now.
+                ColumnRest::Parked
+                    if !self.parked.contains_key(&window)
+                        || self
+                            .backend
+                            .window_server_frame(&window)
+                            .is_some_and(|frame| {
+                                crate::geometry::shows_on(
+                                    frame,
+                                    &outputs.frames().collect::<Vec<_>>(),
+                                )
+                            }) =>
+                {
+                    to_park.push(window);
+                }
                 ColumnRest::Parked => {}
             }
         }
@@ -619,8 +649,51 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
         let status = self.relayout_strip(workspace, &target, outputs, cancelled)?;
-        self.focus_tile(Some(origin), &target)?;
-        Ok(status)
+        // A column arriving across a shared edge waits at its rest under the neighbor sliding
+        // off it; focusing it now would raise it over that neighbor on the first frame.
+        if self.strip_views.tucked(workspace, &target) {
+            self.focus_strip_column_on_settle(workspace, origin, target);
+            return Ok(status);
+        }
+        self.strip_views.focus_on_settle(workspace, None);
+        match self.focus_tile(Some(origin.clone()), &target) {
+            Ok(()) => Ok(status),
+            // An app busy with the glide's writes can miss a focus; try again once it ends.
+            Err(error) if self.strip_in_motion(workspace) => {
+                log_event!("workspace {workspace}: {error} mid-glide; focusing once it settles");
+                self.focus_strip_column_on_settle(workspace, origin, target);
+                Ok(status)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Makes `target` the focus every later key and focus check sees, and focuses it for real
+    /// once the glide settles.
+    fn focus_strip_column_on_settle(
+        &mut self,
+        workspace: WorkspaceId,
+        origin: crate::PhysicalWindowId,
+        target: crate::PhysicalWindowId,
+    ) {
+        let mut stale = self
+            .pending_focus
+            .take()
+            .map(|pending| pending.stale)
+            .unwrap_or_default();
+        stale.push(Some(origin));
+        // Counted from when the focus lands, so Accessibility's report of the column still
+        // focused meanwhile reads as stale for the whole glide.
+        let at = self
+            .strip_views
+            .settle_deadline(workspace)
+            .unwrap_or_else(Instant::now);
+        self.pending_focus = Some(super::commands::PendingFocus {
+            target: target.clone(),
+            stale,
+            at,
+        });
+        self.strip_views.focus_on_settle(workspace, Some(target));
     }
 
     fn resize_strip_column(

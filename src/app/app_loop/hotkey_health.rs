@@ -57,7 +57,7 @@ impl MainThreadAgent {
         if self.hotkeys.is_none() {
             return;
         }
-        match HotkeyPlan::current(&self.hotkey_workspaces, self.labs) {
+        match HotkeyPlan::current(&self.hotkey_workspaces, &self.shortcuts, &self.labs) {
             Ok(plan) => {
                 log_event!("hotkeys: registering again ({reason})");
                 self.reinstall_hotkeys(plan);
@@ -73,6 +73,9 @@ impl MainThreadAgent {
         match Hotkeys::install(self.actions_sender.clone(), plan) {
             Ok(hotkeys) => {
                 log_event!("hotkeys: registered {} shortcuts", hotkeys.len());
+                for skipped in hotkeys.skipped() {
+                    log_event!("hotkeys: {skipped}");
+                }
                 self.hotkeys = Some(hotkeys);
                 self.last_error = None;
                 self.ui_dirty = true;

@@ -42,11 +42,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return;
         };
         if self.awaiting_display_repark(&window.id)
-            // A strip glide is carrying it out of view; its recovery frame was recorded first.
-            || self
-                .workspaces
-                .workspace_of(&window.id)
-                .is_some_and(|workspace| self.strip_in_motion(workspace))
+            // A visible strip put it where it is (mid-glide, or held at a shared edge until the
+            // glide's settling layout parks it) and keeps it there; focus on it scrolls to it.
+            || self.is_strip_column(&window.id)
             || self
                 .recently_parked
                 .get(&window.id)
@@ -120,7 +118,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 target
             );
         }
-        if repeatedly_unparked {
+        // A strip column is the strip's to place; exempting it would leave it on screen over
+        // its neighbors for the rest of the session.
+        if repeatedly_unparked && !self.is_strip_column(window) {
             // The app insists on managing its saved position. Keep workspace
             // ownership and tiling, but stop trying to hide this physical
             // window across workspace switches for the rest of the session.

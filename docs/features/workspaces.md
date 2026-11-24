@@ -10,7 +10,9 @@ Switch workspace                                           // ws.switch
 ├── Option+1..0 / Option+A..Z / spaceman ctl switch <ws> / a workspace in the menu bar menu
 ├── Incoming parked windows revealed -> laid out -> outgoing windows parked off-screen
 │   └── Reveal not confirmed by the window server in time -> switch rolled back, old workspace stays
-├── Focus -> last-focused tile of the incoming workspace
+├── Focus -> last-focused tile of the incoming workspace, keyboard focus included
+│   (that window raised and made main, then its app brought forward with `AXFrontmost`), unless
+│   one of its windows already has focus (e.g. focus follow): that window keeps it
 └── Already active -> stays, re-focuses its remembered tile (keeps current focus if it is there)
 
 Swipe                                                      // ws.swipe
@@ -42,7 +44,8 @@ Move window without switching                              // ws.move-window
 
 Focus follows                                              // ws.focus-follow
 ├── Focusing a window that lives on a hidden workspace (Dock, Cmd+Tab, notification)
-│   -> that workspace becomes active
+│   -> that workspace becomes active, with focus on that window (not its remembered tile)
+│   └── Switch interrupted by that same activation -> the next cycle follows it again
 ├── Focusing a window on another display's visible workspace -> no switch; Option+Tab remembers it
 └── No focused window reported -> follows the frontmost app only when all its windows, tiled
     or floating, are on one workspace
@@ -128,6 +131,10 @@ on the same letter.
   layout, hide), `switch_keeps_outgoing_visible_when_incoming_reveal_never_arrives`
   (`reliability.rs`, rollback), `moving_to_an_inactive_workspace_does_not_switch`,
   `focusing_a_parked_window_activates_its_workspace`,
+  `following_focus_to_a_hidden_workspace_keeps_the_window_that_took_it`,
+  `a_follow_cancelled_by_the_activation_it_answers_follows_on_the_next_cycle` and
+  `a_follow_that_fails_while_an_activation_cancels_stays_suppressed` (`focus.rs`, notification
+  clicks),
   `workspace_back_and_forth_bounces_between_the_last_two_focused_workspaces`,
   `workspace_back_and_forth_on_one_display_switches_like_before`,
   `switching_to_an_unconfigured_named_workspace_is_rejected`.
@@ -135,7 +142,12 @@ on the same letter.
   another display, on screen (tiled, floating, focus history) or hidden (parked on its own display
   even when a write off the other display's edge is refused, shown on the target display later,
   left where it was when it cannot be parked). Unit, `src/macos/apply.rs`: a refused size write
-  before a move no longer stops the move.
+  before a move no longer stops the move; focusing raises the window before bringing its app
+  forward, and either `AXFrontmost` or AppKit activation brings the app forward (issue 92).
+- Unit (FakeBackend), `src/app/tests/focus.rs`:
+  `a_workspace_switch_that_cannot_focus_keeps_the_focus_restore_pending`,
+  `a_workspace_switch_that_focuses_settles_the_focus_restore`. Whether keys really land in the
+  incoming app on macOS 14 and later is not covered by a test.
 - Unit (FakeBackend), `src/app/tests/move_workspace.rs`:
   `move_workspace_to_occupied_display_promotes_source_previous_and_parks_displaced`,
   `option_tab_after_moving_the_focused_workspace_never_reveals_the_displaced_one` (issue 76),
@@ -220,6 +232,10 @@ on the same letter.
 - Focus-follow switches workspaces as a side effect of any app activation, including ones the user
   did not intend (an app raising itself). Each `focus follow` line in `agent.log` records recent
   input timing and whether Command was held, so Command-Tab can be told apart from self-activation.
+- Since macOS 14, AppKit activation from a background app is cooperative and ignored, so a switch
+  that only called it showed the incoming window while keys stayed in the app focus left (issue
+  92). Spaceman sets `AXFrontmost` on the incoming app instead. When focusing still fails,
+  `agent.log` gets `switch focus failed: workspace <ws> window <id>` (never a title).
 - Panels and non-standard windows are never parked, so they show on every workspace; an empty
   workspace exposes whatever unmanaged windows sit behind managed ones.
 - macOS can stop delivering Carbon hotkeys to a running agent (seen twice on Nov 9, 2026, cause

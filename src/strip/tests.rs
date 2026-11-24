@@ -303,3 +303,61 @@ fn state_serializes_only_what_differs_from_the_default() {
         state
     );
 }
+
+fn ids(windows: &[PhysicalWindowId]) -> Vec<u32> {
+    windows.iter().map(|window| window.window_id).collect()
+}
+
+/// Two monitors side by side, as on a desk with a second display to the right: the column
+/// arriving across the seam waits at its rest under its neighbor, which slides off it like a
+/// curtain; the column leaving waits at the seam while its neighbor slides over it.
+#[test]
+fn a_column_crossing_a_shared_edge_stays_under_the_neighbor_sliding_across_it() {
+    let start = Instant::now();
+    let arriving = glide(0.0, 600.0, start, seam_right()).curtain(start);
+    assert_eq!(ids(&arriving.tucked), [3, 4]);
+    assert_eq!(
+        ids(&arriving.over),
+        [2],
+        "the first column never reaches the seam"
+    );
+
+    let leaving = glide(600.0, 0.0, start, seam_right()).curtain(start);
+    assert_eq!(ids(&leaving.tucked), [3, 4]);
+    assert_eq!(ids(&leaving.over), [2]);
+}
+
+#[test]
+fn free_edges_tuck_nothing() {
+    let start = Instant::now();
+    for (from, to) in [(0.0, 600.0), (600.0, 0.0)] {
+        assert_eq!(
+            glide(from, to, start, free()).curtain(start),
+            Curtain::default()
+        );
+    }
+}
+
+/// Past a free edge an arriving column starts at its sliver and moves on every frame of the
+/// way in, never jumping ahead to its rest.
+#[test]
+fn a_column_arriving_past_a_free_edge_slides_in_from_its_sliver() {
+    let start = Instant::now();
+    let motion = glide(0.0, 600.0, start, free());
+    assert_eq!(x_of(&motion.positions(start), 3), AREA.width - PEEK_PX);
+    let mut last = AREA.width - PEEK_PX;
+    let mut moving_frames = 0;
+    for frame in 1..=60 {
+        let x = x_of(
+            &motion.positions(start + Duration::from_micros(8_333 * frame)),
+            3,
+        );
+        assert!(x <= last + 1, "frame {frame}: {x} after {last}");
+        if x < last {
+            moving_frames += 1;
+        }
+        last = x;
+    }
+    assert_eq!(last, 600);
+    assert!(moving_frames > 20, "moved on {moving_frames} frames");
+}

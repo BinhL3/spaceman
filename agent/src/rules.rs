@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use spaceman::{
     WorkspaceId,
     config::{HudStyle, UpdateChannel},
-    labs::LabFeature,
+    labs::{LabFeature, LabShortcut},
 };
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
@@ -207,6 +207,26 @@ impl Doc {
     /// Switches a Labs feature; off removes its key, and `[labs]` once it is empty.
     pub fn set_lab(&mut self, feature: LabFeature, enabled: bool) {
         self.set_key("labs", feature.id(), enabled.then(|| value(true)));
+    }
+
+    /// A Labs feature's shortcut from `[labs]`, or its default when unset or unreadable.
+    pub fn lab_shortcut(&self, feature: LabFeature) -> LabShortcut {
+        self.doc
+            .get("labs")
+            .and_then(Item::as_table_like)
+            .and_then(|table| table.get(feature.shortcut_id()))
+            .and_then(Item::as_str)
+            .and_then(|source| spaceman::shortcuts::parse_chord(source).ok())
+            .map_or_else(LabShortcut::default, LabShortcut)
+    }
+
+    /// Sets a Labs feature's shortcut; the default removes its key.
+    pub fn set_lab_shortcut(&mut self, feature: LabFeature, shortcut: LabShortcut) {
+        self.set_key(
+            "labs",
+            feature.shortcut_id(),
+            (!shortcut.is_default()).then(|| value(shortcut.0.config_name())),
+        );
     }
 
     /// Sets `key` in `[settings]`, or removes it (and an emptied table) for `None`, the default.

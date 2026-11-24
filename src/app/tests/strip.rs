@@ -656,3 +656,172 @@ fn switching_workspaces_halts_a_running_glide() {
     assert!(!runtime.strip_in_motion(WorkspaceId::ONE));
     assert_strip(&runtime, &windows, &[At::Parked; 4]);
 }
+
+/// Plays the main thread's part: every window of the queued glide lands where it ends.
+fn present(runtime: &mut WorkspaceRuntime<FakeBackend>) -> crate::strip::StripMotion {
+    let motion = glides(runtime).pop().expect("a glide");
+    for (window, (x, y)) in motion.final_positions() {
+        let frame = runtime.backend.frames.get_mut(&window).unwrap();
+        frame.x = x;
+        frame.y = y;
+    }
+    motion
+}
+
+fn settle(runtime: &mut WorkspaceRuntime<FakeBackend>) {
+    let deadline = runtime
+        .strip_views
+        .next_deadline()
+        .expect("a glide to settle");
+    runtime.settle_strip_glides(deadline);
+}
+
+fn focus_calls(runtime: &WorkspaceRuntime<FakeBackend>) -> Vec<crate::PhysicalWindowId> {
+    runtime
+        .backend
+        .calls
+        .iter()
+        .filter_map(|call| match call {
+            BackendCall::Focus(window) => Some(window.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Seen live on a desk with a second display to the right, every window one app's (Brave):
+/// gliding back to the first column, the third waited at the seam under the second, the glide
+/// settled with it still on screen, and heal took it for the app un-parking itself. The second
+/// time it exempted the window from parking, leaving it over the right half of the display for
+/// good. The settling layout parks it now, and heal leaves strip columns to the strip.
+#[test]
+fn gliding_across_a_shared_edge_and_back_never_exempts_a_column_from_parking() {
+    let (mut runtime, windows) = four_windows(LAB_ON);
+    runtime.backend.animate_strip = true;
+    press(&mut runtime, WorkerAction::ToggleStrip).unwrap();
+    press(&mut runtime, WorkerAction::Focus(Direction::Right)).unwrap();
+    let start = [
+        At::Shown(column(0, 500)),
+        At::Shown(column(500, 500)),
+        At::Parked,
+        At::Parked,
+    ];
+    let scrolled = [
+        peek_left(500),
+        At::Shown(column(0, 500)),
+        At::Shown(column(500, 500)),
+        At::Parked,
+    ];
+    for round in 0..3 {
+        // ⌥L: the third column comes in across the seam (camera 0 -> 500).
+        press(&mut runtime, WorkerAction::Focus(Direction::Right)).unwrap();
+        let motion = present(&mut runtime);
+        assert_eq!(motion.camera.target(), 500.0, "round {round}");
+        settle(&mut runtime);
+        assert_strip(&runtime, &windows, &scrolled);
+        assert_eq!(runtime.backend.focused, Some(windows[2].clone()));
+
+        // ⌥H twice: back to the first column, the third leaving across the seam (500 -> 0).
+        press(&mut runtime, WorkerAction::Focus(Direction::Left)).unwrap();
+        press(&mut runtime, WorkerAction::Focus(Direction::Left)).unwrap();
+        let motion = present(&mut runtime);
+        assert_eq!(motion.camera.target(), 0.0, "round {round}");
+        assert_eq!(
+            runtime.backend.frames[&windows[2]].x, 500,
+            "held at the seam until the glide ends"
+        );
+        settle(&mut runtime);
+        assert_strip(&runtime, &windows, &start);
+
+        // Long after, with the app frontmost: nothing un-parks or exempts it.
+        for _ in 0..3 {
+            runtime.recently_parked.clear();
+            runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+        }
+        assert!(runtime.parking_exempt.is_empty(), "round {round}");
+        assert!(runtime.recent_heals.is_empty(), "round {round}");
+        assert_strip(&runtime, &windows, &start);
+        press(&mut runtime, WorkerAction::Focus(Direction::Right)).unwrap();
+    }
+}
+
+/// The column arriving across the seam waits at its rest under the one sliding off it: the
+/// glide raises that neighbor over it when the window server stacks it in front, and focuses
+/// the arriving column only once the glide settles, so it never pops over its neighbor.
+#[test]
+fn a_column_arriving_across_a_shared_edge_is_uncovered_then_focused() {
+    let (mut runtime, windows) = four_windows(LAB_ON);
+    runtime.backend.animate_strip = true;
+    press(&mut runtime, WorkerAction::ToggleStrip).unwrap();
+    press(&mut runtime, WorkerAction::Focus(Direction::Right)).unwrap();
+    runtime.backend.stacking = Some(
+        [2, 1, 0, 3]
+            .map(|index: usize| windows[index].window_id)
+            .to_vec(),
+    );
+    runtime.backend.calls.clear();
+
+    press(&mut runtime, WorkerAction::Focus(Direction::Right)).unwrap();
+
+    assert!(
+        runtime
+            .backend
+            .calls
+            .contains(&BackendCall::Raise(windows[1].clone())),
+        "{:?}",
+        runtime.backend.calls
+    );
+    assert!(focus_calls(&runtime).is_empty(), "not focused mid-glide");
+    assert!(runtime.strip_views.tucked(WorkspaceId::ONE, &windows[2]));
+    // Every later key and focus check already sees the arriving column as focused.
+    assert_eq!(runtime.current_focus(), Some(windows[2].clone()));
+    runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+    assert!(runtime.strip_in_motion(WorkspaceId::ONE));
+
+    present(&mut runtime);
+    settle(&mut runtime);
+    assert_eq!(focus_calls(&runtime), [windows[2].clone()]);
+    assert_eq!(runtime.backend.focused, Some(windows[2].clone()));
+}
+
+/// A tap faster than the glide steps on from the column it deferred, not the one Accessibility
+/// still reports, and a focus the app refuses mid-glide is retried when the glide settles
+/// instead of failing the key.
+#[test]
+fn rapid_taps_step_from_a_deferred_focus_and_retry_a_refused_one() {
+    let (mut runtime, windows) = four_windows(LAB_ON);
+    runtime.backend.animate_strip = true;
+    press(&mut runtime, WorkerAction::ToggleStrip).unwrap();
+    press(&mut runtime, WorkerAction::Focus(Direction::Right)).unwrap();
+    press(&mut runtime, WorkerAction::Focus(Direction::Right)).unwrap();
+    press(&mut runtime, WorkerAction::Focus(Direction::Right)).unwrap();
+    assert_eq!(runtime.current_focus(), Some(windows[3].clone()));
+
+    // ⌥H back onto a column the glide doesn't tuck, while the app refuses focus.
+    runtime.backend.focus_outcome = Some(false);
+    press(&mut runtime, WorkerAction::Focus(Direction::Left)).unwrap();
+    runtime.backend.focus_outcome = None;
+    present(&mut runtime);
+    settle(&mut runtime);
+    assert_eq!(runtime.backend.focused, Some(windows[2].clone()));
+}
+
+/// A click elsewhere while a deferred focus waits for the glide wins: the glide doesn't take
+/// focus back when it settles.
+#[test]
+fn a_deferred_focus_yields_to_focus_moved_elsewhere_mid_glide() {
+    let (mut runtime, windows) = four_windows(LAB_ON);
+    runtime.backend.animate_strip = true;
+    press(&mut runtime, WorkerAction::ToggleStrip).unwrap();
+    press(&mut runtime, WorkerAction::Focus(Direction::Right)).unwrap();
+    press(&mut runtime, WorkerAction::Focus(Direction::Right)).unwrap();
+    assert!(runtime.strip_views.tucked(WorkspaceId::ONE, &windows[2]));
+    let elsewhere = window(99);
+    runtime.backend.focused = Some(elsewhere.clone());
+    runtime.backend.calls.clear();
+
+    present(&mut runtime);
+    settle(&mut runtime);
+
+    assert!(focus_calls(&runtime).is_empty());
+    assert_eq!(runtime.backend.focused, Some(elsewhere));
+}

@@ -25,7 +25,8 @@ The complete example is [config.example.toml](../config.example.toml).
 ## Current Schema
 
 The parser rejects unknown fields. The root must contain `version = 1` and may contain an optional
-`[settings]` table, an optional `[labs]` table, and repeated `[[rules]]` and `[[workspaces]]` tables.
+`[settings]` table, an optional `[labs]` table, an optional `[shortcuts]` table (see
+[Shortcuts](#shortcuts)), plus repeated `[[rules]]` and `[[workspaces]]` tables.
 
 ```toml
 version = 1
@@ -44,7 +45,8 @@ left = 0
 right = 0
 
 [labs]                                # optional; experimental features, each off by default
-scrolling_strip = false               # Scrolling Strip layout, toggled per workspace with Option+Shift+S
+scrolling_strip = false               # Scrolling Strip layout, toggled per workspace with its shortcut
+scrolling_strip_shortcut = "alt+shift+s" # optional; the strip's toggle, in [shortcuts] chord syntax
 
 [[rules]]
 bundle_id = "com.example.Application" # optional exact match
@@ -87,7 +89,11 @@ in the session may return to a remembered workspace; see
 memory.
 
 `[labs]` holds one switch per experimental feature; Settings › Labs writes it, and an all-off
-table is left out of the file. With every switch off Spaceman behaves exactly as without Labs. See
+table is left out of the file. `scrolling_strip_shortcut` picks the strip's toggle (Settings › Labs
+records it; the default `alt+shift+s` is left out of the file). It uses the [Shortcuts](#shortcuts)
+chord syntax, registers only while `scrolling_strip` is on, and claims its chord ahead of the
+built-in shortcuts; a `[shortcuts]` binding on the same chord still wins. The default gives way to a
+named workspace S's move shortcut. With every switch off Spaceman behaves exactly as without Labs. See
 [Scrolling Strip](features/scrolling-strip.md).
 
 Title matching occurs only in memory. Titles are not serialized into persisted state, snapshots,
@@ -117,6 +123,68 @@ spaceman config set gaps.top 32
 spaceman config set single_window_max_width 1680
 spaceman config get gaps.inner
 ```
+
+## Shortcuts
+
+`[shortcuts]` rebinds Spaceman's global shortcuts. Each entry in `[shortcuts.bindings]` maps a chord
+to a command in `spaceman ctl` syntax:
+
+```toml
+[shortcuts]
+defaults = true                       # optional (default: true); false registers only these bindings
+
+[shortcuts.bindings]
+"alt+left" = "move-direction left"     # replaces macOS's Option+arrow word jump everywhere
+"alt+shift+ctrl+left" = "focus left"
+"alt+v" = "float"
+"alt+j" = "layout"                    # replaces the built-in Option+J (focus down)
+"alt+shift+b" = "balance"
+"alt+h" = "none"                      # unbinds the built-in Option+H
+```
+
+A chord is one or more modifiers and one key, joined by `+`, in any order and case:
+
+- modifiers: `alt` (also `opt`, `option`), `cmd` (`command`), `ctrl` (`control`), and `shift`.
+  Every chord needs `alt`, `cmd`, or `ctrl`.
+- keys: a single character such as `j`, `/`, `-`, `=`, or `` ` `` (found on whatever key types it in
+  the active keyboard layout, like the built-in shortcuts); `1` through `9` and `0` (the physical
+  number row, so `0` is workspace 10); `left`, `right`, `up`, `down`, `return` (`enter`), `tab`,
+  `space`, `escape` (`esc`), `backspace` (`delete`), `forwarddelete`, `home`, `end`, `pageup`,
+  `pagedown`, and `f1` through `f12`. `alt++` is the `+` key.
+
+Commands:
+
+| Command | Action |
+| --- | --- |
+| `switch WORKSPACE` | Switch to workspace 1 through 10 or an enabled named workspace A through Z |
+| `move WORKSPACE` | Move the focused window there without switching |
+| `back-and-forth` | Return to the previous workspace |
+| `move-workspace [next\|prev\|DISPLAY]` | Move the focused workspace to another display |
+| `focus left\|down\|up\|right` | Focus the nearest tile in that direction |
+| `focus next` | Focus the next tiled window in the workspace |
+| `move-direction left\|down\|up\|right` | Move the focused tile in that direction |
+| `layout` | Toggle the active layout's root split axis |
+| `fullscreen` | Toggle Fullscreen Layout |
+| `float` | Float the focused window, or tile it again |
+| `resize shrink\|grow` | Shrink or grow the focused tile |
+| `balance` | Reset the active workspace's split weights |
+| `retile` | Retile now |
+| `none` | Unbind the chord: no built-in shortcut claims it |
+
+A global shortcut fires in every app, so a chord that types something takes that key everywhere:
+`alt+left` replaces macOS's Option+arrow word jump in text fields. Prefer `ctrl` or `alt+shift` for
+rebinds that must not disturb typing.
+
+Bindings claim their chords before the built-in shortcuts, so a binding on a built-in chord replaces
+it and the other built-ins stay. With `defaults = false` only the listed bindings register, and the
+table must bind at least one command (tiling needs at least one shortcut to start). Two spellings of
+the same chord, an unknown modifier, key, or command, or a chord without `alt`, `cmd`, or `ctrl` is a
+config error. A binding whose workspace is not enabled, or that the keyboard layout cannot type, is
+skipped and logged in `agent.log` while the other shortcuts register.
+
+Shortcut changes take effect the next time Spaceman starts (`spaceman ctl restart`); rules, displays,
+and the HUD still reload live. Settings › Shortcuts lists the built-in shortcuts, and the menu-bar
+workspace list keeps showing the built-in `Option`+number/letter hints next to each workspace.
 
 ## Remembered Placements
 
@@ -186,7 +254,7 @@ normal recovery data.
 
 Edits saved in Spaceman Settings or in an external editor take effect automatically: rule changes,
 workspace display assignments, `settings.hud`, `settings.hud_style`, `settings.gaps`,
-`settings.single_window_max_width`, and `[labs]` (including the `Option+Shift+S` shortcut) reload
+`settings.single_window_max_width`, and `[labs]` (including the Scrolling Strip's shortcut) reload
 without restarting (Settings › Layout retiles at once; an external edit applies on the next retile);
 `settings.update_channel` applies at the next update check. Global shortcuts for a
 newly added named workspace letter (`Option+A` ... `Option+Z`) register on the next app start:
