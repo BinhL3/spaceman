@@ -20,6 +20,10 @@ pub struct LabsConfig {
     /// syntax (`"alt+shift+s"`).
     #[serde(default, skip_serializing_if = "LabShortcut::is_default")]
     pub scrolling_strip_shortcut: LabShortcut,
+    /// The i3/sway-style Scratchpad ([`crate::scratchpad`]) and its `⌥\` / `⌥⇧\` shortcuts.
+    /// Set in `config.toml` only for now: it has no card in Settings › Labs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scratchpad: bool,
 }
 
 /// A Labs feature's own shortcut: a chord written as a `[shortcuts]` key.

@@ -31,6 +31,7 @@ pub mod observation;
 pub mod permission_guide;
 pub mod reconcile;
 pub mod runtime;
+pub mod scratchpad;
 mod serde_map;
 pub mod shortcuts;
 pub mod spacing;

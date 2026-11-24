@@ -55,6 +55,7 @@ mod minimums;
 mod move_workspace;
 mod parking;
 mod runtime;
+mod scratchpad;
 mod state_writer;
 mod strip;
 mod switching;
@@ -232,6 +233,8 @@ pub(crate) enum WorkerAction {
     ToggleStrip,
     /// Kit noticed something wrong: mark the journal and snapshot it.
     MarkWrong,
+    /// The Scratchpad Lab: summon or hide, or send a window to or from it.
+    Scratchpad(crate::scratchpad::ScratchpadCommand),
 }
 
 impl WorkerAction {
@@ -254,6 +257,7 @@ impl WorkerAction {
             Self::ToggleFloat => "float toggle queued".into(),
             Self::ToggleStrip => "scrolling strip toggle queued".into(),
             Self::MarkWrong => "marking the journal".into(),
+            Self::Scratchpad(command) => format!("scratchpad {} queued", command.as_str()),
         }
     }
 }
