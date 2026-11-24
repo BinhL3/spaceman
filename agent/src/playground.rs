@@ -76,6 +76,8 @@ pub(crate) fn blank_fixture() -> Ui {
         highlight_lab: None,
         highlight_feature: None,
         error: None,
+        spacing_draft: None,
+        per_edge: None,
         fixture: true,
     };
     reset_fixture(&mut ui, Pane::Rules);
@@ -87,6 +89,8 @@ pub(crate) fn reset_fixture(ui: &mut Ui, pane: Pane) {
     ui.pane = pane;
     ui.tour = None;
     ui.hud_preview = None;
+    ui.spacing_draft = None;
+    ui.per_edge = None;
     ui.displays = panes::workspaces::fixture_pair();
     ui.displays_at = None;
     ui.highlight_lab = None;
@@ -141,6 +145,8 @@ mod tests {
             "Onboarding/onboarding-done",
             "General/general",
             "General/general-setup",
+            "Layout/layout",
+            "Layout/layout-spaced",
             "Rules/rules",
             "Rules/rules-drag",
             "Rules/rules-add",
@@ -169,6 +175,6 @@ mod tests {
             let digit = char::from_digit((index + 1) as u32, 10).unwrap();
             assert_eq!(Pane::from_shortcut(digit), Some(expected));
         }
-        assert_eq!(Pane::from_shortcut('6'), None);
+        assert_eq!(Pane::from_shortcut('7'), None);
     }
 }

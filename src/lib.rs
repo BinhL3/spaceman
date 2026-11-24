@@ -31,6 +31,7 @@ pub mod permission_guide;
 pub mod reconcile;
 pub mod runtime;
 mod serde_map;
+pub mod spacing;
 #[allow(unsafe_code)]
 pub mod state_file;
 #[cfg(target_os = "macos")]

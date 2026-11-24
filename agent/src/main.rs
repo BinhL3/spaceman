@@ -68,6 +68,11 @@ pub struct Ui {
     pub highlight_feature: Option<String>,
     /// The last save that failed.
     pub error: Option<String>,
+    /// Settings › Layout while a slider is held: the preview follows it, the file waits for
+    /// the release.
+    pub(crate) spacing_draft: Option<spaceman::spacing::Spacing>,
+    /// Whether the four edge sliders show, once someone opened or closed them.
+    pub(crate) per_edge: Option<bool>,
     /// Scenes render fixed data and ignore the live agent and file.
     pub(crate) fixture: bool,
 }
@@ -102,6 +107,8 @@ impl Ui {
             highlight_lab: None,
             highlight_feature: None,
             error: None,
+            spacing_draft: None,
+            per_edge: None,
             fixture: false,
         };
         ui.look_up_apps();
@@ -245,6 +252,19 @@ impl Ui {
                 }
             }
             self.send_action(UiAction::SetHud(enabled));
+        }
+    }
+
+    /// Saves gaps, edge padding and the single-window width, then retiles so every display
+    /// takes them at once.
+    pub fn set_spacing(&mut self, spacing: spaceman::spacing::Spacing) {
+        self.spacing_draft = None;
+        if self.doc.spacing() == spacing {
+            return;
+        }
+        self.edit(|doc| doc.set_spacing(spacing));
+        if self.error.is_none() {
+            self.send_action(UiAction::Retile);
         }
     }
 
