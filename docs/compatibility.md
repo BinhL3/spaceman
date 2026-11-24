@@ -25,14 +25,20 @@ the list's `+` button instead.
 
 Spaceman observes Accessibility elements with role `AXWindow` and subrole `AXStandardWindow` that are
 on screen, not minimized, not in native fullscreen, centered on an attached display, and expose a
-settable position. Standard windows with an enabled fullscreen button (or borderless regular-app
-windows without close/fullscreen buttons, such as Ghostty with `window-decoration = false`) and a
-settable size can tile, including standard windows at floating window level (`kCGWindowLayer = 3`,
-such as a popped-out Slack Huddle). Modal windows, standard windows whose fullscreen button is
-disabled or absent while a close button is present (such as file Open/Save panels, settings windows,
-and splash screens), movable non-resizable windows, and windows matched by a `float` rule retain their
-frame but park and reveal with their logical workspace. Buttonless accessory-application windows,
-utility panels, dialogs with other subroles, and applications with incomplete or unusual Accessibility
+settable position. Standard windows with a fullscreen button (or borderless regular-app windows
+without close/fullscreen buttons, such as Ghostty with `window-decoration = false`) and a settable
+size can tile, including standard windows at floating window level (`kCGWindowLayer = 3`, such as a
+popped-out Slack Huddle). A regular application's fullscreen button may be disabled (as while a
+window shows a sheet), and a window without one tiles when its zoom button is enabled: SwiftUI and
+scene-based windows such as FaceTime, Phone, News, Podcasts, Games, Shortcuts, System Settings and
+Finder's Get Info expose no fullscreen button. Windows that keep their own aspect ratio (FaceTime)
+fill their tile along one side and leave the rest of it empty. Modal windows, standard windows with
+a close button but neither a fullscreen button nor an enabled zoom button (such as settings windows
+and splash screens), accessory-application windows whose fullscreen button is disabled or absent,
+movable non-resizable windows, and windows matched by a `float` rule retain their frame but park and
+reveal with their logical workspace. A `tile` rule tiles any of them, though a window that cannot
+resize keeps its own size inside its tile. Buttonless accessory-application windows, utility panels,
+dialogs with other subroles, and applications with incomplete or unusual Accessibility
 implementations may remain global or be ignored.
 
 Some applications reposition their own windows. If a parked window reappears on screen while its

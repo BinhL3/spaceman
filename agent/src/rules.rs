@@ -19,6 +19,8 @@ const EMPTY: &str = "# Spaceman configuration.\nversion = 1\n";
 pub enum Place {
     Workspace(WorkspaceId),
     Float,
+    /// Tiled even when the window looks like a dialog.
+    Tile,
     /// Never tiled, moved or parked.
     Ignore,
 }
@@ -337,7 +339,7 @@ impl Doc {
             .into_iter()
             .filter_map(|rule| match rule.place {
                 Place::Workspace(workspace) => Some(workspace),
-                Place::Float | Place::Ignore => None,
+                Place::Float | Place::Tile | Place::Ignore => None,
             })
             .chain(WorkspaceId::all().filter(|workspace| self.monitor(*workspace).is_some()))
             .collect();
@@ -537,6 +539,7 @@ impl Doc {
 fn read_rule(index: usize, table: &dyn TableLike) -> Option<Rule> {
     let place = match table.get("action").and_then(Item::as_str)? {
         "float" => Place::Float,
+        "tile" => Place::Tile,
         "ignore" => Place::Ignore,
         "route" => Place::Workspace(workspace(table.get("workspace")?)?),
         _ => return None,
@@ -609,11 +612,11 @@ fn set_place(table: &mut dyn TableLike, place: Place) {
             table.insert("action", value("route"));
             table.insert("workspace", workspace_value(workspace));
         }
-        Place::Float | Place::Ignore => {
-            let action = if place == Place::Float {
-                "float"
-            } else {
-                "ignore"
+        Place::Float | Place::Tile | Place::Ignore => {
+            let action = match place {
+                Place::Float => "float",
+                Place::Tile => "tile",
+                _ => "ignore",
             };
             table.insert("action", value(action));
             table.remove("workspace");
