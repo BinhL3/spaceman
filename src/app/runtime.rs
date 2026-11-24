@@ -225,17 +225,17 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         outputs: macos::DisplayOutputs,
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
-        // A switch keeps a focus command still in flight: pressing the active
-        // workspace's shortcut again steps from the window the last press
-        // focused, which Accessibility may not report yet. Every other action
-        // here starts from whatever focus is reported now.
+        // Focus, switch, and workspace-move actions keep an in-flight focus
+        // command so they resolve against the just-focused window even when
+        // Accessibility has not caught up yet; other workspace/window actions
+        // start from whatever focus is reported now.
         if matches!(
             action,
             WorkerAction::SelectWorkspace(_)
                 | WorkerAction::WorkspaceBackAndForth
-                | WorkerAction::MoveWorkspaceToDisplay(_)
                 | WorkerAction::Swipe(..)
                 | WorkerAction::MoveFocused(_)
+                | WorkerAction::MoveFocusedFollow(_)
                 | WorkerAction::MoveApp(..)
         ) {
             self.pending_focus = None;
@@ -246,8 +246,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 | WorkerAction::WorkspaceBackAndForth
                 | WorkerAction::MoveWorkspaceToDisplay(_)
                 | WorkerAction::CycleFocus
+                | WorkerAction::CycleFocusPrevious
                 | WorkerAction::Focus(_)
                 | WorkerAction::MoveFocused(_)
+                | WorkerAction::MoveFocusedFollow(_)
         ) {
             super::commands::WarpContext::Explicit
         } else {
@@ -283,10 +285,14 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             }
             WorkerAction::Swipe(swipe, point) => rt.swipe(swipe, point, outputs, cancelled),
             WorkerAction::MoveFocused(workspace) => rt.move_focused(workspace, outputs, cancelled),
+            WorkerAction::MoveFocusedFollow(workspace) => {
+                rt.move_focused_follow(workspace, outputs, cancelled)
+            }
             WorkerAction::MoveApp(bundle_id, workspace) => {
                 rt.move_app(&bundle_id, workspace, outputs, cancelled)
             }
             WorkerAction::CycleFocus => rt.cycle_focus(outputs, cancelled),
+            WorkerAction::CycleFocusPrevious => rt.cycle_focus_previous(outputs, cancelled),
             WorkerAction::Focus(direction) => rt.focus_relative(direction, outputs, cancelled),
             WorkerAction::Reorder(direction) => rt.reorder_focused(direction, outputs, cancelled),
             WorkerAction::ToggleLayout => rt.toggle_layout(outputs, cancelled),

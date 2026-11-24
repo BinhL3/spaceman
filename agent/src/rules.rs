@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use spaceman::{
     WorkspaceId,
-    config::{HudStyle, MouseFollowsFocus, UpdateChannel},
+    config::{HudPosition, HudStyle, MouseFollowsFocus, UpdateChannel},
 };
 use toml_edit::{
     Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, TableLike, Value, value,
@@ -239,6 +239,25 @@ impl Doc {
         );
     }
 
+    /// Where the Workspace HUD capsule sits, from `settings.hud_position` (defaults to the
+    /// bottom of each display).
+    pub fn hud_position(&self) -> HudPosition {
+        self.doc
+            .get("settings")
+            .and_then(Item::as_table_like)
+            .and_then(|table| table.get("hud_position"))
+            .and_then(Item::as_str)
+            .and_then(HudPosition::parse)
+            .unwrap_or_default()
+    }
+
+    pub fn set_hud_position(&mut self, position: HudPosition) {
+        self.set_setting(
+            "hud_position",
+            (position != HudPosition::default()).then(|| value(position.as_str())),
+        );
+    }
+
     /// The release channel the updater follows, from `settings.update_channel` (defaults to
     /// stable).
     pub fn update_channel(&self) -> UpdateChannel {
@@ -288,7 +307,7 @@ impl Doc {
                     false
                 };
             if empty {
-                self.doc.remove("settings");
+                self.remove_table("settings");
             }
             return;
         };
@@ -300,7 +319,7 @@ impl Doc {
             *entry = Item::Table(Table::new());
         }
         if let Some(table) = entry.as_table_mut() {
-            table.insert(key, item);
+            set_table_item(table, key, item);
         }
     }
 
@@ -368,31 +387,36 @@ impl Doc {
                     .and_then(|table| table_workspace(table))
                     == Some(workspace)
             });
-            match (found, monitor) {
+            let remove_index = match (found, monitor) {
                 (Some(index), Some(monitor)) => {
                     if let Some(table) = entries.get_mut(index).and_then(Value::as_inline_table_mut)
                     {
                         table.insert("monitor", Value::from(monitor));
                     }
+                    None
                 }
                 (Some(index), None) if keep_named => {
                     if let Some(table) = entries.get_mut(index).and_then(Value::as_inline_table_mut)
                     {
                         table.insert("monitor", Value::from("main"));
                     }
+                    None
                 }
-                (Some(index), None) => {
-                    entries.remove(index);
-                }
+                (Some(index), None) => Some(index),
                 (None, Some(monitor)) => {
                     let mut table = InlineTable::new();
                     TableLike::insert(&mut table, "workspace", workspace_value(workspace));
                     table.insert("monitor", Value::from(monitor));
                     push_inline_table(entries, table);
+                    None
                 }
-                (None, None) => {}
-            }
-            if entries.is_empty() {
+                (None, None) => None,
+            };
+            if let Some(index) = remove_index {
+                self.remove_entry("workspaces", index);
+            } else if let Some(Item::Value(Value::Array(entries))) = self.doc.get("workspaces")
+                && entries.is_empty()
+            {
                 self.doc.remove("workspaces");
             }
             return;
@@ -420,29 +444,34 @@ impl Doc {
         let found = tables
             .iter()
             .position(|table| table_workspace(table) == Some(workspace));
-        match (found, monitor) {
+        let remove_index = match (found, monitor) {
             (Some(index), Some(monitor)) => {
                 if let Some(table) = tables.get_mut(index) {
-                    table.insert("monitor", value(monitor));
+                    set_table_item(table, "monitor", value(monitor));
                 }
+                None
             }
             (Some(index), None) if keep_named => {
                 if let Some(table) = tables.get_mut(index) {
-                    table.insert("monitor", value("main"));
+                    set_table_item(table, "monitor", value("main"));
                 }
+                None
             }
-            (Some(index), None) => {
-                tables.remove(index);
-            }
+            (Some(index), None) => Some(index),
             (None, Some(monitor)) => {
                 let mut table = Table::new();
                 table.insert("workspace", workspace_value(workspace));
                 table.insert("monitor", value(monitor));
                 tables.push(table);
+                None
             }
-            (None, None) => {}
-        }
-        if tables.is_empty() {
+            (None, None) => None,
+        };
+        if let Some(index) = remove_index {
+            self.remove_entry("workspaces", index);
+        } else if let Some(Item::ArrayOfTables(tables)) = self.doc.get("workspaces")
+            && tables.is_empty()
+        {
             self.doc.remove("workspaces");
         }
     }
@@ -609,8 +638,8 @@ fn workspace_value(workspace: WorkspaceId) -> Item {
 fn set_place(table: &mut dyn TableLike, place: Place) {
     match place {
         Place::Workspace(workspace) => {
-            table.insert("action", value("route"));
-            table.insert("workspace", workspace_value(workspace));
+            set_table_item(table, "action", value("route"));
+            set_table_item(table, "workspace", workspace_value(workspace));
         }
         Place::Float | Place::Tile | Place::Ignore => {
             let action = match place {
@@ -618,7 +647,7 @@ fn set_place(table: &mut dyn TableLike, place: Place) {
                 Place::Tile => "tile",
                 _ => "ignore",
             };
-            table.insert("action", value(action));
+            set_table_item(table, "action", value(action));
             table.remove("workspace");
         }
     }
@@ -629,3 +658,16 @@ mod shortcuts;
 mod spacing;
 #[cfg(test)]
 mod tests;
+
+/// Updates an existing key in place so its key comment decor and value
+/// spacing/trailing comments are preserved across Settings edits.
+pub(super) fn set_table_item(table: &mut dyn TableLike, key: &str, mut item: Item) {
+    if let Some(existing) = table.get_mut(key) {
+        if let (Some(old), Some(new)) = (existing.as_value(), item.as_value_mut()) {
+            *new.decor_mut() = old.decor().clone();
+        }
+        *existing = item;
+    } else {
+        table.insert(key, item);
+    }
+}

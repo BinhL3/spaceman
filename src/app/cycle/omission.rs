@@ -27,6 +27,14 @@ impl Omission {
         now.duration_since(self.since) < OMISSION_SETTLE
     }
 
+    /// Next prompt recheck while an omitted window is still settling, bounded
+    /// by the end of `OMISSION_SETTLE` so reflow happens as soon as macOS drops
+    /// a closing window from the window server instead of waiting for the 1s
+    /// fallback refresh.
+    pub(super) fn next_recheck(&self, now: Instant) -> Instant {
+        (now + CLOSE_RECHECK).min(self.since + OMISSION_SETTLE)
+    }
+
     fn should_probe(&mut self, now: Instant) -> bool {
         match self.probe {
             Probe::First => self.probe = Probe::RetryAt(now + CLOSE_RECHECK),
@@ -98,6 +106,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 Omission::new(now)
             });
         if !omission.is_settling(now) {
+            return false;
+        }
+        // ⌘H or ⌘M is not a flaky snapshot; reflow now instead of after the settle.
+        if !self.parked.contains_key(window) && self.backend.confirms_set_aside(window) {
             return false;
         }
         if probe && omission.should_probe(now) && self.backend.confirms_no_windows(&window.app) {

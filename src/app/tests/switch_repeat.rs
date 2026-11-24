@@ -271,3 +271,259 @@ fn cycling_warps_the_pointer_onto_the_next_tile() {
         );
     }
 }
+
+#[test]
+fn quick_repeat_after_returning_from_another_display_advances_during_activation_lag() {
+    for fullscreen in [false, true] {
+        let two = WorkspaceId::TWO;
+        let first = window(10);
+        let second = window(20);
+        let mut elsewhere = window(30);
+        elsewhere.app.pid = 2;
+        let mut backend = FakeBackend::default();
+        backend.frames.insert(first.clone(), frame(50));
+        backend.frames.insert(second.clone(), frame(500));
+        backend.frames.insert(elsewhere.clone(), frame(1050));
+        let mut runtime = runtime(backend);
+        bind(&mut runtime, two, &first);
+        bind(&mut runtime, two, &second);
+        bind(&mut runtime, WorkspaceId::SIX, &elsewhere);
+        runtime.workspaces.set_fullscreen_layout(two, fullscreen);
+        press(&mut runtime, WorkerAction::SwitchWorkspace(two));
+
+        runtime.backend.focused = Some(elsewhere.clone());
+        runtime.backend.frontmost = Some(elsewhere.app.clone());
+        runtime.backend.calls.clear();
+
+        // First press returns focus to the entry tile (10), then AX still reports the old app.
+        press(&mut runtime, WorkerAction::SwitchWorkspace(two));
+        assert_eq!(focus_calls(&runtime), vec![10]);
+        runtime.backend.focused = Some(elsewhere.clone());
+        runtime.backend.frontmost = Some(elsewhere.app.clone());
+
+        // Second press inside the settle window advances directly to tile 20.
+        press(&mut runtime, WorkerAction::SwitchWorkspace(two));
+        assert_eq!(focus_calls(&runtime), vec![10, 20]);
+        assert_eq!(runtime.workspaces.preferred_focus(two), Some(second));
+    }
+}
+
+#[test]
+fn stale_focus_report_does_not_lose_selected_tile_on_switch_move_or_cycle() {
+    let setup = |fullscreen: bool| {
+        let first = window(10);
+        let second = window(20);
+        let other = window(30);
+        let backend = FakeBackend {
+            focused: Some(first.clone()),
+            frontmost: Some(first.app.clone()),
+            frames: HashMap::from([
+                (first.clone(), frame(50)),
+                (second.clone(), frame(500)),
+                (other.clone(), main_parked_frame(frame(200))),
+            ]),
+            ..FakeBackend::default()
+        };
+        let mut rt = runtime_with_parked(backend, [(other.clone(), frame(200))]);
+        bind(&mut rt, WorkspaceId::ONE, &first);
+        bind(&mut rt, WorkspaceId::ONE, &second);
+        bind(&mut rt, WorkspaceId::TWO, &other);
+        if fullscreen {
+            press(&mut rt, WorkerAction::ToggleFullscreenLayout);
+        }
+        press(&mut rt, WorkerAction::Focus(Direction::Right));
+        assert_eq!(rt.backend.focused, Some(second));
+        assert!(rt.pending_focus.is_some());
+        rt
+    };
+
+    // 1. Switch away and back during stale focus report (both split and Fullscreen Layout).
+    for fullscreen in [false, true] {
+        let mut rt = setup(fullscreen);
+        rt.backend.focused = Some(window(10));
+        press(&mut rt, WorkerAction::SwitchWorkspace(WorkspaceId::TWO));
+        assert_eq!(rt.backend.focused, Some(window(30)));
+        press(&mut rt, WorkerAction::SwitchWorkspace(WorkspaceId::ONE));
+        assert_eq!(
+            rt.workspaces.preferred_focus(WorkspaceId::ONE),
+            Some(window(20))
+        );
+        assert_eq!(rt.backend.focused, Some(window(20)));
+    }
+
+    // 2. Move workspace to next display during stale focus report.
+    let mut rt = setup(false);
+    rt.backend.focused = Some(window(10));
+    press(
+        &mut rt,
+        WorkerAction::MoveWorkspaceToDisplay(DisplayTarget::Next),
+    );
+    assert_eq!(
+        rt.workspaces.preferred_focus(WorkspaceId::ONE),
+        Some(window(20))
+    );
+
+    // 3. Observation cycle in Fullscreen Layout during stale focus report.
+    let mut rt = setup(true);
+    let reported = window(10);
+    rt.backend.focused = Some(reported.clone());
+    rt.backend.frontmost = Some(reported.app.clone());
+    rt.backend.observation = Some(observation_for_windows(
+        "com.example.Test",
+        &reported,
+        &[(window(10), frame(50)), (window(20), frame(500))],
+    ));
+    press(&mut rt, WorkerAction::Retile);
+    assert_eq!(
+        rt.workspaces.preferred_focus(WorkspaceId::ONE),
+        Some(window(20))
+    );
+}
+
+#[test]
+fn cross_display_focus_then_move_workspace_targets_pending_workspace_during_lag() {
+    for stale in [true, false] {
+        let first = window(10);
+        let mut second = window(30);
+        second.app.pid = 2;
+        let backend = FakeBackend {
+            focused: Some(first.clone()),
+            frontmost: Some(first.app.clone()),
+            frames: HashMap::from([(first.clone(), frame(50)), (second.clone(), frame(1050))]),
+            ..FakeBackend::default()
+        };
+        let mut rt = runtime(backend);
+        bind(&mut rt, WorkspaceId::ONE, &first);
+        bind(&mut rt, WorkspaceId::SIX, &second);
+        press(&mut rt, WorkerAction::Focus(Direction::Right));
+        assert_eq!(rt.backend.focused, Some(second.clone()));
+        assert_eq!(rt.pending_focus.as_ref().unwrap().target, second);
+
+        if stale {
+            rt.backend.focused = Some(first.clone());
+            rt.backend.frontmost = Some(first.app.clone());
+        }
+        press(
+            &mut rt,
+            WorkerAction::MoveWorkspaceToDisplay(DisplayTarget::Next),
+        );
+        assert_eq!(
+            rt.backend.persisted_monitors.first().map(|entry| entry.0),
+            Some(WorkspaceId::SIX)
+        );
+        assert_eq!(
+            rt.workspaces.active_for(&DisplaySelector::Main),
+            Some(WorkspaceId::SIX)
+        );
+        assert_eq!(
+            rt.workspaces.active_for(&DisplaySelector::Secondary),
+            Some(WorkspaceId::new(7).unwrap())
+        );
+        assert!(!rt.parked.contains_key(&second));
+        if stale {
+            assert_eq!(rt.suppressed_focus, Some(first));
+            assert_eq!(
+                rt.pending_focus.as_ref().map(|p| p.target.clone()),
+                Some(second)
+            );
+        }
+    }
+}
+
+#[test]
+fn workspace_switch_keeps_superseded_cross_display_focus_target_stale() {
+    let id = |n: u32| {
+        let mut w = window(n);
+        w.app.pid = n as i32;
+        w
+    };
+    let (w10, w30, w40) = (id(10), id(30), id(40));
+    for reported in [10, 30, 40] {
+        let backend = FakeBackend {
+            focused: Some(w10.clone()),
+            frontmost: Some(w10.app.clone()),
+            frames: HashMap::from([
+                (w10.clone(), frame(50)),
+                (w30.clone(), frame(1050)),
+                (w40.clone(), main_parked_frame(frame(200))),
+            ]),
+            ..FakeBackend::default()
+        };
+        let mut rt = runtime_with_parked(backend, [(w40.clone(), frame(200))]);
+        bind(&mut rt, WorkspaceId::ONE, &w10);
+        bind(&mut rt, WorkspaceId::SIX, &w30);
+        bind(&mut rt, WorkspaceId::TWO, &w40);
+        rt.workspaces.switch(WorkspaceId::ONE);
+        rt.foreground_lanes
+            .insert("main-id".into(), DisplaySelector::Main);
+        rt.workspaces.switch(WorkspaceId::SIX);
+        rt.foreground_lanes
+            .insert("secondary-id".into(), DisplaySelector::Secondary);
+        press(&mut rt, WorkerAction::Focus(Direction::Right));
+        rt.backend.focused = Some(w10.clone());
+        rt.backend.frontmost = Some(w10.app.clone());
+        press(&mut rt, WorkerAction::SwitchWorkspace(WorkspaceId::TWO));
+        assert_eq!(rt.backend.focused, Some(w40.clone()));
+        let rep = id(reported);
+        rt.backend.focused = Some(rep.clone());
+        rt.backend.frontmost = Some(rep.app);
+        press(&mut rt, WorkerAction::ToggleFloat);
+        assert_eq!(
+            rt.workspaces.floating_workspace_of(&w40),
+            Some(WorkspaceId::TWO)
+        );
+        assert_eq!(rt.workspaces.floating_workspace_of(&w30), None);
+    }
+}
+
+#[test]
+fn switch_to_hidden_workspace_focuses_survivor_when_first_tile_closed_while_parked() {
+    let distinct = |pid: i32, id: u32| crate::PhysicalWindowId {
+        app: AppInstanceId {
+            pid,
+            launched_at: 1,
+        },
+        window_id: id,
+    };
+    let (outgoing, remembered, survivor) = (distinct(1, 10), distinct(2, 20), distinct(3, 30));
+    let two = WorkspaceId::TWO;
+    let mut obs = observation_for("com.example.Outgoing", &outgoing, frame(50));
+    obs.applications
+        .extend(observation_for("com.example.Remembered", &remembered, frame(100)).applications);
+    obs.applications
+        .extend(observation_for("com.example.Survivor", &survivor, frame(600)).applications);
+    let backend = FakeBackend {
+        frames: [
+            (outgoing.clone(), frame(50)),
+            (remembered.clone(), frame(100)),
+            (survivor.clone(), frame(600)),
+        ]
+        .into(),
+        focused: Some(outgoing.clone()),
+        frontmost: Some(outgoing.app.clone()),
+        observation: Some(obs),
+        running_apps: Some(
+            [
+                outgoing.app.clone(),
+                remembered.app.clone(),
+                survivor.app.clone(),
+            ]
+            .into(),
+        ),
+        ..FakeBackend::default()
+    };
+    let mut rt = runtime(backend);
+    bind(&mut rt, WorkspaceId::ONE, &outgoing);
+    bind(&mut rt, two, &remembered);
+    bind(&mut rt, two, &survivor);
+    press(&mut rt, WorkerAction::SwitchWorkspace(two));
+    press(&mut rt, WorkerAction::SwitchWorkspace(WorkspaceId::ONE));
+
+    // Remembered tile closes while parked while its app keeps running.
+    rt.backend.frames.remove(&remembered);
+    rt.backend.calls.clear();
+    press(&mut rt, WorkerAction::SwitchWorkspace(two));
+    assert_eq!(focus_calls(&rt), vec![30]);
+    assert_eq!(rt.backend.focused, Some(survivor));
+    assert_eq!(rt.workspaces.windows(two).len(), 1);
+}

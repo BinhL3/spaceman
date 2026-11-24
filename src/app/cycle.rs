@@ -250,8 +250,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 .engine_mut(workspace)
                 .remember_insertion_focus(focused);
         }
+        let remembered_focus = self.resolve_focus(focused.clone());
         if focused_is_frontmost
-            && let Some(focused) = focused.as_ref()
+            && let Some(focused) = remembered_focus.as_ref()
             && let Some(workspace) = self.workspaces.workspace_of(focused)
             && self.workspaces.uses_fullscreen_layout(workspace)
             && !attempted_focus_restore.contains(&workspace)
@@ -291,6 +292,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         workspace: WorkspaceId,
         observation: &mut crate::NativeObservation,
         onscreen_frames: Option<&HashMap<u32, crate::Rect>>,
+        close_recheck: &mut Option<Instant>,
     ) {
         if observation.mouse_down {
             return;
@@ -329,7 +331,14 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                             );
                             Omission::new(now)
                         });
-                    omission.is_settling(now)
+                    if omission.is_settling(now) {
+                        let deadline = omission.next_recheck(now);
+                        *close_recheck =
+                            Some(close_recheck.map_or(deadline, |other| other.min(deadline)));
+                        true
+                    } else {
+                        false
+                    }
                 })
                 .count();
             if settling == 0 {
@@ -511,7 +520,12 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 }
             }
         }
-        self.guard_omitted_windows(workspace, &mut scoped_observation, onscreen_frames);
+        self.guard_omitted_windows(
+            workspace,
+            &mut scoped_observation,
+            onscreen_frames,
+            close_recheck,
+        );
         let apps_with_window_server_evidence = self.apps_with_window_server_evidence(
             workspace,
             &scoped_observation,

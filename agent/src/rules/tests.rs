@@ -183,6 +183,37 @@ fn hud_style_round_trips_and_leaves_the_default_out() {
 }
 
 #[test]
+fn hud_position_round_trips_and_leaves_bottom_out() {
+    use spaceman::config::{Config, HudPosition};
+    let mut doc = Doc::parse(SOURCE);
+    assert_eq!(doc.hud_position(), HudPosition::Bottom);
+    doc.set_hud_position(HudPosition::Top);
+    assert_eq!(doc.hud_position(), HudPosition::Top);
+    let top = doc.source();
+    assert!(top.contains("# OpenCode Browser's agent window."));
+    assert!(top.contains("hud_position = \"top\""));
+    assert_eq!(
+        Config::parse(&top).unwrap().hud_position(),
+        HudPosition::Top
+    );
+
+    doc.set_hud(false);
+    doc.set_hud_style(HudStyle::Layouts);
+    doc.set_hud_position(HudPosition::Bottom);
+    let bottom = doc.source();
+    assert!(!bottom.contains("hud_position"), "{bottom}");
+    assert!(bottom.contains("hud_style = \"layouts\""), "{bottom}");
+    assert_eq!(
+        Config::parse(&bottom).unwrap().hud_position(),
+        HudPosition::Bottom
+    );
+
+    doc.set_hud(true);
+    doc.set_hud_style(HudStyle::Icons);
+    assert!(!doc.source().contains("[settings]"));
+}
+
+#[test]
 fn update_channel_round_trips_and_leaves_stable_out() {
     use spaceman::config::{Config, UpdateChannel};
     let mut doc = Doc::parse(SOURCE);
@@ -806,4 +837,115 @@ fn removing_all_rules_or_rules_before_another_section_keeps_detached_comments_in
         "{empty_inline}"
     );
     assert!(spaceman::config::Config::parse(&empty_inline).is_ok());
+}
+
+#[test]
+fn workspace_display_edits_preserve_key_and_detached_comments() {
+    let nine = WorkspaceId::new(9).unwrap();
+
+    // 1. Updating monitor in a [[workspaces]] table preserves the comment above monitor.
+    let mut doc = Doc::parse(
+        "version = 1\n\n[[workspaces]]\n# Unchanged workspace key.\nworkspace = 9\n# Display note.\nmonitor = \"Studio Display\"\n",
+    );
+    doc.set_monitor(nine, Some("main"));
+    assert!(doc.source().contains("# Unchanged workspace key."));
+    assert!(doc.source().contains("# Display note."));
+    assert_eq!(doc.monitor(nine).as_deref(), Some("main"));
+    assert!(spaceman::config::Config::parse(&doc.source()).is_ok());
+
+    // 2. Clearing a [[workspaces]] table preserves detached heading comments above it.
+    let mut doc = Doc::parse(
+        "version = 1\n\n# Display note.\n\n[[workspaces]]\nworkspace = 9\nmonitor = \"Studio Display\"\n\n[[workspaces]]\nworkspace = 4\nmonitor = \"secondary\"\n",
+    );
+    doc.set_monitor(nine, None);
+    assert!(doc.source().contains("# Display note."));
+    assert_eq!(doc.monitor(nine), None);
+    assert!(spaceman::config::Config::parse(&doc.source()).is_ok());
+
+    // 3. Clearing the last entry of an inline workspaces array preserves detached comments.
+    let mut doc = Doc::parse(
+        "version = 1\n\n# Display note.\n\nworkspaces = [\n  { workspace = 9, monitor = \"Studio Display\" },\n]\n",
+    );
+    doc.set_monitor(nine, None);
+    assert!(doc.source().contains("# Display note."));
+    assert_eq!(doc.monitor(nine), None);
+    assert!(spaceman::config::Config::parse(&doc.source()).is_ok());
+
+    // 4. Control: an attached comment with no blank line above a removed entry still goes with it.
+    let mut doc = Doc::parse(
+        "version = 1\n\n# Display note.\n[[workspaces]]\nworkspace = 9\nmonitor = \"Studio Display\"\n",
+    );
+    doc.set_monitor(nine, None);
+    assert!(!doc.source().contains("# Display note."));
+    assert!(spaceman::config::Config::parse(&doc.source()).is_ok());
+}
+
+#[test]
+fn rule_placement_and_settings_edits_preserve_retained_key_comments() {
+    const SOURCE: &str = "version = 1\n\n# Detached rules heading.\n\n[[rules]]\n# Bundle note.\nbundle_id = \"com.example.App\"\n# Action note.\naction = \"route\"\n# Workspace note.\nworkspace = 2\n";
+
+    // Route -> route keeps comments above both retained action and workspace keys.
+    let mut doc = Doc::parse(SOURCE);
+    doc.place(0, Place::Workspace(WorkspaceId::new(3).unwrap()));
+    let saved = doc.source();
+    assert!(spaceman::config::Config::parse(&saved).is_ok());
+    assert!(saved.contains("# Detached rules heading."));
+    assert!(saved.contains("# Bundle note."));
+    assert!(saved.contains("# Action note."));
+    assert!(saved.contains("# Workspace note."));
+    assert_eq!(
+        doc.rules()[0].place,
+        Place::Workspace(WorkspaceId::new(3).unwrap())
+    );
+
+    // Route -> float removes workspace and keeps the comment above retained action.
+    let mut doc = Doc::parse(SOURCE);
+    doc.place(0, Place::Float);
+    let saved = doc.source();
+    assert!(spaceman::config::Config::parse(&saved).is_ok());
+    assert!(!saved.contains("workspace ="));
+    assert!(saved.contains("# Bundle note."));
+    assert!(saved.contains("# Action note."));
+    assert_eq!(doc.rules()[0].place, Place::Float);
+
+    // Settings / gaps / shortcut modifier updates also preserve comments above retained keys.
+    let mut doc = Doc::parse(
+        "version = 1\n\n[settings]\n# Mode note.\nmouse_follows_focus = \"display\"\n\n[settings.gaps]\n# Gap note.\ninner = 8\n\n[shortcuts]\n# Modifier note.\nmodifier = \"control\"\n",
+    );
+    doc.set_mouse_follows_focus(spaceman::config::MouseFollowsFocus::Window);
+    let mut spacing = doc.spacing();
+    spaceman::spacing::SpacingKey::Inner.set(&mut spacing, 12);
+    doc.set_spacing(spacing);
+    doc.set_shortcut_modifier(spaceman::shortcuts::Modifiers {
+        control: true,
+        option: true,
+        command: false,
+        shift: false,
+    });
+    let saved = doc.source();
+    assert!(spaceman::config::Config::parse(&saved).is_ok());
+    assert!(saved.contains("# Mode note."));
+    assert!(saved.contains("# Gap note."));
+    assert!(saved.contains("# Modifier note."));
+}
+
+#[test]
+fn clearing_last_layout_spacing_preserves_detached_section_headings() {
+    use spaceman::spacing::Spacing;
+    let width_source =
+        "version = 1\n\n# Layout notes.\n\n[settings]\nsingle_window_max_width = 1680\n";
+    let mut doc = Doc::parse(width_source);
+    doc.set_spacing(Spacing::NONE);
+    let saved = doc.source();
+    assert!(spaceman::config::Config::parse(&saved).is_ok(), "{saved}");
+    assert!(saved.contains("# Layout notes."), "{saved}");
+    assert!(!saved.contains("[settings]"), "{saved}");
+
+    let gaps_source = "version = 1\n\n# Gap notes.\n\n[settings.gaps]\ninner = 6\n";
+    let mut doc = Doc::parse(gaps_source);
+    doc.set_spacing(Spacing::NONE);
+    let saved = doc.source();
+    assert!(spaceman::config::Config::parse(&saved).is_ok(), "{saved}");
+    assert!(saved.contains("# Gap notes."), "{saved}");
+    assert!(!saved.contains("[settings.gaps]"), "{saved}");
 }

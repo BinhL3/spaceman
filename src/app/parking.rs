@@ -21,6 +21,7 @@ pub(super) const REPARK_ATTEMPT_LIMIT: u8 = 3;
 /// Shared per-cycle context for parking decisions.
 struct ParkContext<'a> {
     displays: &'a [crate::Rect],
+    screens: &'a [crate::Rect],
     frontmost: &'a Option<AppInstanceId>,
     server_frames: &'a HashMap<u32, crate::Rect>,
     visible: &'a [ResolvedWorkspace],
@@ -155,11 +156,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return;
         }
         let displays = outputs.frames().collect::<Vec<_>>();
+        let screens = outputs.screens();
         let Some(output) = outputs.displays().iter().find_map(|display| {
-            let parked = crate::geometry::parked_frame(display.frame, &displays, frame);
-            parked
-                .position_approximately_equals(frame, 1)
-                .then_some(display.frame)
+            let parked =
+                crate::geometry::parked_frame_clear_of(display.frame, &displays, &screens, frame);
+            crate::geometry::parked_at(frame, parked, 1).then_some(display.frame)
         }) else {
             return;
         };
@@ -196,13 +197,28 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             visible.iter().map(|resolved| resolved.workspace).collect();
         let inactive = self.workspaces.inactive_windows_except(&visible_workspaces);
         let displays = outputs.frames().collect::<Vec<_>>();
+        let screens = outputs.screens();
         let frontmost = self.backend.frontmost_application();
         let context = ParkContext {
             displays: &displays,
+            screens: &screens,
             frontmost: &frontmost,
             server_frames,
             visible,
         };
+        // Hidden scratchpad windows intentionally have no workspace owner, so
+        // re-park any background bounds reassertions here before affinity sees them.
+        for window in self.scratchpad.hidden() {
+            if cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            if self.parking_exempt.contains(&window) {
+                continue;
+            }
+            if let Some(original) = self.parked.get(&window).copied() {
+                self.repark_drifted_window(&window, original, outputs.main().frame, &context);
+            }
+        }
         let mut candidates = Vec::new();
         for (workspace, window) in inactive {
             if cancelled.load(Ordering::Acquire) {
@@ -249,7 +265,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 continue;
             }
             let park_output = Self::display_for_frame(frame, &displays).unwrap_or(output);
-            let target = crate::geometry::parked_frame(park_output, &displays, frame);
+            let target =
+                crate::geometry::parked_frame_clear_of(park_output, &displays, &screens, frame);
             candidates.push((workspace, window, frame, target));
         }
         if candidates.is_empty() {
@@ -276,7 +293,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 workspace,
                 frame
             );
-            let mut outcome = self.backend.set_position(&window, target);
+            let mut outcome = self.backend.set_parked_position(&window, target);
             if outcome == macos::ApplyOutcome::Gone && !self.confirm_gone(&window) {
                 outcome = macos::ApplyOutcome::Unavailable;
             }
@@ -313,6 +330,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         output: crate::Rect,
         context: &ParkContext<'_>,
     ) {
+        if self.awaiting_display_repark(window) {
+            return;
+        }
         let Some(server) = context.server_frames.get(&window.window_id).copied() else {
             return;
         };
@@ -352,9 +372,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             // position stays parked off-screen.
             return;
         }
-        let attempts = self.repark_attempts.entry(window.clone()).or_insert(0);
-        *attempts += 1;
-        if *attempts > REPARK_ATTEMPT_LIMIT {
+        if self.repark_attempts.get(window).copied().unwrap_or(0) >= REPARK_ATTEMPT_LIMIT {
             // The app undoes every park. Fighting on would flicker forever;
             // honor the reappearance instead (re-home, then exempt it from
             // parking if it keeps happening).
@@ -375,18 +393,51 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         }
         // Park by the size the window has now; the recovery frame's may be stale.
         let park_output = Self::display_for_frame(server, context.displays).unwrap_or(output);
-        let target = crate::geometry::parked_frame(park_output, context.displays, server);
+        let target = crate::geometry::parked_frame_clear_of(
+            park_output,
+            context.displays,
+            context.screens,
+            server,
+        );
         log_event!(
             "re-park: {:?} drifted back on-screen to {:?}",
             window,
             server
         );
         if matches!(
-            self.backend.set_position(window, target),
+            self.backend.set_parked_position(window, target),
             macos::ApplyOutcome::Applied
         ) {
+            // Only a confirmed park write that the app later undoes proves the
+            // app is fighting parking; transient Gone/Unavailable errors during
+            // display reconfiguration must not escalate and adopt the window.
+            *self.repark_attempts.entry(window.clone()).or_insert(0) += 1;
             self.recently_parked.insert(window.clone(), Instant::now());
         }
+    }
+
+    /// Confirms that an Accessibility `Gone` result means `window` actually
+    /// closed, and if so retires its parked recovery entry and workspace binding.
+    pub(super) fn retire_confirmed_gone_window(
+        &mut self,
+        workspace: WorkspaceId,
+        window: &crate::PhysicalWindowId,
+    ) -> bool {
+        if !self.confirm_gone(window) {
+            return false;
+        }
+        log_event!(
+            "forget {:?} (workspace {}): window closed",
+            window,
+            workspace
+        );
+        let frame = self.parked.get(window).copied();
+        self.commit_unparked(window);
+        if let Some(frame) = frame {
+            self.persist_removals_or_rollback(vec![(window.clone(), frame)]);
+        }
+        self.forget_window(workspace, window);
+        true
     }
 
     /// Whether an Accessibility "gone" for `window` is real: the window
@@ -460,7 +511,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
 
     /// Durably record `frame` as the window's recovery frame, replacing any
     /// earlier one; memory rolls back when persistence fails.
-    fn record_recovery(&mut self, window: &crate::PhysicalWindowId, frame: crate::Rect) -> bool {
+    pub(super) fn record_recovery(
+        &mut self,
+        window: &crate::PhysicalWindowId,
+        frame: crate::Rect,
+    ) -> bool {
         let previous = self.parked.insert(window.clone(), frame);
         if previous == Some(frame) {
             return true;
@@ -561,7 +616,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if self.parking_exempt.contains(window) {
             return macos::ApplyOutcome::Applied;
         }
-        let frame = match self.backend.frame(window) {
+        let ax_frame = match self.backend.frame(window) {
             Ok(frame) => frame,
             Err(macos::WindowAccessError::Gone) => return macos::ApplyOutcome::Gone,
             Err(macos::WindowAccessError::Unavailable) => {
@@ -571,7 +626,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         // Prefer the window server's frame: Accessibility reads can be stale
         // right after a move, which would misclassify the window and record a
         // wrong recovery frame.
-        let frame = self.backend.window_server_frame(window).unwrap_or(frame);
+        let frame = self.backend.window_server_frame(window).unwrap_or(ax_frame);
         let was_parked = self.parked.contains_key(window);
         let displays = outputs.frames().collect::<Vec<_>>();
         if !crate::geometry::shows_on(frame, &displays) && !was_parked {
@@ -599,8 +654,18 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         // cross-display write back on-screen. Use the window's current size so
         // a grown window leaves nothing showing.
         let park_output = Self::display_for_frame(frame, &displays).unwrap_or(output);
-        let parked = crate::geometry::parked_frame(park_output, &displays, frame);
-        let outcome = self.backend.set_position(window, parked);
+        let park_size = crate::Rect {
+            width: frame.width.max(ax_frame.width),
+            height: frame.height.max(ax_frame.height),
+            ..frame
+        };
+        let parked = crate::geometry::parked_frame_clear_of(
+            park_output,
+            &displays,
+            &outputs.screens(),
+            park_size,
+        );
+        let outcome = self.backend.set_parked_position(window, parked);
         log_event!("park: {:?} from {:?} ({:?})", window, recovery, outcome);
         if matches!(outcome, macos::ApplyOutcome::Applied) {
             self.recently_parked.insert(window.clone(), Instant::now());

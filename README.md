@@ -27,8 +27,9 @@ Spaceman currently:
 - shows a non-activating Workspace HUD capsule on each display on workspace switches,
   cross-workspace moves, and layout toggles (`[settings] hud = true`): a row of that display's
   workspaces, drawn as numbers and app icons by default or (`hud_style = "layouts"`) as their layouts with app
-  icons, with a marker that travels to the one you are on. It follows quick switches without
-  restarting and honors Reduce Motion;
+  icons, with a marker that travels to the one you are on. It sits above the bottom edge by default
+  or below the top one (`hud_position = "top"`), follows quick switches without restarting, and
+  honors Reduce Motion;
 - can register its signed app bundle with macOS to launch automatically at login;
 - supports directional focus and movement across displays, drag-to-reorder/nest, mouse and keyboard
   resizing, balancing, and a workspace-wide Fullscreen Layout;
@@ -131,7 +132,8 @@ Core controls:
 | `Option+Shift+A` ... `Option+Shift+Z` | Move the focused window to a configured named workspace |
 | `Option+Tab` | Focus the workspace focused before this one, on any display |
 | `Option+Shift+Tab` | Move the focused workspace to the next display |
-| Option-backtick | Focus the next tiled window in the workspace |
+| Option-backtick | Focus the next window in the workspace, tiled or floating |
+| Option-Shift-backtick | Focus the previous window in the workspace |
 | `Option+H/J/K/L` | Focus left/down/up/right |
 | `Option+Shift+H/J/K/L` | Move the focused tile left/down/up/right |
 | `Option+/` | Toggle the active layout's root split axis |
@@ -173,7 +175,7 @@ spaceman ctl resume
 ## Configure
 
 Spaceman reads `~/Library/Application Support/Spaceman/config.toml` at startup and reloads rule,
-display, and HUD (on/off and style) edits automatically when the file changes. See the exact current schema and
+display, and HUD (on/off, style, and screen edge) edits automatically when the file changes. See the exact current schema and
 [config.example.toml](config.example.toml) in [Configuration](docs/configuration.md).
 
 ```sh

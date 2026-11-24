@@ -90,6 +90,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return;
         }
         let target_rect = focused_window.unwrap_or(output);
+        let target_display_id = focused_window
+            .and_then(|frame| outputs.display_at(rect_center(frame)))
+            .map_or(target_display_id, |display| display.id.as_str());
         let already_there = self
             .backend
             .pointer_location()
@@ -221,6 +224,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let Some(source) = self.workspaces.workspace_of(&window) else {
             return self.cycle(outputs, cancelled);
         };
+        if !self.is_visible(source, &outputs) || self.parked.contains_key(&window) {
+            return Ok(self.status(0, &outputs));
+        }
         if self.workspaces.uses_fullscreen_layout(source) {
             return Ok(self.status(0, &outputs));
         }
@@ -300,6 +306,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let Some(workspace) = self.workspaces.workspace_of(&window) else {
             return self.cycle(outputs, cancelled);
         };
+        if !self.is_visible(workspace, &outputs) || self.parked.contains_key(&window) {
+            return Ok(self.status(0, &outputs));
+        }
         if self.workspaces.uses_fullscreen_layout(workspace) {
             return Ok(self.status(0, &outputs));
         }
@@ -385,10 +394,12 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             })
     }
 
-    /// The focused window, trusting a focus command still in flight over the
-    /// stale window Accessibility reports until the target app activates.
-    pub(super) fn current_focus(&mut self) -> Option<crate::PhysicalWindowId> {
-        let reported = self.backend.focused_window();
+    /// Resolves `reported` against a focus command still in flight, trusting the
+    /// pending target over a known stale Accessibility report until it settles.
+    pub(super) fn resolve_focus(
+        &mut self,
+        reported: Option<crate::PhysicalWindowId>,
+    ) -> Option<crate::PhysicalWindowId> {
         let Some(pending) = self.pending_focus.take() else {
             return reported;
         };
@@ -398,6 +409,31 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return Some(target);
         }
         reported
+    }
+
+    /// The focused window, trusting a focus command still in flight over the
+    /// stale window Accessibility reports until the target app activates.
+    pub(super) fn current_focus(&mut self) -> Option<crate::PhysicalWindowId> {
+        let reported = self.backend.focused_window();
+        self.resolve_focus(reported)
+    }
+
+    /// Drains an unexpired `pending_focus` into its stale-report list (prior
+    /// stale windows plus its superseded target) so a replacement focus request
+    /// still ignores earlier targets in the same burst (#307).
+    pub(super) fn take_pending_focus_stale(&mut self) -> Vec<Option<crate::PhysicalWindowId>> {
+        let Some(pending) = self.pending_focus.take() else {
+            return Vec::new();
+        };
+        if pending.at.elapsed() >= FOCUS_SETTLE {
+            return Vec::new();
+        }
+        let mut stale = pending.stale;
+        let previous = Some(pending.target);
+        if !stale.contains(&previous) {
+            stale.push(previous);
+        }
+        stale
     }
 
     pub(super) fn focus_tile(
@@ -422,6 +458,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         });
         if let Some(workspace) = self.workspaces.workspace_of(target) {
             self.remember_fullscreen_focus(workspace, target)?;
+        }
+        if let Some(workspace) = self.workspaces.workspace_of_any(target) {
             let display = outputs.resolve(self.workspaces.assignment(workspace));
             let output = display.frame;
             let frame = self.focus_window_frame(target, workspace, output);
@@ -457,20 +495,40 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         outputs: macos::DisplayOutputs,
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
+        self.cycle_focus_by(outputs, cancelled, false)
+    }
+
+    pub(super) fn cycle_focus_previous(
+        &mut self,
+        outputs: macos::DisplayOutputs,
+        cancelled: &AtomicBool,
+    ) -> Result<CycleStatus, String> {
+        self.cycle_focus_by(outputs, cancelled, true)
+    }
+
+    /// Steps through the workspace's tiles in stable order, then its floats,
+    /// wrapping either way, so a workspace of floats (or one tile plus floats)
+    /// can still be cycled. Focus outside that ring enters at the first window
+    /// going forward and the last going backward.
+    fn cycle_focus_by(
+        &mut self,
+        outputs: macos::DisplayOutputs,
+        cancelled: &AtomicBool,
+        backward: bool,
+    ) -> Result<CycleStatus, String> {
         let (focused, workspace) = self.focused_owner_workspace(&outputs, cancelled)?;
-        let windows = self.workspaces.engine(workspace).bound_windows();
+        let windows = self.workspaces.windows(workspace);
+        let len = windows.len();
         let target = match windows.iter().position(|window| window == &focused) {
-            Some(_) if windows.len() < 2 => return Ok(self.status(0, &outputs)),
-            Some(index) => windows[(index + 1) % windows.len()].clone(),
-            // A float of this workspace has no place in the tile order (#178):
-            // step onto the remembered tile, or the first one.
-            None => match self
-                .workspaces
-                .preferred_focus(workspace)
-                .filter(|window| windows.contains(window))
-                .or_else(|| windows.first().cloned())
-            {
-                Some(target) => target,
+            Some(_) if len < 2 => return Ok(self.status(0, &outputs)),
+            Some(index) if backward => windows[(index + len - 1) % len].clone(),
+            Some(index) => windows[(index + 1) % len].clone(),
+            None => match if backward {
+                windows.last()
+            } else {
+                windows.first()
+            } {
+                Some(target) => target.clone(),
                 None => return Ok(self.status(0, &outputs)),
             },
         };
@@ -688,7 +746,15 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         // Reconciliation adopts a window it observes but does not own, which is
         // exactly how a relaunched or moved window joins the tiles.
         let result = self.cycle(outputs, cancelled);
-        if self.workspaces.workspace_of(&window).is_some() {
+        if let Some(owner) = self.workspaces.workspace_of(&window) {
+            if self.parked.contains_key(&window)
+                && let Some(tile_frame) = self.applied[owner.index()]
+                    .get(&window)
+                    .map(|applied| applied.target)
+                    .or_else(|| self.backend.frame(&window).ok())
+            {
+                let _: bool = self.record_recovery(&window, tile_frame);
+            }
             return result;
         }
         self.workspaces.own_floating(window.clone(), workspace);
