@@ -160,12 +160,44 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         {
             return self.relayout_persist(workspace, &outputs, cancelled);
         }
-        let Some(target) = crate::navigation::target(&tiles, &window, direction) else {
+        let mut candidates = self.empty_display_targets(&outputs, &tiles);
+        candidates.extend(tiles);
+        let Some(target) = crate::navigation::target(&candidates, &window, direction) else {
             return Ok(self.status(0, &outputs));
         };
         self.with_warp_context(WarpContext::Suppressed, |rt| {
             rt.move_window(window, target.workspace, outputs, cancelled)
         })
+    }
+
+    /// A display whose workspace has no tiles offers no window to move toward,
+    /// so its single-tile frame stands in for one. The stand-in's window id
+    /// is never a real window; only its workspace is used.
+    fn empty_display_targets(
+        &self,
+        outputs: &macos::DisplayOutputs,
+        tiles: &[NavigationTile],
+    ) -> Vec<NavigationTile> {
+        self.visible_workspaces(outputs)
+            .into_iter()
+            .filter(|resolved| {
+                self.scope.manages_selector(&resolved.selector)
+                    && !tiles
+                        .iter()
+                        .any(|tile| tile.workspace == resolved.workspace)
+            })
+            .map(|resolved| NavigationTile {
+                workspace: resolved.workspace,
+                window: crate::PhysicalWindowId {
+                    app: crate::AppInstanceId {
+                        pid: -1,
+                        launched_at: 0,
+                    },
+                    window_id: u32::try_from(resolved.workspace.index()).unwrap_or(u32::MAX),
+                },
+                frame: self.layout_settings(resolved.output).single(),
+            })
+            .collect()
     }
 
     pub(super) fn drop_window(
@@ -441,6 +473,31 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         Ok((window, workspace))
     }
 
+    /// The visible workspace that owns the focused window, as a tile or a
+    /// float, for commands that act on the whole workspace.
+    fn focused_owner_workspace(
+        &mut self,
+        outputs: &macos::DisplayOutputs,
+        cancelled: &AtomicBool,
+    ) -> Result<(crate::PhysicalWindowId, WorkspaceId), String> {
+        let window = self
+            .current_focus()
+            .ok_or("Focused window is unavailable")?;
+        if self.workspaces.workspace_of_any(&window).is_none() {
+            self.with_warp_context(WarpContext::Suppressed, |rt| {
+                rt.cycle(outputs.clone(), cancelled)
+            })?;
+        }
+        let workspace = self
+            .workspaces
+            .workspace_of_any(&window)
+            .ok_or("Focused window is not managed by Spaceman")?;
+        if !self.is_visible(workspace, outputs) {
+            return Err("Focused window is not on an active workspace".into());
+        }
+        Ok((window, workspace))
+    }
+
     fn active_workspace_of(
         &mut self,
         window: &crate::PhysicalWindowId,
@@ -484,7 +541,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         outputs: macos::DisplayOutputs,
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
-        let (_, workspace) = self.focused_active_workspace(&outputs, cancelled, false)?;
+        let (_, workspace) = self.focused_owner_workspace(&outputs, cancelled)?;
         if self.workspaces.uses_fullscreen_layout(workspace) {
             self.workspaces.set_fullscreen_layout(workspace, false);
             self.pending_fullscreen_focus_restore.remove(&workspace);
@@ -543,7 +600,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         outputs: macos::DisplayOutputs,
         cancelled: &AtomicBool,
     ) -> Result<CycleStatus, String> {
-        let (window, workspace) = self.focused_active_workspace(&outputs, cancelled, true)?;
+        let (window, workspace) = self.focused_owner_workspace(&outputs, cancelled)?;
         self.workspaces.remember_focus(workspace, &window);
         let enabled = !self.workspaces.uses_fullscreen_layout(workspace);
         self.workspaces.set_fullscreen_layout(workspace, enabled);
