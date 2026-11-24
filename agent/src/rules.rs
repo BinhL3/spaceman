@@ -430,6 +430,7 @@ fn set_place(table: &mut Table, place: Place) {
     }
 }
 
+mod shortcuts;
 mod spacing;
 #[cfg(test)]
 mod tests;
