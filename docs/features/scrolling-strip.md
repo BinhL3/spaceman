@@ -28,12 +28,15 @@ Ribbon and camera (pure math: src/strip.rs)                                   //
 └── Nothing ever crosses a shared edge (ScrollingDisplayBounds clamps it inside)
 
 Glide (src/app/strip/motion.rs -> src/app/app_loop/glide.rs)                   // strip.glide
-├── Worker: aims CameraSpring (critically damped, stiffness 800) from its current position and
-│           velocity; a moved column gets its own offset spring; records every column the glide
-│           takes out of view in parked-windows.json first; sends a StripMotion to the main thread
+├── Worker: records every column the glide takes out of view in parked-windows.json and resizes
+│           columns whose width changed, then aims CameraSpring (critically damped, stiffness 800)
+│           from its current position and velocity; a moved column gets its own offset spring;
+│           sends a StripMotion to the main thread
 ├── Main thread: CADisplayLink runs only while a glide does; each vsync samples the springs and
 │                writes positions through InteractivePresenter (per-app lanes, newest frame wins,
-│                no readback, enhanced UI held off for the whole glide)
+│                no readback, enhanced UI held off for the whole glide); its clock runs up to
+│                50 ms behind the worker's so the first frame shown is the start of the motion
+├── Cycles mid-glide -> every column the window server lists keeps its slot
 ├── Rapid taps -> the running spring is retargeted, one continuous glide
 ├── Settled -> link stops; worker lays the strip out once, peeks/parks out-of-view columns,
 │              retires recovery frames of columns back in view
@@ -73,7 +76,7 @@ Unit (FakeBackend), `src/app/tests/strip.rs`:
 `a_strip_column_that_drifts_back_on_screen_is_put_back`,
 `docking_a_display_parks_columns_that_peeked_past_the_new_seam`,
 `a_focus_step_glides_and_settles_into_the_rest_layout`, `rapid_taps_retarget_one_glide`, and
-`switching_workspaces_halts_a_running_glide`. Ribbon, camera and glide math: `src/strip/tests.rs`
+`switching_workspaces_halts_a_running_glide`, `a_cycle_mid_glide_keeps_a_column_caught_off_screen`. Ribbon, camera and glide math: `src/strip/tests.rs`
 (minimal scroll, peeks, seams, 120 Hz intermediate frames, retarget continuity). Enhanced UI hand-off:
 `a_restore_owed_during_a_hold_is_paid_when_the_last_sink_closes` (`src/macos/presenter/holds.rs`).
 Persistence: `persisted_strip_round_trips_and_excludes_fullscreen_layout`. Config:
@@ -99,6 +102,9 @@ Focus a window on the workspace
 - **Glides write positions only.** A width change resizes the column at once, then the camera and
   its neighbors glide. `agent.log` logs each glide (`strip glide … over Nms`) and how many frames the
   main thread presented.
+- **Apps take positions at their own rate.** Each app's lane drops frames the app hasn't taken
+  yet, so a slow app (TextEdit took about every other frame in the VM) moves at a lower rate, and
+  the gaps between columns wobble mid-glide. Every column still lands on its exact position.
 - **Shared edges.** A column partly in view on the side of another display is kept inside its own
   display, so it sits under its neighbor instead of running off the edge.
 - **A closed column's neighbor appears on the next cycle.** Reconciliation retires the closed window

@@ -575,6 +575,46 @@ fn a_focus_step_glides_and_settles_into_the_rest_layout() {
     );
 }
 
+/// A cycle mid-glide can catch a wide column crossing the screen's edge centered off screen in
+/// the Accessibility snapshot and the on-screen list read after it, while the window-server
+/// snapshot read just before still had it centered on screen (seen live: Safari at 80% lost its
+/// slot gliding back to the first column). The glide vouches for every column the window server
+/// lists, so none loses its slot.
+#[test]
+fn a_cycle_mid_glide_keeps_a_column_caught_off_screen() {
+    let (mut runtime, windows) = four_windows(LAB_ON);
+    runtime.backend.animate_strip = true;
+    press(&mut runtime, WorkerAction::ToggleStrip).unwrap();
+    press(&mut runtime, WorkerAction::Focus(Direction::Right)).unwrap();
+    press(&mut runtime, WorkerAction::Focus(Direction::Right)).unwrap();
+    assert!(runtime.strip_in_motion(WorkspaceId::ONE));
+    let safari = &windows[2];
+    runtime
+        .backend
+        .frames
+        .insert(safari.clone(), column(2100, 500));
+    runtime
+        .backend
+        .server_frames
+        .insert(safari.clone(), column(700, 500));
+    runtime.backend.ordered_out.insert(safari.window_id);
+    // In view before the glide and partly in view after it, so nothing recorded its frame.
+    runtime.parked.remove(safari);
+
+    for _ in 0..3 {
+        runtime.cycle(outputs(), &AtomicBool::new(false)).unwrap();
+    }
+
+    assert_eq!(
+        runtime.workspaces.workspace_of(safari),
+        Some(WorkspaceId::ONE)
+    );
+    assert_eq!(
+        runtime.workspaces.engine(WorkspaceId::ONE).bound_windows(),
+        windows
+    );
+}
+
 /// Taps faster than the glide bend the one spring toward the newest target.
 #[test]
 fn rapid_taps_retarget_one_glide() {

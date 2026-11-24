@@ -311,6 +311,9 @@ pub struct StripMotion {
     pub bounds: ScrollingDisplayBounds,
     pub camera: CameraSpring,
     pub columns: Vec<MotionColumn>,
+    /// When the worker aimed the springs. The main thread starts presenting a little later and
+    /// measures that delay from here.
+    pub issued: Instant,
 }
 
 impl StripMotion {

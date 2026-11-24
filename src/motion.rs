@@ -102,6 +102,19 @@ impl CameraSpring {
         *self = Self::with_state(self.params, current.position, current.velocity, target, now);
     }
 
+    /// When the spring was last aimed.
+    #[must_use]
+    pub fn start(&self) -> Instant {
+        self.start
+    }
+
+    /// The same motion, begun `by` later.
+    #[must_use]
+    pub fn delayed(mut self, by: Duration) -> Self {
+        self.start += by;
+        self
+    }
+
     /// Stops the spring at `position`.
     pub fn snap_to(&mut self, position: f64, now: Instant) {
         *self = Self::at_rest(self.params, position, now);

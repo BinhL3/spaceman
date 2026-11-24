@@ -12,8 +12,14 @@ use crate::{
 };
 
 /// How long after the springs settle the worker waits before its own layout pass, so the main
-/// thread's final frame lands first.
-pub(in crate::app) const SETTLE_GRACE: Duration = Duration::from_millis(40);
+/// thread's final frame lands first: its frame budget plus the most the main thread runs
+/// behind the worker's clock ([`MAX_PRESENT_LAG`]).
+pub(in crate::app) const SETTLE_GRACE: Duration = Duration::from_millis(90);
+
+/// The most the main thread delays a glide's clock to make up for handing it over: the agent
+/// pump, starting the display link and opening the apps' lanes. Without it the first frame
+/// shown would already be a large step into the motion.
+pub(in crate::app) const MAX_PRESENT_LAG: Duration = Duration::from_millis(50);
 
 /// What the worker tells the main thread about strip glides.
 #[derive(Clone, Debug)]
@@ -176,9 +182,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         if !changed {
             return matches!(camera, ViewportCamera::Animating(_));
         }
-        let mut spring = camera.spring(now);
-        spring.retarget(plan.target, now);
-        if !self.prepare_strip_glide(workspace, plan, spring, now) {
+        if !self.prepare_strip_glide(workspace, plan, now) {
             let view = &mut self.strip_views.views[workspace.index()];
             if matches!(view.camera, Some(ViewportCamera::Animating(_))) {
                 self.strip_views.outbox.push(StripCommand::Halt(workspace));
@@ -195,12 +199,15 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     /// Records the frames of columns the glide takes out of view, sizes columns whose width
     /// changed, and queues the glide. Returns false when a frame could not be recorded; the
     /// caller then lays the strip out without a glide, parking as usual.
+    ///
+    /// The springs are aimed only after the slow part (window-server reads, durable records,
+    /// resizes), so the glide starts from where the screen is when it is sent, not from where
+    /// it was when the key was handled.
     fn prepare_strip_glide(
         &mut self,
         workspace: WorkspaceId,
         plan: &StripPlan,
-        camera: CameraSpring,
-        now: Instant,
+        aimed: Instant,
     ) -> bool {
         let engine = self.workspaces.engine(workspace);
         let columns: Vec<_> = plan
@@ -215,26 +222,16 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             .strip_outputs()
             .map(|outputs| outputs.frames().collect())
             .unwrap_or_else(|| vec![plan.output]);
-        let view = self.strip_views.view(workspace).clone();
-        let shift_at = |slot| {
-            view.shifts
-                .get(&slot)
-                .map_or(0.0, |s: &CameraSpring| s.position(now))
-        };
-        let current_camera = view
-            .camera
-            .map_or(plan.target, |camera| camera.spring(now).position(now));
-        let mut riders = Vec::new();
-        for (column, window) in columns {
+        for (column, window) in &columns {
             let rest = plan.layout.rest(column.slot);
             let hidden = !matches!(rest, Some(crate::strip::ColumnRest::Visible(_)));
             let current = self
                 .backend
-                .window_server_frame(&window)
-                .or_else(|| self.backend.frame(&window).ok());
+                .window_server_frame(window)
+                .or_else(|| self.backend.frame(window).ok());
             let on_screen =
                 current.is_some_and(|frame| crate::geometry::shows_on(frame, &displays));
-            if hidden && !self.parked.contains_key(&window) && on_screen {
+            if hidden && !self.parked.contains_key(window) && on_screen {
                 let Some(frame) = current else {
                     return false;
                 };
@@ -242,38 +239,65 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                     return false;
                 }
             }
+            let stays_parked = matches!(rest, Some(crate::strip::ColumnRest::Parked))
+                && self.parked.contains_key(window);
+            if !stays_parked
+                && let Some(frame) = current
+                && (frame.width != column.width || frame.height != plan.output.height)
+            {
+                let placement = crate::Placement {
+                    slot: column.slot,
+                    window: Some(window.clone()),
+                    frame: crate::Rect {
+                        width: column.width,
+                        height: plan.output.height,
+                        ..frame
+                    },
+                };
+                let _ = self.backend.apply_managed(
+                    std::slice::from_ref(&placement),
+                    &Settings::for_output(plan.output),
+                    &AtomicBool::new(false),
+                );
+            }
+        }
+        let now = Instant::now();
+        let delay = now.saturating_duration_since(aimed);
+        let view = &mut self.strip_views.views[workspace.index()];
+        // Shifts aimed with this glide haven't been shown yet: they start now too.
+        for shift in view.shifts.values_mut() {
+            if shift.start() == aimed {
+                *shift = shift.delayed(delay);
+            }
+        }
+        let view = view.clone();
+        let Some(old_camera) = view.camera else {
+            return false;
+        };
+        let mut camera = old_camera.spring(now);
+        camera.retarget(plan.target, now);
+        let current_camera = camera.position(now);
+        let shift_at = |slot| {
+            view.shifts
+                .get(&slot)
+                .map_or(0.0, |s: &CameraSpring| s.position(now))
+        };
+        let mut riders = Vec::new();
+        for (column, window) in columns {
             let x_now = f64::from(column.x) + shift_at(column.slot);
             let in_view_now = {
                 let left = f64::from(plan.output.x) + x_now - current_camera;
                 left < f64::from(plan.output.x + plan.output.width)
                     && left + f64::from(column.width) > f64::from(plan.output.x)
             };
-            if matches!(rest, Some(crate::strip::ColumnRest::Parked))
-                && !in_view_now
+            if matches!(
+                plan.layout.rest(column.slot),
+                Some(crate::strip::ColumnRest::Parked)
+            ) && !in_view_now
                 && self.parked.contains_key(&window)
             {
                 // Parked beyond a shared edge before and after: it stays where it is.
                 continue;
-            }
-            if let Some(frame) = current
-                && (frame.width != column.width || frame.height != plan.output.height)
-            {
-                let sized = crate::Rect {
-                    width: column.width,
-                    height: plan.output.height,
-                    ..frame
-                };
-                let placement = crate::Placement {
-                    slot: column.slot,
-                    window: Some(window.clone()),
-                    frame: sized,
-                };
-                let settings = Settings::for_output(plan.output);
-                let _ = self.backend.apply_managed(
-                    std::slice::from_ref(&placement),
-                    &settings,
-                    &AtomicBool::new(false),
-                );
             }
             riders.push(MotionColumn {
                 window,
@@ -297,6 +321,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             bounds: plan.bounds,
             camera,
             columns: riders,
+            issued: now,
         };
         let settles_at = motion.settles_at(now);
         log_event!(

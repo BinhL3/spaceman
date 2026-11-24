@@ -175,6 +175,7 @@ fn glide(from: f64, to: f64, start: Instant, bounds: ScrollingDisplayBounds) -> 
         output: AREA,
         bounds,
         camera,
+        issued: start,
         columns: strip
             .iter()
             .map(|column| MotionColumn {

@@ -8,10 +8,13 @@
 mod motion;
 
 use motion::StripPlan;
-pub(super) use motion::{StripCommand, StripViews, ViewportCamera};
+pub(super) use motion::{MAX_PRESENT_LAG, StripCommand, StripViews, ViewportCamera};
 
 use super::commands::FOCUS_SETTLE;
 use super::parking::RESTORE_CONFIRM_TOLERANCE;
+
+/// How far a peeking column may sit from its sliver, in points, before it is put back.
+const PEEK_TOLERANCE: i32 = 2;
 use super::*;
 use crate::{
     Placement,
@@ -248,7 +251,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     /// mostly past a free edge). Report them at their window-server frames so reconciliation
     /// keeps their slots; a window the window server no longer lists is really gone and is left
     /// out. Without a window-server snapshot nothing proves absence, so every parked column is
-    /// kept.
+    /// kept. While the strip glides, the snapshots taken a moment apart disagree about where a
+    /// column crossing an edge is, so every column the window server lists is kept.
     pub(super) fn observe_parked_strip_columns(
         &self,
         workspace: WorkspaceId,
@@ -259,13 +263,15 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return;
         }
         let union = self.strip_outputs().map(macos::DisplayOutputs::union);
+        let moving = self.strip_in_motion(workspace);
         for window in self.strip_windows(workspace) {
             let recovery = self.parked.get(&window).copied();
             let frame = match (server_frames, recovery) {
                 (Some(frames), _) => match frames.get(&window.window_id) {
                     // A column the strip moved off screen, not one closed or minimized.
                     Some(frame)
-                        if recovery.is_some()
+                        if moving
+                            || recovery.is_some()
                             || union.is_some_and(|union| !union.contains_center(*frame)) =>
                     {
                         *frame
@@ -448,7 +454,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 return macos::ApplyOutcome::Unavailable;
             }
         };
-        if current == frame {
+        // In place by position: apps that snap their size (Terminal's character cells) never
+        // match the column's width exactly, and rewriting them every cycle would fight them.
+        if (current.x - frame.x).abs() <= PEEK_TOLERANCE
+            && (current.y - frame.y).abs() <= PEEK_TOLERANCE
+        {
             return macos::ApplyOutcome::Applied;
         }
         let displays: Vec<_> = outputs.frames().collect();
@@ -458,7 +468,9 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         {
             return macos::ApplyOutcome::Unavailable;
         }
-        let outcome = if (current.width, current.height) == (frame.width, frame.height) {
+        let resized = (current.width - frame.width).abs() > PEEK_TOLERANCE
+            || (current.height - frame.height).abs() > PEEK_TOLERANCE;
+        let outcome = if !resized {
             self.backend.set_position(window, frame)
         } else {
             // Resized since it was laid out: a stale width would hide the sliver or widen it.
@@ -478,7 +490,13 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 None => macos::ApplyOutcome::Unavailable,
             }
         };
-        log_event!("strip peek: {:?} at {:?} ({:?})", window, frame, outcome);
+        log_event!(
+            "strip peek: {:?} from {:?} to {:?} ({:?})",
+            window,
+            current,
+            frame,
+            outcome
+        );
         if outcome == macos::ApplyOutcome::Applied {
             self.recently_parked.insert(window.clone(), Instant::now());
         }

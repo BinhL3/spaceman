@@ -24,10 +24,28 @@ const RESTORE_TIMEOUT: Duration = Duration::from_millis(250);
 /// The longest frame a glide samples ahead, so a stalled run loop doesn't jump the motion.
 const MAX_FRAME: Duration = Duration::from_millis(50);
 
+/// How far into the motion the first frame shown lands: one 120 Hz frame.
+const FIRST_STEP: Duration = Duration::from_millis(8);
+
 struct Glide {
     motion: StripMotion,
     started: Instant,
     frames: u32,
+    /// How far the presented motion runs behind the worker's clock, fixed at the first frame
+    /// of a glide from rest and kept through retargets so the motion stays continuous.
+    lag: Option<Duration>,
+}
+
+impl Glide {
+    /// The moment of the worker's clock that the frame shown at `now` presents.
+    fn clock(&mut self, now: Instant) -> Instant {
+        let lag = *self.lag.get_or_insert_with(|| {
+            now.saturating_duration_since(self.motion.issued)
+                .saturating_sub(FIRST_STEP)
+                .min(strip::MAX_PRESENT_LAG)
+        });
+        now.checked_sub(lag).unwrap_or(now)
+    }
 }
 
 #[derive(Default)]
@@ -50,11 +68,12 @@ impl State {
         let mut finished = Vec::new();
         for (workspace, glide) in &mut self.glides {
             glide.frames += 1;
-            if glide.motion.is_settled(now) {
+            let clock = glide.clock(now);
+            if glide.motion.is_settled(clock) {
                 positions.extend(glide.motion.final_positions());
                 finished.push(*workspace);
             } else {
-                positions.extend(glide.motion.positions(now));
+                positions.extend(glide.motion.positions(clock));
             }
         }
         positions.retain(|(window, position)| {
@@ -129,16 +148,19 @@ impl GlidePresenter {
                 .collect();
             state.presenter().begin_session(&windows);
             let workspace = motion.workspace;
-            let (started, frames) = state
+            let (started, frames, lag) = state
                 .glides
                 .get(&workspace)
-                .map_or((Instant::now(), 0), |glide| (glide.started, glide.frames));
+                .map_or((Instant::now(), 0, None), |glide| {
+                    (glide.started, glide.frames, glide.lag)
+                });
             state.glides.insert(
                 workspace,
                 Glide {
                     motion,
                     started,
                     frames,
+                    lag,
                 },
             );
         }
