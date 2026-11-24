@@ -15,10 +15,11 @@ use crate::{
     NavigationTile, ResizeDirection, Settings, WorkspaceId, Workspaces,
     config::{Config, WindowDisposition},
     control::{self, Command as ControlCommand, Request as ControlRequest},
+    deep_link::OpenTarget,
     hotkeys::{DeliveryWatch, HotkeyPlan, Hotkeys},
     live, login_item, macos, permission_guide, status_item,
     swipe::Swipe,
-    termination,
+    termination, url_handler,
 };
 
 /// Timestamped diagnostic line on stderr (redirected to `agent.log` in bundle
@@ -68,6 +69,7 @@ pub use bridge::{
 
 pub struct HostCallbacks {
     pub open_settings: Box<dyn FnMut() -> Result<(), String>>,
+    pub open_target: Box<dyn FnMut(OpenTarget) -> Result<(), String>>,
     pub open_setup: Box<dyn FnMut() -> Result<(), String>>,
     pub save_hud: Box<dyn FnMut(bool) -> Result<(), String>>,
 }
@@ -94,6 +96,21 @@ const APPLICATION_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const ACCESSIBILITY_POLL_INTERVAL: Duration = Duration::from_millis(120);
 const RESTORE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const APPLICATION_ACTIVATION_SETTLE: Duration = Duration::from_millis(50);
+
+// AX creation and app activation can both precede the first on-screen frame.
+const WINDOW_OPENING_SETTLE: Duration = Duration::from_millis(500);
+const WINDOW_OPENING_RECHECK: Duration = Duration::from_millis(40);
+
+fn opening_recheck(
+    now: Instant,
+    until: Option<Instant>,
+    frontmost: Option<&AppInstanceId>,
+    missing: Option<&AppInstanceId>,
+) -> Option<Instant> {
+    let deadline = until?;
+    let next = now + WINDOW_OPENING_RECHECK;
+    (frontmost? == missing? && next <= deadline).then_some(next)
+}
 
 /// How long since the last refresh a retile without an event waits.
 fn fallback_refresh_interval(since_activity: Duration) -> Duration {
@@ -176,6 +193,7 @@ pub(crate) enum Action {
     /// The first-run setup tour finished, so its hold on tiling ends.
     FinishSetup,
     OpenSettings,
+    OpenTarget(OpenTarget),
     OpenSetup,
     OpenAccessibility,
     ToggleHud,
@@ -410,6 +428,9 @@ impl PreparedAgent {
                 "failed to install application termination gate: {error}"
             ));
         }
+        if let Err(error) = url_handler::install(self.actions_sender.clone()) {
+            log_event!("could not install application:openURLs: handler: {error}");
+        }
         if let Err(error) = status_item::install(self.actions_sender.clone()) {
             log_event!("failed to install Spaceman status item: {error}");
             termination::allow_next();
@@ -452,6 +473,7 @@ impl PreparedAgent {
                 bridge: self.bridge,
                 callbacks: HostCallbacks {
                     open_settings: Box::new(|| Ok(())),
+                    open_target: Box::new(|_| Ok(())),
                     open_setup: Box::new(|| Ok(())),
                     save_hud: Box::new(|_| Ok(())),
                 },

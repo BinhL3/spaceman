@@ -1,6 +1,10 @@
 mod affinity;
 mod omission;
+mod readback;
 pub(super) use omission::Omission;
+#[cfg(test)]
+pub(super) use readback::ASYNC_BOUNCE_SETTLE;
+pub(super) use readback::{APPLY_ATTEMPT_LIMIT, AppliedFrame, record_apply_attempt};
 
 use affinity::{FrozenAffinityPolicy, FrozenWindowAffinity};
 
@@ -13,30 +17,6 @@ use crate::journal::PlacementSource;
 /// starting a huddle) and briefly report a partial window list; one such
 /// snapshot must not retire a slot.
 pub(super) const OMISSION_SETTLE: Duration = Duration::from_secs(2);
-/// Consecutive bounced or rejected applications for the same target frame
-/// before Spaceman stops retrying that target (even when rejected frames vary
-/// each cycle), preventing infinite resize-fight flicker loops.
-pub(super) const APPLY_ATTEMPT_LIMIT: u8 = 3;
-
-pub(super) fn record_apply_attempt(
-    attempts: &mut HashMap<crate::PhysicalWindowId, (crate::Rect, u8)>,
-    workspace: WorkspaceId,
-    window: &crate::PhysicalWindowId,
-    target: crate::Rect,
-) {
-    let entry = attempts.entry(window.clone()).or_insert((target, 0));
-    if entry.0 != target {
-        *entry = (target, 0);
-    }
-    let previous = entry.1;
-    entry.1 = entry.1.saturating_add(1);
-    if previous < APPLY_ATTEMPT_LIMIT && entry.1 >= APPLY_ATTEMPT_LIMIT {
-        log_event!(
-            "workspace {workspace}: freezing {window:?} after {} bounced/rejected applications for {target:?}",
-            APPLY_ATTEMPT_LIMIT
-        );
-    }
-}
 
 struct ReconcileDisplayContext<'a> {
     outputs: &'a macos::DisplayOutputs,
@@ -274,10 +254,20 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             self.workspaces.remember_focus(workspace, focused);
         }
         self.record_window_memory(server_frames);
+        // Creation can wake the worker before CG orders the window on screen.
+        // Only a recent create/activation on the main thread enables retries.
+        let missing_frontmost_window = frontmost.filter(|app| {
+            let windows = &affinity_policy.windows;
+            match focused.as_ref().filter(|window| &window.app == app) {
+                Some(window) => !windows.contains_key(window),
+                None => !windows.keys().any(|window| &window.app == app),
+            }
+        });
         self.journal.observation = Some(observation);
         self.persist_workspace_state_if_changed()?;
         let mut status = self.status_for_visible(failed, &visible, &outputs);
         status.close_recheck = close_recheck;
+        status.missing_frontmost_window = missing_frontmost_window;
         Ok(status)
     }
 
@@ -469,7 +459,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         };
         let mut scoped_observation = observation.clone();
         scoped_observation.cycle = ticket.cycle;
-        let settings = Settings::for_output(output);
+        let settings = self.layout_settings(output);
         for app in &mut scoped_observation.applications {
             if let crate::AppObservation::Complete {
                 app: _,
@@ -623,12 +613,12 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         let observed_frames = live::observed_frames(&scoped_observation);
         let filter_unchanged = routes.is_empty();
         let engine = self.workspaces.engine_mut(workspace);
-        engine.fit_minimums(output, &self.minimum_sizes);
+        engine.fit_minimums(&settings, &self.minimum_sizes);
         let mut placements = engine.placements(&settings);
         for placement in &placements {
             engine.record_placement_target(placement.slot, placement.frame);
         }
-        self.apply_fullscreen_layout(workspace, &mut placements, output);
+        self.apply_fullscreen_layout(workspace, &mut placements, &settings);
         self.apply_strip_layout(workspace, &mut placements, output);
         if !scoped_observation.mouse_down {
             for placement in &placements {
@@ -640,9 +630,14 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 };
                 let target = placement.frame;
                 if observed.approximately_equals(target, settings.frame_tolerance) {
-                    self.applied[workspace.index()].remove(window);
-                    self.constrained[workspace.index()].remove(window);
-                    self.apply_attempts[workspace.index()].remove(window);
+                    let settling = self.applied[workspace.index()]
+                        .get(window)
+                        .is_some_and(|applied| applied.is_settling(target));
+                    if !settling {
+                        self.applied[workspace.index()].remove(window);
+                        self.constrained[workspace.index()].remove(window);
+                        self.apply_attempts[workspace.index()].remove(window);
+                    }
                     continue;
                 }
                 if self.constrained[workspace.index()]
@@ -657,7 +652,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 {
                     self.apply_attempts[workspace.index()].remove(window);
                 }
-                if self.applied[workspace.index()].remove(window) == Some(target) {
+                if self.applied[workspace.index()]
+                    .remove(window)
+                    .is_some_and(|applied| applied.target == target)
+                {
                     self.constrained[workspace.index()].insert(window.clone(), (target, observed));
                     record_apply_attempt(
                         &mut self.apply_attempts[workspace.index()],
@@ -718,12 +716,10 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 let target_output = output_for(&self.workspaces, target, outputs);
                 let layout = self.layout_workspace(target, target_output, cancelled);
                 *failed += layout.failed;
+                let settings = self.layout_settings(target_output);
                 update_observed_frames(
                     observation,
-                    &self
-                        .workspaces
-                        .engine(target)
-                        .placements(&Settings::for_output(target_output)),
+                    &self.workspaces.engine(target).placements(&settings),
                 );
             }
         }

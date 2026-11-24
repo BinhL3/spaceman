@@ -144,13 +144,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
     /// fills the display, and a strip shows only the columns in its viewport.
     pub(super) fn shown_placements(&self, resolved: &ResolvedWorkspace) -> Vec<Placement> {
         let (workspace, output) = (resolved.workspace, resolved.output);
-        let mut placements = self
-            .workspaces
-            .engine(workspace)
-            .placements(&Settings::for_output(output));
+        let settings = self.layout_settings(output);
+        let mut placements = self.workspaces.engine(workspace).placements(&settings);
         if self.workspaces.uses_fullscreen_layout(workspace) {
             for placement in &mut placements {
-                placement.frame = output;
+                placement.frame = settings.single();
             }
         }
         if let Some(strip) = self.strip_layout(workspace, output) {

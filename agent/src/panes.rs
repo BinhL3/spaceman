@@ -1,6 +1,7 @@
 //! Settings pane registry and playground scenes.
 
 mod general;
+mod layout;
 mod shortcuts;
 pub(crate) mod workspaces;
 
@@ -18,6 +19,11 @@ static GENERAL_ICON: Icon = Icon {
     name: "spaceman-general",
     view: 16.0,
     body: include_str!("../assets/general.svg"),
+};
+static LAYOUT_ICON: Icon = Icon {
+    name: "spaceman-layout",
+    view: 16.0,
+    body: include_str!("../assets/layout.svg"),
 };
 static RULES_ICON: Icon = Icon {
     name: "spaceman-rules",
@@ -38,6 +44,7 @@ static ACTIVITY_ICON: Icon = Icon {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pane {
     General,
+    Layout,
     Rules,
     Workspaces,
     Shortcuts,
@@ -46,8 +53,9 @@ pub enum Pane {
 }
 
 impl Pane {
-    pub const ALL: [Pane; 6] = [
+    pub const ALL: [Pane; 7] = [
         Pane::General,
+        Pane::Layout,
         Pane::Rules,
         Pane::Workspaces,
         Pane::Shortcuts,
@@ -58,6 +66,7 @@ impl Pane {
     pub const fn key(self) -> &'static str {
         match self {
             Pane::General => "general",
+            Pane::Layout => "layout",
             Pane::Rules => "rules",
             Pane::Workspaces => "workspaces",
             Pane::Shortcuts => "shortcuts",
@@ -69,6 +78,7 @@ impl Pane {
     pub const fn title(self) -> &'static str {
         match self {
             Pane::General => "General",
+            Pane::Layout => "Layout",
             Pane::Rules => "Rules",
             Pane::Workspaces => "Workspaces",
             Pane::Shortcuts => "Shortcuts",
@@ -80,6 +90,7 @@ impl Pane {
     pub const fn icon(self) -> &'static Icon {
         match self {
             Pane::General => &GENERAL_ICON,
+            Pane::Layout => &LAYOUT_ICON,
             Pane::Rules => &RULES_ICON,
             Pane::Workspaces => &WORKSPACES_ICON,
             Pane::Shortcuts => &rune_theme_opencode::icons::KEYBOARD,
@@ -91,6 +102,7 @@ impl Pane {
     pub fn render(self, ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
         match self {
             Pane::General => general::pane(ui, p),
+            Pane::Layout => layout::pane(ui, p),
             Pane::Rules => map::pane(ui, p, layer),
             Pane::Workspaces => workspaces::pane(ui, p),
             Pane::Shortcuts => shortcuts::pane(p),
@@ -103,6 +115,24 @@ impl Pane {
     pub fn from_shortcut(digit: char) -> Option<Pane> {
         let index = digit.to_digit(10)?.checked_sub(1)? as usize;
         Self::ALL.get(index).copied()
+    }
+
+    /// Maps a `spaceman://` deep-link pane to a registered Settings pane.
+    ///
+    /// Returns `None` for panes not registered in this build (What's New) so the
+    /// caller can fall back cleanly while preserving `highlight_lab` /
+    /// `highlight_feature`.
+    pub const fn from_deep_link(pane: spaceman::deep_link::DeepLinkPane) -> Option<Pane> {
+        match pane {
+            spaceman::deep_link::DeepLinkPane::General => Some(Pane::General),
+            spaceman::deep_link::DeepLinkPane::Rules => Some(Pane::Rules),
+            spaceman::deep_link::DeepLinkPane::Workspaces => Some(Pane::Workspaces),
+            spaceman::deep_link::DeepLinkPane::Shortcuts => Some(Pane::Shortcuts),
+            spaceman::deep_link::DeepLinkPane::Activity => Some(Pane::Activity),
+            spaceman::deep_link::DeepLinkPane::Layout => Some(Pane::Layout),
+            spaceman::deep_link::DeepLinkPane::Labs => Some(Pane::Labs),
+            spaceman::deep_link::DeepLinkPane::WhatsNew => None,
+        }
     }
 }
 
@@ -123,6 +153,21 @@ pub(crate) const SCENES: &[Scene] = &[
                 version: "0.3.3".into(),
             };
         }
+    }),
+    ("layout", |ui| reset_fixture(ui, Pane::Layout)),
+    // Gaps, uneven edges for a custom bar, and a width cap that brings in the ultrawide.
+    ("layout-spaced", |ui| {
+        reset_fixture(ui, Pane::Layout);
+        ui.edit(|doc| {
+            doc.set_spacing(spaceman::spacing::Spacing {
+                inner: 10,
+                top: 32,
+                bottom: 8,
+                left: 8,
+                right: 8,
+                single_window_max_width: 1680,
+            });
+        });
     }),
     ("workspaces", |ui| reset_fixture(ui, Pane::Workspaces)),
     // A third monitor: workspace 9 assigned to it, its segment in every row's picker.

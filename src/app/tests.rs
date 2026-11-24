@@ -1,4 +1,5 @@
 mod benchmarks;
+mod cross_display;
 mod dispatch;
 mod float;
 mod focus;
@@ -13,6 +14,7 @@ mod parking;
 mod reconciliation;
 mod reliability;
 mod rules;
+mod spacing;
 mod startup;
 mod strip;
 mod switching;
@@ -57,6 +59,8 @@ struct FakeBackend {
     managed_outcome: Option<macos::ApplyOutcome>,
     /// Fails position writes with this outcome (an app briefly inaccessible).
     position_outcome: Option<macos::ApplyOutcome>,
+    /// Position writes macOS clamps back, leaving the window where it was.
+    refuses_position: Option<fn(crate::Rect) -> bool>,
     /// Widths windows refuse to shrink below, clamped synchronously like AppKit.
     minimum_widths: HashMap<crate::PhysicalWindowId, i32>,
     focus_outcome: Option<bool>,
@@ -187,6 +191,9 @@ impl WorkspaceBackend for FakeBackend {
             .push(BackendCall::SetPosition(window.clone(), target));
         if let Some(outcome) = self.position_outcome {
             return outcome;
+        }
+        if self.refuses_position.is_some_and(|refuses| refuses(target)) {
+            return macos::ApplyOutcome::Unavailable;
         }
         let Some(frame) = self.frames.get_mut(window) else {
             return macos::ApplyOutcome::Gone;

@@ -391,5 +391,6 @@ fn set_place(table: &mut Table, place: Place) {
     }
 }
 
+mod spacing;
 #[cfg(test)]
 mod tests;

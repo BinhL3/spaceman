@@ -23,6 +23,7 @@ pub(crate) fn root_usage(executable: &str) -> String {
             String::new(),
             "Runtime control & diagnostics:".into(),
             format!("  {executable} ctl <command> [args...]"),
+            format!("  {executable} open <url-or-target>"),
             format!("  {executable} displays"),
             format!("  {executable} snapshot"),
             format!("  {executable} hud"),
@@ -66,6 +67,7 @@ pub(crate) fn root(executable: &str) -> String {
             String::new(),
             "Live Agent Control:".into(),
             "  ctl <command> [args...]    Send a command to the running Spaceman agent".into(),
+            "  open <url-or-target>       Open Settings to a spaceman:// deep link or pane".into(),
             "  displays                   List connected displays as JSON".into(),
             "  snapshot                   Capture a dry-run window observation as JSON".into(),
             "  hud                        Stream live workspace state in the terminal".into(),
@@ -100,6 +102,10 @@ pub(crate) fn subcommand(executable: &str, name: &str) -> Option<String> {
         "workspaces" => workspaces_help(executable),
         #[cfg(target_os = "macos")]
         "ctl" => ctl_help(executable),
+        #[cfg(target_os = "macos")]
+        "open" => format!(
+            "Open Spaceman Settings on a specific pane, feature, or Lab via control.sock.\n\nUsage:\n  {executable} open <url-or-target>\n\nExamples:\n  {executable} open spaceman://settings/workspaces\n  {executable} open spaceman://labs/scrolling-strip\n  {executable} open spaceman://features/gaps\n  {executable} open rules\n\nNotes:\n  - Deep links only open Settings and highlight a target; they never mutate config.toml."
+        ),
         "config-check" => format!(
             "Validate a Spaceman configuration file.\n\nUsage:\n  {executable} config-check <config.toml>"
         ),
@@ -157,6 +163,12 @@ pub(crate) fn config_help(executable: &str) -> String {
         "  hud             true | false      Show the Workspace HUD overlay (default: true)",
         "  hud_style       icons | layouts   Workspace HUD drawing style (default: icons)",
         "  update_channel  stable | dev      In-app updater release channel (default: stable)",
+        "  gaps.inner      0-48              Points between tiled windows (default: 0)",
+        "  gaps.top        0-128             Outer padding at the screen's top edge (default: 0;",
+        "  gaps.bottom     0-128               likewise gaps.bottom, gaps.left, gaps.right)",
+        "  gaps.left       0-128",
+        "  gaps.right      0-128",
+        "  single_window_max_width  0 | 320-16384  Center a lone window at this width (default: 0, off)",
         "",
         "Labs keys (experimental, off by default):",
         "  labs.scrolling_strip  true | false  Scrolling Strip layout; toggle per workspace with ⌥⇧S",
@@ -249,6 +261,7 @@ pub(crate) fn ctl_help(executable: &str) -> String {
         "Agent & UI:",
         "  pause | resume             Pause (and restore windows) or resume tiling",
         "  wrong                      Record an anomaly marker in the arrangement journal",
+        "  open <url-or-target>       Open Settings on a spaceman:// link, pane, feature, or Lab",
         "  open-settings              Open the Spaceman Settings window",
         "  open-accessibility         Open Accessibility onboarding / System Settings",
         "  check-for-updates          Trigger a Sparkle update check",

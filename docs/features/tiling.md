@@ -8,6 +8,7 @@ navigate, reorder, nest, resize, and balance them from the keyboard or the point
 ```ts
 Automatic tiling                                        // tile.auto
 ├── New managed window -> joins the last focused tile’s split, or the root without a surviving focus
+│   └── Creation or activation before the first visible frame -> briefly recheck for the foreground window
 ├── Window closes -> its slot retires, siblings reflow
 │   ├── Last app window closes but its surface lingers -> siblings reflow when the app confirms closure
 │   └── App keeps its ordered-out window alive -> slot settles for two seconds
@@ -36,6 +37,12 @@ Size                                                    // tile.size
 
 Axis                                                    // tile.axis
 └── Option+/ / ctl layout -> flip the root split axis (also exits Fullscreen Layout)
+
+Spacing                                                 // tile.spacing
+├── settings.gaps.inner              -> exactly that many points between neighboring tiles, any nesting
+├── settings.gaps.top/bottom/left/right -> outer padding; gives way above a 320×240 tiled area
+└── settings.single_window_max_width -> a lone tile (one tiled window, or Fullscreen Layout) centered
+    at that width when the padded area is wider
 ```
 
 ## How To Get To It (User POV)
@@ -44,6 +51,8 @@ Axis                                                    // tile.axis
 Keyboard: Option+H/J/K/L, Option+Shift+H/J/K/L, Option+`, Option+-, Option+=, Option+/
 Pointer:  drag a managed window (reorder/nest/move display), drag its edge (resize)
 CLI:      spaceman ctl focus | move-direction | resize | balance | layout | retile
+Settings: Settings › Layout -> Between windows, Screen edges (Set each edge), Single-window width
+Config:   spaceman config set gaps.inner|gaps.top|gaps.bottom|gaps.left|gaps.right|single_window_max_width <points>
 ```
 
 Input arriving while the worker is busy queues in order (up to 64); queued input is dropped on
@@ -65,6 +74,7 @@ pause, quit, or hotkey loss.
   cross-display drop; `startup.rs` covers gesture classification and `src/app/input.rs` covers
   queued final gestures.
 - Unit (FakeBackend), `src/app/tests/reconciliation.rs`:
+  `early_open_event_rechecks_until_the_new_window_can_split_its_sibling`,
   `confirmed_last_window_close_reflows_the_sibling_in_the_same_cycle`,
   `uncertain_close_requests_one_early_retry`,
   `recheck_reflows_when_the_ordered_out_surface_disappears`,
@@ -74,6 +84,12 @@ pause, quit, or hotkey loss.
 - Unit (FakeBackend), `src/app/tests/minimums.rs`: a window that refuses its tile width gets a wider
   tile (middle, last, several at once, and observation-cycle cases); a three-window row that cannot fit stacks two neighbors, and a wider display restores the requested row; Fullscreen Layout ignores minimums. `src/layout_tree.rs`:
   `fitting_minimums_reaches_into_nested_splits_and_leaves_impossible_splits_alone`.
+- Spacing, `src/spacing/tests.rs`: outer padding and its 320×240 floor; one tile, two columns and a
+  nested three-tile split with inner gaps and asymmetric padding (no overlaps, exact point totals);
+  equal weights give equal windows; Fullscreen Layout's capped frame; directional focus across gaps;
+  a pointer resize, keyboard resize and balance through gaps. `src/config.rs` and
+  `src/cli/tests.rs` cover parsing, range errors and `spaceman config`;
+  `agent/src/rules/tests.rs` covers Settings › Layout saves that keep comments and restore the file.
 - Fixture replay: `cargo run -- replay fixtures/ghostty-tab-replacement.json` (reconciliation of a
   native-tab replacement, without the runtime).
 - Live harness (not run): `scripts/live-ghostty-tabs.sh` for native-tab slot preservation.
@@ -99,11 +115,15 @@ pause, quit, or hotkey loss.
   same; the window comes back as a new tile at the end of the layout. While nothing on the display
   is observed (another macOS Space is showing), tiles are kept.
 - `balance` has no default hotkey; it is CLI-only.
+- With gaps, a drop that lands in the gap between two tiles misses both and leaves the layout as it
+  was. The Workspace HUD's layout previews stay schematic and ignore spacing.
 - A window that enters macOS native fullscreen (for example browser video) loses its slot after two
   seconds and returns as a new tile at the end of the layout
   ([known defect](fullscreen-layout.md#gotchas)).
-- Floating windows (rules, modal/dialog windows without an enabled fullscreen button, or non-resizable
-  windows) are owned by a workspace (and can be moved between workspaces) but are never tiled or
-  resized.
+- Floating windows (rules, manual Toggle Float, modal/dialog windows without an enabled fullscreen
+  button, or non-resizable windows) are owned by a workspace (and can be moved between workspaces)
+  but are never tiled or resized. A window that already holds a tile keeps it while it temporarily
+  reports non-resizable (such as while showing a window-modal close or save sheet); only a `float`
+  rule or Toggle Float releases a tile.
 - New windows open on the active workspace of the display under the window's center unless matched by
   an explicit `route` rule or startup placement recall.

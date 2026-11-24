@@ -105,6 +105,8 @@ Focus a window on the workspace
 - **Apps take positions at their own rate.** Each app's lane drops frames the app hasn't taken
   yet, so a slow app (TextEdit took about every other frame in the VM) moves at a lower rate, and
   the gaps between columns wobble mid-glide. Every column still lands on its exact position.
+- **No gaps or padding yet.** Settings › Layout's gaps, edge padding and single-window width don't
+  apply to a strip: its columns run edge to edge.
 - **Shared edges.** A column partly in view on the side of another display is kept inside its own
   display, so it sits under its neighbor instead of running off the edge.
 - **A closed column's neighbor appears on the next cycle.** Reconciliation retires the closed window

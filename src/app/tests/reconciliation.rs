@@ -327,6 +327,59 @@ fn app_window(pid: i32, launched_at: u64, window_id: u32) -> crate::PhysicalWind
     }
 }
 
+#[test]
+fn early_open_event_rechecks_until_the_new_window_can_split_its_sibling() {
+    let sibling = app_window(1, 1, 10);
+    let opening = app_window(2, 1, 20);
+    let full = column(0, 2560);
+    let cancelled = AtomicBool::new(false);
+    let mut runtime = runtime(FakeBackend {
+        frames: [(sibling.clone(), full)].into(),
+        observation: Some(apps_observation(&[("com.example.Sibling", &sibling, full)])),
+        frontmost: Some(opening.app.clone()),
+        ..FakeBackend::default()
+    });
+    let start = Instant::now();
+    let until = Some(start + WINDOW_OPENING_SETTLE);
+    let mut now = start;
+    // AX announces creation about 180 ms before CG orders this window in.
+    // No further native event arrives as it becomes observable.
+    while now < start + Duration::from_millis(180) {
+        // Activation can precede AX focus, which itself can precede CG visibility.
+        if now > start {
+            runtime.backend.focused = Some(opening.clone());
+        }
+        let status = runtime.cycle(studio_display(), &cancelled).unwrap();
+        assert_eq!(runtime.workspaces.workspace_of(&opening), None);
+        assert_eq!(runtime.backend.frames[&sibling], full);
+        now = opening_recheck(
+            now,
+            until,
+            Some(&opening.app),
+            status.missing_frontmost_window.as_ref(),
+        )
+        .unwrap();
+    }
+    assert!(now < start + Duration::from_millis(180) + WINDOW_OPENING_RECHECK);
+    runtime.backend.frames.insert(opening.clone(), full);
+    runtime.backend.observation = Some(apps_observation(&[
+        ("com.example.Sibling", &sibling, full),
+        ("com.example.Opening", &opening, full),
+    ]));
+    let status = runtime.cycle(studio_display(), &cancelled).unwrap();
+    assert_eq!(runtime.backend.frames[&sibling].width, 1280);
+    assert_eq!(runtime.backend.frames[&opening].width, 1280);
+    assert!(
+        opening_recheck(
+            now,
+            until,
+            Some(&opening.app),
+            status.missing_frontmost_window.as_ref()
+        )
+        .is_none()
+    );
+}
+
 /// Two apps share a display. The second app disappears from the observation
 /// while Core Graphics still lists its former surface off screen.
 fn ordered_out_pair(
@@ -913,4 +966,83 @@ fn varying_constrained_rejections_freeze_and_clear_on_user_gesture() {
     runtime.cycle(outputs, &cancelled).unwrap();
     assert!(!runtime.apply_attempts[WorkspaceId::ONE.index()].contains_key(&stubborn));
     assert!(!runtime.constrained[WorkspaceId::ONE.index()].contains_key(&stubborn));
+}
+
+#[test]
+fn delayed_async_bounce_after_matching_ticks_freezes_and_clears_on_target_change() {
+    let (main, mini, settings) = (window(10), window(11), window(12));
+    let initial = [
+        (main.clone(), frame(50)),
+        (mini.clone(), frame(350)),
+        (settings.clone(), frame(650)),
+    ];
+    let mut runtime = runtime(FakeBackend {
+        frames: initial.iter().cloned().collect(),
+        observation: Some(observation_for_windows(
+            "com.example.Electron",
+            &settings,
+            &initial,
+        )),
+        ..FakeBackend::default()
+    });
+    let (outputs, cancelled, ws) = (outputs(), AtomicBool::new(false), WorkspaceId::ONE.index());
+
+    // Cycle 1 applies target; two early matching ticks must keep applied armed.
+    runtime.cycle(outputs.clone(), &cancelled).unwrap();
+    let target = runtime.backend.frames[&mini];
+    for _ in 0..2 {
+        runtime.cycle(outputs.clone(), &cancelled).unwrap();
+        assert_eq!(runtime.backend.observed_apply_count, 1);
+        assert!(runtime.applied[ws].contains_key(&mini));
+    }
+
+    // Fixed-height delayed snap-back settles on the first bounce without re-applying.
+    let clamped = crate::Rect {
+        height: 520,
+        ..target
+    };
+    runtime.backend.frames.insert(mini.clone(), clamped);
+    for _ in 0..2 {
+        runtime.cycle(outputs.clone(), &cancelled).unwrap();
+        assert_eq!(runtime.backend.observed_apply_count, 1);
+        assert_eq!(runtime.constrained[ws].get(&mini), Some(&(target, clamped)));
+        assert_eq!(runtime.apply_attempts[ws].get(&mini), Some(&(target, 1)));
+    }
+
+    // Varying-height delayed bounces (each preceded by matching early ticks)
+    // still increment apply_attempts and freeze cleanly at APPLY_ATTEMPT_LIMIT.
+    for height in [560, 480, 600, 440, 640, 420] {
+        runtime
+            .backend
+            .frames
+            .insert(mini.clone(), crate::Rect { height, ..target });
+        let before = runtime.backend.observed_apply_count;
+        runtime.cycle(outputs.clone(), &cancelled).unwrap();
+        if runtime.backend.observed_apply_count > before {
+            assert_eq!(runtime.backend.frames[&mini], target);
+            runtime.cycle(outputs.clone(), &cancelled).unwrap();
+            runtime.cycle(outputs.clone(), &cancelled).unwrap();
+        }
+    }
+    let limit = usize::from(super::super::cycle::APPLY_ATTEMPT_LIMIT);
+    assert_eq!(runtime.backend.observed_apply_count, limit);
+    assert_eq!(
+        runtime.apply_attempts[ws].get(&mini),
+        Some(&(target, super::super::cycle::APPLY_ATTEMPT_LIMIT))
+    );
+    assert!(runtime.constrained[ws].contains_key(&mini));
+
+    // Closing a sibling changes target, clearing the freeze and re-applying cleanly.
+    runtime.backend.frames.remove(&settings);
+    runtime.cycle(outputs.clone(), &cancelled).unwrap();
+    assert_eq!(runtime.backend.observed_apply_count, limit + 1);
+    assert_eq!(runtime.backend.frames[&mini].width, 500);
+    assert_eq!(runtime.backend.frames[&mini].height, 800);
+    assert!(!runtime.apply_attempts[ws].contains_key(&mini));
+    assert!(!runtime.constrained[ws].contains_key(&mini));
+
+    // Once ASYNC_BOUNCE_SETTLE elapses at the matching frame, applied clears cleanly.
+    runtime.applied[ws].get_mut(&mini).unwrap().at = Instant::now() - cycle::ASYNC_BOUNCE_SETTLE;
+    runtime.cycle(outputs, &cancelled).unwrap();
+    assert!(!runtime.applied[ws].contains_key(&mini));
 }
