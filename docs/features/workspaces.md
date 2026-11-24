@@ -126,8 +126,9 @@ Workspace HUD ([settings] hud, on by default)               // ws.hud
 └── Reduce Motion -> the same changes as a short fade, with nothing travelling or scaling
 ```
 
-Hidden windows are **parked**, not minimized: moved so a one-pixel strip remains at a display edge,
-with the original frame persisted to `parked-windows.json` first.
+Hidden windows are **parked**, not minimized: moved past a display's bottom corner so at most a
+one-pixel-wide slice of the title bar, which macOS keeps on screen, remains visible, with the original
+frame persisted to `parked-windows.json` first.
 
 ## How To Get To It (User POV)
 
@@ -210,6 +211,9 @@ on the same letter.
   `frontmost_app_with_a_visible_floating_window_does_not_switch_away`,
   `reconnecting_a_display_keeps_parked_windows_hidden_and_owned`,
   `a_failed_re_park_after_a_display_change_is_retried`,
+  `a_display_change_leaves_a_held_up_parked_window_alone`,
+  `a_display_that_grows_at_the_bottom_re_parks_its_held_up_windows`,
+  `a_failed_re_park_survives_a_second_display_change`,
   `re_parking_a_grown_window_hides_all_of_it`,
   `switching_away_parks_a_window_that_overflows_the_display_edge`,
   `laying_out_a_parked_window_retires_its_stale_recovery_frame`.
@@ -244,6 +248,13 @@ on the same letter.
 - Unit (FakeBackend), `src/app/tests/parking.rs`: parking without minimizing, re-parking windows that
   drift back, honoring windows that keep un-parking (parking exemption, working tree), and keeping
   slots when Accessibility briefly cannot find a hidden window.
+- Unit, `src/geometry.rs`: `parking_leaves_a_single_corner_pixel_on_screen`,
+  `a_window_held_above_its_parking_corner_is_still_parked`,
+  `a_window_held_up_by_its_title_bar_stays_off_a_shorter_neighbor`,
+  `a_window_held_up_stays_off_a_neighbors_menu_bar`, and
+  `a_side_dock_moves_parking_to_the_other_corner`: parking targets a bottom corner, accepts macOS
+  holding the window up by its title bar, and keeps every held-up position off other displays and
+  off menu bars and Docks. How far macOS holds it up is not covered.
 - Unit (FakeBackend), `src/app/tests/reconciliation.rs`:
   `an_app_that_quits_while_hidden_releases_its_tiles_and_recovery_metadata` (an app that quits
   while its windows are parked frees their tiles without the workspace being shown).
@@ -286,6 +297,8 @@ on the same letter.
   that only called it showed the incoming window while keys stayed in the app focus left (issue
   92). Spaceman sets `AXFrontmost` on the incoming app instead. When focusing still fails,
   `agent.log` gets `switch focus failed: workspace <ws> window <id>` (never a title).
+- macOS keeps a parked window's title bar on screen, so a one-pixel-wide slice of it stays at the
+  display's bottom corner: about 32 px tall for a plain title bar, 66 px with a unified toolbar.
 - Some apps (Arc) answer `AXFrontmost` with success and still stay behind the app focus left.
   After focusing, Spaceman polls the frontmost app every 10 ms and repeats the focus every 50 ms,
   at most three times (200 ms bound).

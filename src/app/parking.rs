@@ -21,6 +21,7 @@ pub(super) const REPARK_ATTEMPT_LIMIT: u8 = 3;
 /// Shared per-cycle context for parking decisions.
 struct ParkContext<'a> {
     displays: &'a [crate::Rect],
+    screens: &'a [crate::Rect],
     frontmost: &'a Option<AppInstanceId>,
     server_frames: &'a HashMap<u32, crate::Rect>,
     visible: &'a [ResolvedWorkspace],
@@ -155,11 +156,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return;
         }
         let displays = outputs.frames().collect::<Vec<_>>();
+        let screens = outputs.screens();
         let Some(output) = outputs.displays().iter().find_map(|display| {
-            let parked = crate::geometry::parked_frame(display.frame, &displays, frame);
-            parked
-                .position_approximately_equals(frame, 1)
-                .then_some(display.frame)
+            let parked =
+                crate::geometry::parked_frame_clear_of(display.frame, &displays, &screens, frame);
+            crate::geometry::parked_at(frame, parked, 1).then_some(display.frame)
         }) else {
             return;
         };
@@ -196,9 +197,11 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             visible.iter().map(|resolved| resolved.workspace).collect();
         let inactive = self.workspaces.inactive_windows_except(&visible_workspaces);
         let displays = outputs.frames().collect::<Vec<_>>();
+        let screens = outputs.screens();
         let frontmost = self.backend.frontmost_application();
         let context = ParkContext {
             displays: &displays,
+            screens: &screens,
             frontmost: &frontmost,
             server_frames,
             visible,
@@ -262,7 +265,8 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 continue;
             }
             let park_output = Self::display_for_frame(frame, &displays).unwrap_or(output);
-            let target = crate::geometry::parked_frame(park_output, &displays, frame);
+            let target =
+                crate::geometry::parked_frame_clear_of(park_output, &displays, &screens, frame);
             candidates.push((workspace, window, frame, target));
         }
         if candidates.is_empty() {
@@ -289,7 +293,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
                 workspace,
                 frame
             );
-            let mut outcome = self.backend.set_position(&window, target);
+            let mut outcome = self.backend.set_parked_position(&window, target);
             if outcome == macos::ApplyOutcome::Gone && !self.confirm_gone(&window) {
                 outcome = macos::ApplyOutcome::Unavailable;
             }
@@ -389,14 +393,19 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
         }
         // Park by the size the window has now; the recovery frame's may be stale.
         let park_output = Self::display_for_frame(server, context.displays).unwrap_or(output);
-        let target = crate::geometry::parked_frame(park_output, context.displays, server);
+        let target = crate::geometry::parked_frame_clear_of(
+            park_output,
+            context.displays,
+            context.screens,
+            server,
+        );
         log_event!(
             "re-park: {:?} drifted back on-screen to {:?}",
             window,
             server
         );
         if matches!(
-            self.backend.set_position(window, target),
+            self.backend.set_parked_position(window, target),
             macos::ApplyOutcome::Applied
         ) {
             // Only a confirmed park write that the app later undoes proves the
@@ -626,8 +635,13 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             height: frame.height.max(ax_frame.height),
             ..frame
         };
-        let parked = crate::geometry::parked_frame(park_output, &displays, park_size);
-        let outcome = self.backend.set_position(window, parked);
+        let parked = crate::geometry::parked_frame_clear_of(
+            park_output,
+            &displays,
+            &outputs.screens(),
+            park_size,
+        );
+        let outcome = self.backend.set_parked_position(window, parked);
         log_event!("park: {:?} from {:?} ({:?})", window, recovery, outcome);
         if matches!(outcome, macos::ApplyOutcome::Applied) {
             self.recently_parked.insert(window.clone(), Instant::now());
