@@ -29,8 +29,13 @@ next one, as with macOS Spaces. Spaceman only listens to the trackpad, so macOS 
 same swipe: set "Swipe between full-screen applications" to four fingers or off in Trackpad
 settings. Four-finger swipes and vertical swipes are left to macOS.
 
+Every shortcut above can be rebound, unbound, or replaced in the config file's `[shortcuts]` table;
+see [Configuration › Shortcuts](configuration.md#shortcuts). The table lists the built-in defaults.
+
 Named workspace shortcuts are registered only when referenced by config. If a configured letter
-overlaps a built-in shortcut, the workspace shortcut takes precedence.
+overlaps a built-in shortcut, the workspace shortcut takes precedence. A `[shortcuts]` binding claims
+its chord before both, so binding `alt+h` replaces the built-in Focus Left and a named workspace H's
+switch shortcut too, and whichever was skipped is logged in `agent.log`.
 
 Spaceman remembers the last-focused logical tile in each workspace and restores that focus when the
 workspace becomes active again. Pressing an already-active workspace shortcut preserves the current
