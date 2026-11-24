@@ -36,6 +36,7 @@ enum BackendCall {
     Apply(crate::PhysicalWindowId, crate::Rect),
     Raise(crate::PhysicalWindowId),
     Focus(crate::PhysicalWindowId),
+    WarpPointer((i32, i32)),
 }
 
 #[derive(Default)]
@@ -81,6 +82,8 @@ struct FakeBackend {
     persisted_monitors: Vec<(WorkspaceId, DisplaySelector)>,
     /// Strip cameras glide (as with the real main thread) instead of jumping.
     animate_strip: bool,
+    pointer: Option<(i32, i32)>,
+    mouse_down: bool,
 }
 
 impl WorkspaceBackend for FakeBackend {
@@ -235,6 +238,23 @@ impl WorkspaceBackend for FakeBackend {
         }
         self.focused = Some(window.clone());
         self.frontmost = Some(window.app.clone());
+        true
+    }
+
+    fn pointer_location(&mut self) -> Option<(i32, i32)> {
+        self.pointer
+    }
+
+    fn mouse_down(&mut self) -> bool {
+        self.mouse_down
+    }
+
+    fn warp_pointer(&mut self, point: (i32, i32)) -> bool {
+        if self.mouse_down {
+            return false;
+        }
+        self.calls.push(BackendCall::WarpPointer(point));
+        self.pointer = Some(point);
         true
     }
 

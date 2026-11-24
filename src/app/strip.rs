@@ -656,7 +656,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             return Ok(status);
         }
         self.strip_views.focus_on_settle(workspace, None);
-        match self.focus_tile(Some(origin.clone()), &target) {
+        match self.focus_tile(Some(origin.clone()), &target, outputs) {
             Ok(()) => Ok(status),
             // An app busy with the glide's writes can miss a focus; try again once it ends.
             Err(error) if self.strip_in_motion(workspace) => {

@@ -410,7 +410,7 @@ impl<B: WorkspaceBackend> WorkspaceRuntime<B> {
             // Unless focus went somewhere else meanwhile (a click, Command-Tab).
             if let Some(target) =
                 focus.filter(|target| self.current_focus().as_ref() == Some(target))
-                && let Err(error) = self.focus_tile(None, &target)
+                && let Err(error) = self.focus_tile(None, &target, &outputs)
             {
                 log_event!("workspace {workspace}: strip focus after glide: {error}");
             }

@@ -35,6 +35,7 @@ version = 1
 hud = true                            # optional (default: true); non-activating Workspace HUD
 hud_style = "icons"                   # optional (default: "icons"); or "layouts"
 update_channel = "stable"             # optional (default: "stable"); or "dev", a build of every merge
+mouse_follows_focus = "off"           # optional (default: "off"); or "display", "window"
 single_window_max_width = 0           # optional (default: 0, off); or 320 through 16384 points
 
 [settings.gaps]                       # optional; every key defaults to 0
@@ -114,8 +115,10 @@ ultrawide displays, where one full-width window is hard to read.
 Out-of-range values are rejected with a message naming the key and its range, like any other invalid
 configuration. Every key defaults to `0`, so a file without them tiles exactly as before.
 
-Settings › Layout edits the same keys over a live miniature of the result, and `spaceman config`
-reads and writes them by dotted key:
+Settings › Layout edits the same keys over a live miniature of the result. One **Window gaps**
+slider sets `inner` and all four edges together; **Customize separately** (open on its own when the
+file's gaps differ) sets between windows, all screen edges, and each edge on its own.
+`spaceman config` reads and writes them by dotted key:
 
 ```sh
 spaceman config set gaps.inner 8
@@ -253,9 +256,10 @@ normal recovery data.
 ## Applying Changes
 
 Edits saved in Spaceman Settings or in an external editor take effect automatically: rule changes,
-workspace display assignments, `settings.hud`, `settings.hud_style`, `settings.gaps`,
-`settings.single_window_max_width`, and `[labs]` (including the Scrolling Strip's shortcut) reload
-without restarting (Settings › Layout retiles at once; an external edit applies on the next retile);
+workspace display assignments, `settings.hud`, `settings.hud_style`,
+`settings.mouse_follows_focus`, `settings.gaps`, `settings.single_window_max_width`, and `[labs]`
+(including the Scrolling Strip's shortcut) reload without restarting (Settings › Layout retiles at
+once; an external edit applies on the next retile);
 `settings.update_channel` applies at the next update check. Global shortcuts for a
 newly added named workspace letter (`Option+A` ... `Option+Z`) register on the next app start:
 
